@@ -52,6 +52,17 @@ export class Transfers {
     this.pump()
   }
 
+  /** The image was deleted: stop downloading or serving it. */
+  cancel(id: string): void {
+    this.queue = this.queue.filter((x) => x !== id)
+    this.uploads.delete(id) // a running upload sees this and stops
+    if (this.current === id) {
+      clearTimeout(this.stallTimer)
+      this.current = null
+      this.pump()
+    }
+  }
+
   /** User pressed Retry on a failed image. */
   retry(id: string): void {
     this.attempts.delete(id)

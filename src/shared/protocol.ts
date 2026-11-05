@@ -34,10 +34,11 @@ export const PROTOCOL_VERSION = 6
 /** Oldest protocol this app still talks to. */
 export const MIN_PROTOCOL = 6
 /** Features this app supports (announced in hello). */
-export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover'] as const
+export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover', 'replies'] as const
 /** Message kinds that act on another message (they carry `ref`). */
 export const EVENT_KINDS = ['edit', 'delete', 'react'] as const
-const MAX_EVENT_DATA = 2_000
+/** Event payload: an edit carries a whole message's text. */
+const MAX_EVENT_DATA = 8000
 /** Largest avatar image accepted (already a 256 px square, so this is generous). */
 export const MAX_AVATAR_BYTES = 96 * 1024
 export const DEFAULT_PORT = 47821
@@ -86,7 +87,7 @@ export type Frame =
   | { t: 'profile'; name: string }
   /**
    * An authored item in the per-author sequence. kind 'message' (default) is a chat message —
-   * `body` may be empty when it carries an image. Other kinds are events on message `ref`
+   * `body` may be empty when it carries an image, or when the message was deleted. Other kinds are events on message `ref`
    * (edit / delete / react) with their payload in `data`.
    */
   | {
@@ -100,6 +101,8 @@ export type Frame =
       kind?: string
       ref?: string
       data?: string
+      /** The message this one answers. */
+      reply?: string
     }
   /** "Send me the full image of message `id`, starting at byte `offset`." */
   | { t: 'blob-req'; id: string; offset: number }
@@ -179,8 +182,7 @@ function lowercaseIds(f: Frame): Frame {
     case 'hello':
       return { ...f, id: lc(f.id) }
     case 'msg':
-      if (f.ref) return { ...f, id: lc(f.id), author: lc(f.author), ref: lc(f.ref) }
-      return { ...f, id: lc(f.id), author: lc(f.author) }
+      return { ...f, id: lc(f.id), author: lc(f.author), ...(f.ref ? { ref: lc(f.ref) } : {}), ...(f.reply ? { reply: lc(f.reply) } : {}) }
     case 'ack':
       return { ...f, ids: f.ids.map(lc) }
     case 'read':
@@ -261,12 +263,14 @@ function parseRaw(raw: string): Frame | null {
       // Events act on another message; a chat message needs text or an image. Unknown kinds
       // from a newer Hush are accepted as long as they're well-formed (forward compatibility).
       if ((EVENT_KINDS as readonly string[]).includes(kind) && f.ref === undefined) return null
+      // A reply points at the message it answers (chat messages only).
+      if (f.reply !== undefined && (!isUuid(f.reply) || kind !== 'message' || f.ref !== undefined)) return null
       const ok =
         isUuid(f.id) &&
         isUuid(f.author) &&
         isSeq(f.seq) &&
+        // An empty chat message is one that was deleted (its text and picture were wiped).
         typeof f.body === 'string' &&
-        (kind !== 'message' || f.body.length > 0 || image !== undefined) &&
         f.body.length <= MAX_TEXT_LENGTH &&
         Number.isSafeInteger(f.sentAt) &&
         (f.sentAt as number) > 0
@@ -276,6 +280,7 @@ function parseRaw(raw: string): Frame | null {
       if (kind !== 'message') msg.kind = kind
       if (f.ref !== undefined) msg.ref = f.ref as string
       if (f.data !== undefined) msg.data = f.data as string
+      if (f.reply !== undefined) msg.reply = f.reply as string
       return msg
     }
     case 'blob-req':

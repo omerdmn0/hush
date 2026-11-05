@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, type ReactNode } from 'react'
-import { Virtuoso } from 'react-virtuoso'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import type { ChatMessage } from '../../../../shared/types'
-import { CircleCheck, Phone, PhoneIncoming, PhoneMissed, PhoneOff, PhoneOutgoing } from 'lucide-react'
+import { ArrowDown, CircleCheck, Phone, PhoneIncoming, PhoneMissed, PhoneOff, PhoneOutgoing } from 'lucide-react'
 import type { CallRecord } from '../../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { callLogText } from '@/lib/callLogic'
@@ -11,6 +11,7 @@ import { formatTime } from '@/lib/format'
 import { buildTimeline, lastQueuedId, type DeliveryNotice, type TimelineItem } from '@/lib/timeline'
 import { Avatar } from '@/components/common'
 import { MessageGroup, type ImageActions } from './MessageGroup'
+import type { MessageActions } from './MessageActions'
 
 const Column = ({ children }: { children: ReactNode }): ReactNode => (
   <div className="mx-auto max-w-[760px] px-6">{children}</div>
@@ -30,7 +31,9 @@ export function MessageList({
   hasMore,
   loadingOlder,
   onLoadOlder,
-  images
+  images,
+  actions,
+  newMarkerId
 }: {
   messages: ChatMessage[]
   notices: DeliveryNotice[]
@@ -42,8 +45,30 @@ export function MessageList({
   loadingOlder: boolean
   onLoadOlder: () => void
   images: ImageActions
+  /** Message actions from the app; jumping to a quoted message is handled here. */
+  actions: Omit<MessageActions, 'onJump' | 'highlightId'>
+  /** First message that arrived while you were away ("New messages" line). */
+  newMarkerId: string | null
 }): ReactNode {
-  const items = useMemo(() => buildTimeline(messages, Date.now(), notices, calls), [messages, notices, calls])
+  const items = useMemo(() => buildTimeline(messages, Date.now(), notices, calls, newMarkerId), [messages, notices, calls, newMarkerId])
+  const list = useRef<VirtuosoHandle>(null)
+  const itemsRef = useRef(items)
+  itemsRef.current = items
+
+  // Jump to the message a reply quotes, and flash it.
+  const [highlightId, setHighlightId] = useState<string | null>(null)
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(highlightTimer.current), [])
+  const jumpTo = useCallback((id: string) => {
+    const index = itemsRef.current.findIndex((it) => it.kind === 'group' && it.messages.some((m) => m.id === id))
+    if (index < 0) return
+    stick.current = false
+    list.current?.scrollToIndex({ index, align: 'center', behavior: 'smooth' })
+    setHighlightId(id)
+    clearTimeout(highlightTimer.current)
+    highlightTimer.current = setTimeout(() => setHighlightId(null), 1600)
+  }, [])
+  const allActions: MessageActions = useMemo(() => ({ ...actions, onJump: jumpTo, highlightId }), [actions, jumpTo, highlightId])
 
   // Virtuoso keeps the scroll position on prepend when firstItemIndex drops by exactly the
   // number of prepended items. Recomputed idempotently during render (StrictMode-safe).
@@ -64,9 +89,22 @@ export function MessageList({
     const el = scroller.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
   }
+  // Scrolled up: a "Jump to latest" button counts what arrived since.
+  const [awayFrom, setAwayFrom] = useState<string | null>(null)
+  const lastId = useRef<string | undefined>(undefined)
+  lastId.current = messages[messages.length - 1]?.id
   const onScroll = (): void => {
     const el = scroller.current
-    if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+    if (!el) return
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+    const away = el.scrollHeight - el.scrollTop - el.clientHeight > 300
+    setAwayFrom((prev) => (away ? (prev ?? lastId.current ?? null) : null))
+  }
+  const newSince = awayFrom ? messages.length - 1 - messages.findIndex((m) => m.id === awayFrom) : 0
+  const jumpToLatest = (): void => {
+    stick.current = true
+    setAwayFrom(null)
+    list.current?.scrollToIndex({ index: items.length - 1, align: 'end', behavior: 'smooth' })
   }
   useEffect(() => {
     if (typing) pinToBottom()
@@ -82,8 +120,9 @@ export function MessageList({
   return (
     // role=log without live announcements: virtualization adds/removes rows while scrolling,
     // so new-message announcements go through the app's single status region instead.
-    <div ref={wrapper} role="log" aria-live="off" aria-label={`Messages with ${peerName}`} className="min-h-0 flex-1">
+    <div ref={wrapper} role="log" aria-live="off" aria-label={`Messages with ${peerName}`} className="relative min-h-0 flex-1">
       <Virtuoso<TimelineItem, ListContext>
+        ref={list}
         className="h-full"
         scrollerRef={(el) => {
           scroller.current?.removeEventListener('scroll', onScroll)
@@ -109,13 +148,30 @@ export function MessageList({
               <NoticeLine notice={item.notice} peerName={peerName} />
             ) : item.kind === 'call' ? (
               <CallLine call={item.call} peerName={peerName} callAction={callAction} />
+            ) : item.kind === 'new' ? (
+              <div className="rule pt-[18px] [--rule-c:color-mix(in_srgb,var(--magenta)_55%,transparent)]">
+                <span className="label text-magenta">New messages</span>
+              </div>
             ) : (
-              <MessageGroup from={item.from} messages={item.messages} peerName={peerName} queuedNoteAfter={noteAfter} images={images} />
+              <MessageGroup
+                from={item.from}
+                messages={item.messages}
+                peerName={peerName}
+                queuedNoteAfter={noteAfter}
+                images={images}
+                actions={allActions}
+              />
             )}
           </Column>
         )}
         components={COMPONENTS}
       />
+      {awayFrom !== null && (
+        <Button variant="secondary" size="sm" onClick={jumpToLatest} className="absolute right-6 bottom-3 z-20 shadow-[0_4px_16px_rgba(0,0,0,.5)]">
+          <ArrowDown />
+          {newSince > 0 ? `${newSince} new · Jump to latest` : 'Jump to latest'}
+        </Button>
+      )}
     </div>
   )
 }

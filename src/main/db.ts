@@ -25,6 +25,8 @@ export interface StoredMessage {
   ref?: string | null
   /** Event payload (e.g. new text, emoji). */
   data?: string | null
+  /** The message this one answers (chat messages only). */
+  replyTo?: string | null
 }
 
 type Migration = (db: Database.Database) => void
@@ -90,13 +92,19 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
       ALTER TABLE messages ADD COLUMN ref TEXT;
       ALTER TABLE messages ADD COLUMN data TEXT;
-      CREATE INDEX messages_by_ref ON messages (ref) WHERE ref IS NOT NULL;`)
+      CREATE INDEX messages_by_ref ON messages (ref) WHERE ref IS NOT NULL;`),
+
+  // v6 — replies, and "delete for me" (hidden here only; never synced).
+  (db) =>
+    db.exec(`
+      ALTER TABLE messages ADD COLUMN reply_to TEXT;
+      ALTER TABLE messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;`)
 ]
 
 // Status only ever moves forward, so replayed or out-of-order receipts are harmless.
 const RANK = `CASE status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 END`
 const RANK_OF: Record<MessageStatus, number> = { queued: 0, sent: 1, delivered: 2, read: 3 }
-const COLUMNS = 'id, author_id, seq, body, sent_at, status, image, kind, ref, data'
+const COLUMNS = 'id, author_id, seq, body, sent_at, status, image, kind, ref, data, reply_to'
 
 interface Row {
   id: string
@@ -109,6 +117,7 @@ interface Row {
   kind: string
   ref: string | null
   data: string | null
+  reply_to: string | null
 }
 
 export class HushDb {
@@ -213,14 +222,15 @@ export class HushDb {
     sentAt: number,
     image: ImageMeta | null = null,
     id: string = randomUUID(),
-    event: { kind: string; ref: string; data: string | null } | null = null
+    event: { kind: string; ref: string; data: string | null } | null = null,
+    replyTo: string | null = null
   ): StoredMessage {
     return this.db.transaction(() => {
       const { top } = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ?').get(authorId) as { top: number }
       // After recovering history from the peer, numbering continues after the old messages
       // even before they have all arrived.
       const next = Math.max(top, this.getSetting<number>(`seqFloor:${authorId}`) ?? 0) + 1
-      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image, ...(event ?? {}) }
+      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image, replyTo, ...(event ?? {}) }
       this.insertMessage(m)
       return m
     })()
@@ -234,8 +244,8 @@ export class HushDb {
   insertMessage(m: StoredMessage, receivedAt: number = Date.now()): boolean {
     const r = this.db
       .prepare(
-        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image, kind, ref, data)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image, kind, ref, data, reply_to)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
       )
       .run(
         m.id,
@@ -248,7 +258,8 @@ export class HushDb {
         m.image ? JSON.stringify(m.image) : null,
         m.kind ?? 'message',
         m.ref ?? null,
-        m.data == null ? null : this.cipher.seal(m.data)
+        m.data == null ? null : this.cipher.seal(m.data),
+        m.replyTo ?? null
       )
     if (r.changes === 1) return true
     if (m.seq !== null) {
@@ -260,6 +271,46 @@ export class HushDb {
   getMessage(id: string): StoredMessage | undefined {
     const row = this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE id = ?`).get(id) as Row | undefined
     return row && this.toStored(row)
+  }
+
+  /** Several messages by id (missing ones are left out); "deleted for me" ones only if asked. */
+  getMessages(ids: readonly string[], includeHidden = false): StoredMessage[] {
+    return this.inChunks(ids, (part, marks) =>
+      this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE id IN (${marks})${includeHidden ? '' : ' AND hidden = 0'}`).all(...part) as Row[]
+    ).map((r) => this.toStored(r))
+  }
+
+  /** All events (edit / delete / react) acting on these messages. */
+  eventsFor(ids: readonly string[]): StoredMessage[] {
+    return this.inChunks(ids, (part, marks) =>
+      this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IN (${marks})`).all(...part) as Row[]
+    ).map((r) => this.toStored(r))
+  }
+
+  private inChunks(ids: readonly string[], query: (part: string[], marks: string) => Row[]): Row[] {
+    const out: Row[] = []
+    for (let i = 0; i < ids.length; i += 500) {
+      const part = ids.slice(i, i + 500)
+      out.push(...query(part, part.map(() => '?').join(',')))
+    }
+    return out
+  }
+
+  /**
+   * Erases a message's content for good (deleted for everyone, or for me): its text, its picture
+   * metadata, and the text of any edits. The row stays, so sequence numbers and sync still work.
+   */
+  wipe(id: string): void {
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE messages SET body = '', image = NULL WHERE id = ?`).run(id)
+      this.db.prepare(`UPDATE messages SET data = '' WHERE ref = ? AND kind = 'edit'`).run(id)
+    })()
+  }
+
+  /** "Delete for me": hidden on this computer only, and its content erased here. */
+  hide(id: string): void {
+    this.wipe(id)
+    this.db.prepare('UPDATE messages SET hidden = 1 WHERE id = ?').run(id)
   }
 
   /**
@@ -353,7 +404,7 @@ export class HushDb {
 
   /** Messages from the other person not yet seen on this computer. */
   unreadCount(selfId: string): number {
-    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE author_id <> ? AND status <> 'read' AND ref IS NULL`).get(selfId) as { n: number }
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE author_id <> ? AND status <> 'read' AND ref IS NULL AND hidden = 0`).get(selfId) as { n: number }
     return row.n
   }
 
@@ -414,11 +465,11 @@ export class HushDb {
         ? this.db
             .prepare(
               `SELECT ${COLUMNS} FROM messages
-               WHERE ref IS NULL AND (sent_at < ? OR (sent_at = ? AND id < ?))
+               WHERE ref IS NULL AND hidden = 0 AND (sent_at < ? OR (sent_at = ? AND id < ?))
                ORDER BY sent_at DESC, id DESC LIMIT ?`
             )
             .all(before.sentAt, before.sentAt, before.id, limit + 1)
-        : this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IS NULL ORDER BY sent_at DESC, id DESC LIMIT ?`).all(limit + 1)
+        : this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IS NULL AND hidden = 0 ORDER BY sent_at DESC, id DESC LIMIT ?`).all(limit + 1)
     ) as Row[]
     const hasMore = rows.length > limit
     return { rows: rows.slice(0, limit).reverse().map((r) => this.toStored(r)), hasMore }
@@ -436,7 +487,8 @@ function toStored(r: Row, open: (s: string) => string): StoredMessage {
     image: r.image ? (JSON.parse(r.image) as ImageMeta) : null,
     kind: r.kind,
     ref: r.ref,
-    data: r.data === null ? null : open(r.data)
+    data: r.data === null ? null : open(r.data),
+    replyTo: r.reply_to
   }
 }
 
@@ -451,6 +503,8 @@ export function toChatMessage(m: StoredMessage, selfId: string, imageReady: (id:
   if (m.kind && m.kind !== 'message') {
     msg.text = ''
     msg.unsupported = true
+  } else if (m.body === '' && !m.image) {
+    msg.deleted = true // its content was wiped
   }
   return msg
 }

@@ -9,7 +9,8 @@ import { CircleCheck, ImagePlus } from 'lucide-react'
 import { CallBar } from '@/components/chat/CallBar'
 import { IncomingCall } from '@/components/chat/IncomingCall'
 import { deliveredText, MessageList } from '@/components/chat/MessageList'
-import { Composer, type ComposerHandle } from '@/components/chat/Composer'
+import { Composer, type ComposerHandle, type ComposerMode } from '@/components/chat/Composer'
+import { DeleteDialog, type MessageActions } from '@/components/chat/MessageActions'
 import { Lightbox } from '@/components/chat/Lightbox'
 import type { ImageActions } from '@/components/chat/MessageGroup'
 import { EmptyChat, FirstRun } from '@/components/chat/EmptyStates'
@@ -107,12 +108,52 @@ export default function App(): ReactNode {
     onCall: () => void call.start()
   }
 
-  // Read receipts: mark their messages read while the chat is actually on screen.
+  // Read receipts: mark their messages read while the chat is actually on screen. Coming back
+  // to the chat (or opening Hush) with unread messages puts a "New messages" line above them.
+  const [newMarker, setNewMarker] = useState<string | null>(null)
+  const wasActive = useRef(false)
+  const loaded = snapshot !== null
   useEffect(() => {
-    if (!windowActive || screen !== 'chat') return
+    if (!loaded) return
+    if (!windowActive || screen !== 'chat') {
+      wasActive.current = false
+      return
+    }
     const unread = messages.filter((m) => m.from === 'peer' && m.status !== 'read').map((m) => m.id)
+    if (!wasActive.current) {
+      wasActive.current = true
+      setNewMarker(unread[0] ?? null)
+    }
     if (unread.length) markRead(unread)
-  }, [messages, windowActive, screen, markRead])
+  }, [loaded, messages, windowActive, screen, markRead])
+
+  // Reply / edit / delete / react
+  const [composerMode, setComposerMode] = useState<ComposerMode | null>(null)
+  const [deleting, setDeleting] = useState<ChatMessage | null>(null)
+  const canWrite = !!snapshot && snapshot.pairing.status === 'paired' && !snapshot.peer.catchingUp
+  const messageActions: Omit<MessageActions, 'onJump' | 'highlightId'> = useMemo(
+    () => ({
+      onReply: (m) => setComposerMode({ kind: 'reply', message: m }),
+      onEdit: (m) => setComposerMode({ kind: 'edit', message: m }),
+      onDelete: (m) => setDeleting(m),
+      onReact: (m, emoji, on) => void window.hush.react(m.id, emoji, on).catch(() => {}),
+      canWrite
+    }),
+    [canWrite]
+  )
+  const editLast = (): void => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.from === 'me' && !m.deleted && !m.unsupported) return setComposerMode({ kind: 'edit', message: m })
+    }
+  }
+  const send = useCallback(
+    async (text: string, replyTo?: string) => {
+      setNewMarker(null)
+      await hush.send(text, replyTo)
+    },
+    [hush.send]
+  )
 
   const openSettings = (section: SectionId = 'profile'): void => {
     setSettingsSection(section)
@@ -222,6 +263,8 @@ export default function App(): ReactNode {
                 loadingOlder={hush.loadingOlder}
                 onLoadOlder={hush.loadOlder}
                 images={imageActions}
+                actions={messageActions}
+                newMarkerId={newMarker}
               />
             )}
             {hush.flush && peer && (
@@ -237,8 +280,12 @@ export default function App(): ReactNode {
                     ? 'Pair first — exchange the codes above'
                     : `Backup restored — you can write once ${peer.name} is online and Hush has caught up`
               }
-              onSend={hush.send}
+              onSend={send}
               onSendImage={hush.sendImage}
+              mode={composerMode}
+              onCancelMode={() => setComposerMode(null)}
+              onEdit={(id, text) => window.hush.editMessage(id, text)}
+              onEditLast={editLast}
               onTyping={(on) => window.hush.setTyping(on)}
               inputRef={composer}
               handleRef={composerHandle}
@@ -247,6 +294,7 @@ export default function App(): ReactNode {
           </main>
         </>
       )}
+      <DeleteDialog message={deleting} peerName={peer?.name ?? 'Peer'} onClose={() => setDeleting(null)} />
       <QuitDialog open={quitOpen} onOpenChange={setQuitOpen} inCall={call.busy} peerName={peer?.name ?? 'Peer'} />
       <IncomingCall
         open={callView.phase === 'incoming'}

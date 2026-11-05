@@ -141,7 +141,7 @@ describe('migration from stage b (v1)', () => {
     raw.close()
 
     const migrated = new HushDb(file)
-    expect(migrated.version).toBe(5)
+    expect(migrated.version).toBe(6)
     expect(migrated.getMessage(ids.mineEarly)?.seq).toBe(1)
     expect(migrated.getMessage(ids.mineLate)?.seq).toBe(2)
     expect(migrated.getMessage(ids.theirs)?.seq).toBeNull()
@@ -232,7 +232,7 @@ describe('migration from stage g (v4: calls, no events yet)', () => {
     raw.close()
 
     const db = new HushDb(file)
-    expect(db.version).toBe(5)
+    expect(db.version).toBe(6)
     expect(db.listCalls().map((c) => c.id)).toEqual([callId])
     expect(db.getMessage(msgId)?.body).toBe('from stage g')
     expect(db.createOwnMessage(ME, '', 300, null, undefined, { kind: 'edit', ref: msgId, data: 'edited' }).seq).toBe(2)

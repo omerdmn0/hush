@@ -35,7 +35,12 @@ describe('parseFrame', () => {
     expect(parseFrame('null')).toBeNull()
     expect(parseFrame(j({ t: 'unknown' }))).toBeNull()
     expect(parseFrame(j({ t: 'msg', id: 'nope', author: B, seq: 1, body: 'x', sentAt: 1 }))).toBeNull()
-    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1 }))).toBeNull()
+    // Empty = a deleted message (its text and picture were wiped).
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1 }))).toMatchObject({ body: '' })
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: 'answer', sentAt: 1, reply: A.toUpperCase() }))).toMatchObject({ reply: A })
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: 'x', sentAt: 1, reply: 'nope' }))).toBeNull()
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1, kind: 'edit', ref: A, data: 'x', reply: A }))).toBeNull()
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1, kind: 'edit', ref: A, data: 'x'.repeat(8000) }))).not.toBeNull()
     expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: 'x', sentAt: -5 }))).toBeNull()
     expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 0, body: 'x', sentAt: 1 }))).toBeNull()
     expect(parseFrame(j({ t: 'msg', id: A, author: B, body: 'x', sentAt: 1 }))).toBeNull()
@@ -71,7 +76,6 @@ describe('images', () => {
     expect(bad({ ...meta, sha256: 'xyz', thumb: 'AA==' })).toBeNull()
     expect(bad({ ...meta, thumb: 'not base64!' })).toBeNull()
     expect(bad({ ...meta })).toBeNull() // preview required
-    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1 }))).toBeNull() // empty without image
   })
   it('validates blob requests', () => {
     expect(parseFrame(j({ t: 'blob-req', id: A, offset: 131072 }))).toEqual({ t: 'blob-req', id: A, offset: 131072 })

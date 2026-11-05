@@ -69,7 +69,27 @@ export interface ChatMessage {
   image?: ChatImage
   /** Sent by a newer Hush in a form this version can't show ("update Hush to see this"). */
   unsupported?: boolean
+  /** When it was last edited (text is the edited version). */
+  editedAt?: number
+  /** Deleted for everyone by its author: text and picture are gone. */
+  deleted?: boolean
+  reactions?: Reaction[]
+  /** The message this one answers. */
+  replyTo?: ReplyPreview
 }
+
+/** One emoji under a message: who of the two of you added it. */
+export interface Reaction {
+  emoji: string
+  mine: boolean
+  theirs: boolean
+}
+
+/** What a reply shows of the message it answers. */
+export type ReplyPreview =
+  | { id: string; missing: false; from: 'me' | 'peer'; text: string; hasImage: boolean; deleted: boolean }
+  /** Not on this computer (e.g. deleted for me). */
+  | { id: string; missing: true }
 
 /** Position in history used to page backwards (the oldest message currently loaded). */
 export interface HistoryCursor {
@@ -223,8 +243,17 @@ export interface HushApi {
   getSnapshot(): Promise<Snapshot>
   /** Newest-last page of history; pass the oldest loaded message to page backwards. */
   listMessages(before?: HistoryCursor, limit?: number): Promise<{ messages: ChatMessage[]; hasMore: boolean }>
-  sendMessage(text: string): Promise<ChatMessage>
-  sendImage(image: OutgoingImage, caption: string): Promise<ChatMessage>
+  /** `replyTo`: the message this one answers. */
+  sendMessage(text: string, replyTo?: string): Promise<ChatMessage>
+  sendImage(image: OutgoingImage, caption: string, replyTo?: string): Promise<ChatMessage>
+  /** Current state of these messages (after an edit, deletion or reaction); missing = gone. */
+  getMessages(ids: string[]): Promise<ChatMessage[]>
+  editMessage(id: string, text: string): Promise<void>
+  /** "everyone": your own message, erased on both computers. "me": any message, here only. */
+  deleteMessage(id: string, mode: 'everyone' | 'me'): Promise<void>
+  react(id: string, emoji: string, on: boolean): Promise<void>
+  /** Opens an http(s) link in the default browser. */
+  openLink(url: string): void
   /** Try downloading a failed image again. */
   retryImage(id: string): void
   /** Sends WebRTC signaling to the other app; resolves false if it's offline. */
@@ -272,6 +301,11 @@ export const IPC = {
   snapshot: 'hush:snapshot',
   listMessages: 'hush:list-messages',
   sendMessage: 'hush:send-message',
+  getMessages: 'hush:get-messages',
+  editMessage: 'hush:edit-message',
+  deleteMessage: 'hush:delete-message',
+  react: 'hush:react',
+  openLink: 'hush:open-link',
   sendImage: 'hush:send-image',
   retryImage: 'hush:retry-image',
   callSignal: 'hush:call-signal',

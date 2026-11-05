@@ -140,6 +140,12 @@ export class ImageStore {
     return ok
   }
 
+  /** Erases every file of an image (deleted message). */
+  remove(id: string): void {
+    for (const ext of [...Object.values(EXT), '.thumb.webp', '.part']) rmSync(this.base(id) + ext, { force: true })
+    this.partSizes.delete(id)
+  }
+
   discardPart(id: string): void {
     rmSync(this.partPath(id), { force: true })
     this.partSizes.delete(id)

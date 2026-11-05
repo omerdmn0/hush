@@ -538,3 +538,108 @@ describe('ChatService — after restoring an older backup', () => {
     expect(b.count()).toBe(4)
   })
 })
+
+describe('ChatService — message actions', () => {
+  const view = (s: Side, id: string) => s.chat.getMessages([id])[0]
+
+  it('replies show what they answer, on both sides', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const q = await a.chat.send('lunch?')
+    await until(() => b.db.getMessage(q.id) !== undefined)
+    const r = await b.chat.send('yes!', q.id)
+    await until(() => a.db.getMessage(r.id) !== undefined)
+    expect(view(a, r.id).replyTo).toEqual({ id: q.id, missing: false, from: 'me', text: 'lunch?', hasImage: false, deleted: false })
+    expect(view(b, r.id).replyTo).toMatchObject({ from: 'peer', text: 'lunch?' })
+    await expect(b.chat.send('x', randomUUID())).rejects.toThrow()
+  })
+
+  it('edits by the author reach the peer; edits by anyone else are ignored', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const m = await a.chat.send('helo')
+    await until(() => b.db.getMessage(m.id) !== undefined)
+    await a.chat.edit(m.id, 'hello')
+    await until(() => view(b, m.id).text === 'hello')
+    expect(view(b, m.id).editedAt).toBeGreaterThan(0)
+    await expect(b.chat.edit(m.id, 'not yours')).rejects.toThrow(/Not your message/)
+    await b.chat.sendEvent('edit', m.id, 'forged') // a modified app trying anyway
+    await settle()
+    expect(view(a, m.id).text).toBe('hello')
+    expect(view(b, m.id).text).toBe('hello')
+  })
+
+  it('delete for everyone erases text and picture on both computers; forged deletes do nothing', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const keep = await b.chat.send('mine to keep')
+    const img = await a.chat.sendImage(outgoing(png(32, 24)), 'secret caption')
+    await until(() => transfer(b, img.id, 'done') && a.db.getMessage(keep.id) !== undefined)
+    await a.chat.edit(img.id, 'secret caption v2')
+    await b.chat.sendEvent('delete', img.id, null) // forged: B didn't write it
+    await settle()
+    expect(view(a, img.id).deleted).toBeUndefined()
+
+    await a.chat.deleteForEveryone(img.id)
+    await until(() => view(b, img.id).deleted === true)
+    for (const s of [a, b]) {
+      expect(view(s, img.id)).toMatchObject({ deleted: true, text: '' })
+      expect(view(s, img.id).image).toBeUndefined()
+      expect(s.db.getMessage(img.id)?.body).toBe('')
+      expect(existsSync(fullFile(s, img.id))).toBe(false)
+      expect(existsSync(s.store.thumbPath(img.id))).toBe(false)
+      expect(JSON.stringify(s.db.eventsFor([img.id]))).not.toContain('secret')
+    }
+    expect(view(a, keep.id).text).toBe('mine to keep')
+    await expect(a.chat.edit(img.id, 'again')).rejects.toThrow(/deleted/)
+  })
+
+  it('reactions: several per person, toggled, and synced after being offline', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const m = await a.chat.send('good news')
+    await until(() => b.db.getMessage(m.id) !== undefined)
+    await b.stop()
+    await a.chat.react(m.id, '🔥', true)
+    await a.chat.react(m.id, '❤️', true)
+    await a.chat.react(m.id, '🔥', true) // already on: no new event
+    await a.chat.react(m.id, '❤️', false)
+    b.start()
+    await online(a, b)
+    await b.chat.react(m.id, '🔥', true)
+    await until(() => (view(a, m.id).reactions ?? []).some((r) => r.theirs))
+    await until(() => (view(b, m.id).reactions ?? []).length === 1)
+    expect(view(a, m.id).reactions).toEqual([{ emoji: '🔥', mine: true, theirs: true }])
+    expect(view(b, m.id).reactions).toEqual([{ emoji: '🔥', mine: true, theirs: true }])
+    expect(a.db.eventsFor([m.id]).filter((e) => e.authorId === a.id).length).toBe(3) // +🔥 +❤️ -❤️, no duplicate
+    await expect(a.chat.react(m.id, 'lol', true)).rejects.toThrow()
+  })
+
+  it('delete for me hides it here only, and a reply to it says so', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const m = await b.chat.send('embarrassing')
+    await until(() => a.db.getMessage(m.id) !== undefined)
+    const r = await a.chat.send('haha', m.id)
+    await until(() => b.db.getMessage(r.id) !== undefined)
+    a.chat.deleteForMe(m.id)
+    expect(a.chat.getMessages([m.id])).toEqual([])
+    expect(a.chat.listMessages(undefined, 50).messages.map((x) => x.id)).toEqual([r.id])
+    expect(view(a, r.id).replyTo).toEqual({ id: m.id, missing: true })
+    expect(view(b, m.id).text).toBe('embarrassing') // still there for B
+    await b.stop()
+    await until(() => a.link.peer === null)
+    const queued = await a.chat.send('not sent yet')
+    expect(() => a.chat.deleteForMe(queued.id)).toThrow(/Not sent yet/)
+  })
+})

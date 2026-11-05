@@ -16,6 +16,8 @@ export type TimelineItem =
   | { kind: 'group'; key: string; from: ChatMessage['from']; messages: ChatMessage[] }
   | { kind: 'notice'; key: string; notice: DeliveryNotice }
   | { kind: 'call'; key: string; call: CallRecord }
+  /** "New messages" line above the first message that arrived while you were away. */
+  | { kind: 'new'; key: string }
 
 /**
  * Turns a flat message list into date separators, sender groups and delivery notices.
@@ -26,7 +28,8 @@ export function buildTimeline(
   messages: readonly ChatMessage[],
   now: number = Date.now(),
   notices: readonly DeliveryNotice[] = [],
-  calls: readonly CallRecord[] = []
+  calls: readonly CallRecord[] = [],
+  newMarkerId: string | null = null
 ): TimelineItem[] {
   type Entry = { at: number; tie: string; m?: ChatMessage; n?: DeliveryNotice; c?: CallRecord }
   const entries: Entry[] = [
@@ -56,6 +59,10 @@ export function buildTimeline(
       continue
     }
     const m = e.m!
+    if (m.id === newMarkerId) {
+      group = null
+      items.push({ kind: 'new', key: 'new-messages' })
+    }
     const prev = group?.messages[group.messages.length - 1]
     if (group && prev && group.from === m.from && m.sentAt - prev.sentAt <= GROUP_WINDOW_MS) {
       group.messages.push(m)

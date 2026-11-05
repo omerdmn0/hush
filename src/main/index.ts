@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
@@ -511,16 +511,56 @@ if (!app.requestSingleInstanceLock()) {
       return chat.listMessages(cursor, Number.isInteger(limit) ? (limit as number) : 100)
     })
 
-    ipcMain.handle(IPC.sendMessage, (_e, text: unknown) => {
+    const optionalId = (v: unknown): string | undefined => {
+      if (v === undefined || v === null) return undefined
+      if (typeof v !== 'string') throw new Error('Invalid id')
+      return v
+    }
+
+    ipcMain.handle(IPC.sendMessage, (_e, text: unknown, replyTo: unknown) => {
       if (typeof text !== 'string' || text.length > MAX_TEXT_LENGTH) throw new Error('Invalid message')
-      return chat.send(text)
+      return chat.send(text, optionalId(replyTo))
     })
 
-    ipcMain.handle(IPC.sendImage, (_e, img: OutgoingImage, caption: unknown) => {
+    ipcMain.handle(IPC.getMessages, (_e, ids: unknown) => {
+      if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string')) return []
+      return chat.getMessages(ids as string[])
+    })
+
+    ipcMain.handle(IPC.editMessage, (_e, id: unknown, text: unknown) => {
+      if (typeof id !== 'string' || typeof text !== 'string' || text.length > MAX_TEXT_LENGTH) throw new Error('Invalid edit')
+      return chat.edit(id, text)
+    })
+
+    ipcMain.handle(IPC.deleteMessage, async (_e, id: unknown, mode: unknown) => {
+      if (typeof id !== 'string') throw new Error('Invalid id')
+      if (mode === 'everyone') await chat.deleteForEveryone(id)
+      else if (mode === 'me') chat.deleteForMe(id)
+      else throw new Error('Invalid mode')
+      scheduleUnread()
+    })
+
+    ipcMain.handle(IPC.react, (_e, id: unknown, emoji: unknown, on: unknown) => {
+      if (typeof id !== 'string' || typeof emoji !== 'string' || typeof on !== 'boolean') throw new Error('Invalid reaction')
+      return chat.react(id, emoji, on)
+    })
+
+    // Links in messages open in the browser — only http(s), never files or app protocols.
+    ipcMain.on(IPC.openLink, (_e, url: unknown) => {
+      if (typeof url !== 'string' || url.length > 2048) return
+      try {
+        const u = new URL(url)
+        if (u.protocol === 'http:' || u.protocol === 'https:') void shell.openExternal(u.toString())
+      } catch {
+        // not a URL
+      }
+    })
+
+    ipcMain.handle(IPC.sendImage, (_e, img: OutgoingImage, caption: unknown, replyTo: unknown) => {
       if (!(img?.bytes instanceof Uint8Array) || !(img.thumb instanceof Uint8Array) || typeof caption !== 'string') {
         throw new Error('Invalid image')
       }
-      return chat.sendImage(img, caption) // validates type, signature, size and preview
+      return chat.sendImage(img, caption, optionalId(replyTo)) // validates type, signature, size and preview
     })
 
     ipcMain.handle(IPC.setAvatar, (_e, bytes: unknown) => {

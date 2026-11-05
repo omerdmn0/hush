@@ -113,3 +113,12 @@ describe('insertSorted', () => {
     expect(insertSorted([m2, m3], m1, false)).toEqual([m1, m2, m3])
   })
 })
+
+describe('new messages line', () => {
+  it('sits right before the marked message and splits its group', () => {
+    const a = msg('peer', at(2026, 11, 5, 17, 0))
+    const b = msg('peer', at(2026, 11, 5, 17, 1))
+    const items = buildTimeline([a, b], NOW, [], [], b.id)
+    expect(items.map((i) => i.kind)).toEqual(['day', 'group', 'new', 'group'])
+  })
+})

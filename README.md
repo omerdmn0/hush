@@ -119,6 +119,15 @@ can bring your history back.
 - **Offline?** Write anyway — messages are queued (amber clock, *“Waiting for … to come online”*)
   and delivered automatically the next time you're both online. History syncs both ways, with
   nothing lost or duplicated.
+- **Message actions:** hover a message (or right-click it) for the toolbar — six quick reactions
+  plus the full emoji picker (several each, click a reaction under the message to remove yours),
+  **Reply**, and ⋯ for **Copy**, **Edit** and **Delete**. Press **↑** in an empty message box to
+  edit your last message; **Esc** cancels a reply or edit. Edited messages say *edited*.
+- **Deleting:** *Delete for everyone* (your own messages) erases the text and picture on both
+  computers — the other person sees *Message deleted*. *Delete for me* removes any message from
+  your computer only. Neither can be undone.
+- **Links** (http/https) open in your browser. A **New messages** line marks what arrived while you
+  were away, and **Jump to latest** appears when you've scrolled up (with a count of new ones).
 - **Images:** drag them onto the chat, paste them (Ctrl+V), or use the 🖼 button. Click an image
   to see it full size. PNG, JPEG, GIF and WebP up to 25 MB.
 - **Voice calls:** the phone button in the sidebar or header. Mute, switch microphone and hang up

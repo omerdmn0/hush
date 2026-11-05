@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { IMAGE_MIME, MAX_IMAGE_BYTES, MAX_TEXT_LENGTH, sniffImage, type Frame, type ImageMeta, type ImageMime } from '../shared/protocol'
+import { IMAGE_MIME, isUuid, MAX_IMAGE_BYTES, MAX_TEXT_LENGTH, sniffImage, type Frame, type ImageMeta, type ImageMime } from '../shared/protocol'
 import type { ChatMessage, HistoryCursor, HushEvent, OutgoingImage, PeerState } from '../shared/types'
 import { toChatMessage, type HushDb, type StoredMessage } from './db'
+import { applyEvents, isReactionEmoji, reactionData } from './events'
 import { sha256, type ImageStore } from './images'
 import type { LinkPeer, PeerLink } from './link'
 import type { Avatars } from './avatars'
@@ -70,12 +71,26 @@ export class ChatService {
 
   listMessages(before: HistoryCursor | undefined, limit: number): { messages: ChatMessage[]; hasMore: boolean } {
     const { rows, hasMore } = this.db.listMessages(before, Math.min(Math.max(limit, 1), 500))
-    return { messages: rows.map((m) => this.toChat(m)), hasMore }
+    return { messages: this.decorate(rows), hasMore }
+  }
+
+  /** Current state of these messages for the UI (left out: unknown, or deleted for me). */
+  getMessages(ids: string[]): ChatMessage[] {
+    return this.decorate(this.db.getMessages(ids.slice(0, 500)).filter((m) => !m.ref))
+  }
+
+  /** A reply must point at a chat message we have. */
+  private checkReply(replyTo: string | undefined): string | null {
+    if (replyTo === undefined) return null
+    const target = isUuid(replyTo) ? this.db.getMessage(replyTo) : undefined
+    if (!target || target.ref) throw new Error('That message is gone')
+    return target.id
   }
 
   /** Validates an image prepared by the UI, stores it, and sends it like a message. */
-  async sendImage(img: OutgoingImage, caption: string): Promise<ChatMessage> {
+  async sendImage(img: OutgoingImage, caption: string, replyTo?: string): Promise<ChatMessage> {
     this.assertCanWrite()
+    const reply = this.checkReply(replyTo)
     const body = caption.trim()
     const mime = img.mime as ImageMime
     const valid =
@@ -93,18 +108,19 @@ export class ChatService {
     const meta: ImageMeta = { mime, width: img.width, height: img.height, size: img.bytes.length, sha256: sha256(img.bytes) }
     const id = randomUUID()
     this.store.saveOwn(id, meta, img.bytes, img.thumb)
-    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), meta, id)
+    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), meta, id, null, reply)
     this.emit({ type: 'message', message: this.toChat(stored) })
     const ok = await this.link.send(this.msgFrame(stored))
     if (ok) this.advanceMine([stored.id], 'sent')
     return this.toChat(this.db.getMessage(stored.id)!)
   }
 
-  async send(text: string): Promise<ChatMessage> {
+  async send(text: string, replyTo?: string): Promise<ChatMessage> {
     this.assertCanWrite()
     const body = text.trim()
     if (!body || body.length > MAX_TEXT_LENGTH) throw new Error('Message is empty or too long')
-    const stored = this.db.createOwnMessage(this.selfId, body, Date.now())
+    const reply = this.checkReply(replyTo)
+    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), null, undefined, null, reply)
     this.emit({ type: 'message', message: this.toChat(stored) })
 
     // Offline: stays queued and goes out with the next sync.
@@ -186,11 +202,15 @@ export class ChatService {
           image,
           kind: frame.kind ?? 'message',
           ref: frame.ref ?? null,
-          data: frame.data ?? null
+          data: frame.data ?? null,
+          replyTo: frame.reply ?? null
         }
         // Events (edit/delete/react) are stored and acked like messages; the UI applies them.
         if (this.db.insertMessage(stored)) {
           if (stored.ref) {
+            // Deleted for everyone by its author: erase it here too.
+            const target = stored.kind === 'delete' ? this.db.getMessage(stored.ref) : undefined
+            if (target && target.authorId === stored.authorId) this.erase(target.id)
             this.emit({ type: 'event', target: stored.ref })
           } else {
             if (!own) this.emit({ type: 'typing', on: false })
@@ -309,6 +329,7 @@ export class ChatService {
     if (m.kind && m.kind !== 'message') frame.kind = m.kind
     if (m.ref) frame.ref = m.ref
     if (m.data != null) frame.data = m.data
+    if (m.replyTo) frame.reply = m.replyTo
     return frame
   }
 
@@ -324,8 +345,101 @@ export class ChatService {
     return stored
   }
 
+  // ---------- message actions ----------
+
+  /** One of our own messages that still exists (only those can be edited or deleted for everyone). */
+  private ownMessage(id: string): StoredMessage {
+    const m = isUuid(id) ? this.db.getMessage(id) : undefined
+    if (!m || m.ref || m.authorId !== this.selfId) throw new Error('Not your message')
+    if (this.decorate([m])[0].deleted) throw new Error('Message was deleted')
+    return m
+  }
+
+  async edit(id: string, text: string): Promise<void> {
+    const m = this.ownMessage(id)
+    const body = text.trim()
+    if ((!body && !m.image) || body.length > MAX_TEXT_LENGTH) throw new Error('Message is empty or too long')
+    if (body === this.decorate([m])[0].text) return
+    await this.sendEvent('edit', m.id, body)
+  }
+
+  /** Our own message, for both of us: its text and picture are erased on both computers. */
+  async deleteForEveryone(id: string): Promise<void> {
+    const m = this.ownMessage(id)
+    await this.sendEvent('delete', m.id, null)
+    this.erase(m.id)
+    this.emit({ type: 'event', target: m.id })
+  }
+
+  /** Any message, on this computer only. */
+  deleteForMe(id: string): void {
+    const m = isUuid(id) ? this.db.getMessage(id) : undefined
+    if (!m || m.ref) throw new Error('Message not found')
+    // Not delivered yet: erasing it here would send an empty message later.
+    if (m.authorId === this.selfId && m.status === 'queued') throw new Error('Not sent yet — delete it for everyone instead')
+    this.db.hide(m.id)
+    this.store.remove(m.id)
+    this.transfers.cancel(m.id)
+    this.emit({ type: 'event', target: m.id })
+  }
+
+  /** Adds or removes one of our reactions (several per message are fine). */
+  async react(id: string, emoji: string, on: boolean): Promise<void> {
+    const m = isUuid(id) ? this.db.getMessage(id) : undefined
+    if (!m || m.ref || !isReactionEmoji(emoji)) throw new Error('Invalid reaction')
+    const view = this.decorate([m])[0]
+    if (view.deleted) return
+    if ((view.reactions ?? []).some((r) => r.emoji === emoji && r.mine) === on) return
+    await this.sendEvent('react', m.id, reactionData(emoji, on))
+  }
+
+  private erase(id: string): void {
+    this.db.wipe(id)
+    this.store.remove(id)
+    this.transfers.cancel(id)
+  }
+
   private toChat(m: StoredMessage): ChatMessage {
-    return toChatMessage(m, this.selfId, (id) => this.store.hasFull(id, m.image))
+    return this.decorate([m])[0]
+  }
+
+  /** Messages for the UI with edits, deletions, reactions and reply previews applied. */
+  private decorate(rows: StoredMessage[]): ChatMessage[] {
+    if (rows.length === 0) return []
+    const replyIds = [...new Set(rows.map((r) => r.replyTo).filter((x): x is string => !!x))]
+    const targets = this.db.getMessages(replyIds)
+    const events = new Map<string, StoredMessage[]>()
+    for (const e of this.db.eventsFor([...rows.map((r) => r.id), ...targets.map((t) => t.id)])) {
+      const list = events.get(e.ref!) ?? []
+      list.push(e)
+      events.set(e.ref!, list)
+    }
+    const view = (m: StoredMessage): ChatMessage => {
+      const msg = toChatMessage(m, this.selfId, (id) => this.store.hasFull(id, m.image))
+      if (msg.unsupported) return msg
+      const state = applyEvents(m.authorId, events.get(m.id) ?? [], this.selfId)
+      if (state.deleted || msg.deleted) {
+        delete msg.image
+        return { ...msg, text: '', deleted: true }
+      }
+      if (state.text !== undefined) {
+        msg.text = state.text
+        msg.editedAt = state.editedAt
+      }
+      if (state.reactions.length > 0) msg.reactions = state.reactions
+      return msg
+    }
+    const quoted = new Map(targets.map((t) => [t.id, view(t)]))
+    return rows.map((m) => {
+      const msg = view(m)
+      if (m.replyTo && !msg.deleted) {
+        const t = quoted.get(m.replyTo)
+        msg.replyTo = t
+          ? { id: t.id, missing: false, from: t.from, text: t.text.slice(0, 200), hasImage: !!t.image, deleted: !!t.deleted }
+          : { id: m.replyTo, missing: true }
+      }
+      return msg
+    })
   }
 
   private queueAck(id: string): void {

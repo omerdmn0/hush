@@ -1,11 +1,13 @@
-import { memo, type ReactNode } from 'react'
-import { Check, CheckCheck, CircleAlert, Clock, LoaderCircle } from 'lucide-react'
+import { memo, useState, type ReactNode } from 'react'
+import { Ban, Check, CheckCheck, CircleAlert, Clock, Image as ImageIcon, LoaderCircle } from 'lucide-react'
 import type { ChatMessage, ImageTransfer, MessageStatus } from '../../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Avatar } from '@/components/common'
 import { formatTime, fullDateTime } from '@/lib/format'
 import { thumbSize } from '@/lib/images'
+import { linkify } from '@/lib/linkify'
 import { cn } from '@/lib/utils'
+import { MessageToolbar, ReactionChips, type MessageActions } from './MessageActions'
 
 export interface ImageActions {
   transfers: Record<string, ImageTransfer>
@@ -35,6 +37,7 @@ function Meta({ m, showStatus, block }: { m: ChatMessage; showStatus: boolean; b
         block ? 'mx-1.5 mt-1 mb-0.5 flex justify-end' : 'float-right mt-1.5 -mb-0.5 ml-3'
       )}
     >
+      {m.editedAt && <span title={`Edited ${fullDateTime(m.editedAt)}`}>edited ·</span>}
       <time dateTime={new Date(m.sentAt).toISOString()} title={fullDateTime(m.sentAt)}>
         {formatTime(m.sentAt)}
       </time>
@@ -43,10 +46,81 @@ function Meta({ m, showStatus, block }: { m: ChatMessage; showStatus: boolean; b
   )
 }
 
-function Bubble({ m, mine, isLast, images }: { m: ChatMessage; mine: boolean; isLast: boolean; images: ImageActions }): ReactNode {
+/** Message text with web links that open in the browser. */
+function MessageText({ text }: { text: string }): ReactNode {
+  return linkify(text).map((s, i) =>
+    s.url ? (
+      <a
+        key={i}
+        href={s.url}
+        title={s.url}
+        onClick={(e) => {
+          e.preventDefault()
+          window.hush.openLink(s.url!)
+        }}
+        className="text-cyan underline decoration-cyan/50 underline-offset-2 hover:decoration-cyan"
+      >
+        {s.text}
+      </a>
+    ) : (
+      s.text
+    )
+  )
+}
+
+/** The message a reply answers, shown at the top of the bubble; click to scroll to it. */
+function ReplyQuote({ m, peerName, onJump }: { m: ChatMessage; peerName: string; onJump: (id: string) => void }): ReactNode {
+  const q = m.replyTo!
+  const who = q.missing ? '' : q.from === 'me' ? 'You' : peerName
+  const body = q.missing ? 'Original message isn’t available' : q.deleted ? 'Message deleted' : q.text || (q.hasImage ? 'Photo' : '')
+  return (
+    <button
+      type="button"
+      disabled={q.missing}
+      onClick={() => onJump(q.id)}
+      aria-label={q.missing ? body : `Reply to ${who}: ${body}. Show message`}
+      className="mb-1.5 flex w-full max-w-[420px] min-w-0 flex-col items-start border-l-2 border-cyan bg-[rgba(4,3,10,.35)] px-2 py-1 text-left enabled:hover:bg-[rgba(4,3,10,.55)]"
+    >
+      {who && <span className="label text-cyan">{who}</span>}
+      <span className={cn('flex w-full min-w-0 items-center gap-1 text-sm text-text-muted', (q.missing || (!q.missing && q.deleted)) && 'italic')}>
+        {!q.missing && !q.deleted && q.hasImage && <ImageIcon aria-hidden="true" className="size-3.5 flex-none" />}
+        <span className="truncate">{body}</span>
+      </span>
+    </button>
+  )
+}
+
+function Bubble({
+  m,
+  mine,
+  isLast,
+  images,
+  peerName,
+  onJump
+}: {
+  m: ChatMessage
+  mine: boolean
+  isLast: boolean
+  images: ImageActions
+  peerName: string
+  onJump: (id: string) => void
+}): ReactNode {
   // Status shown on the last bubble of a group and on anything not yet read (MASTER.md §6).
   const showStatus = mine && (isLast || m.status !== 'read')
   const shape = mine ? 'shape-mine' : 'shape-theirs'
+  const quote = m.replyTo && <ReplyQuote m={m} peerName={peerName} onJump={onJump} />
+
+  if (m.deleted) {
+    return (
+      <div className={cn('cut max-w-full px-3 pt-2 pb-1.5 text-sm text-text-muted italic', shape, '[--fill-c:transparent] opacity-80')}>
+        <span className="inline-flex items-center gap-1.5">
+          <Ban aria-hidden="true" className="size-3.5" />
+          Message deleted
+        </span>
+        <Meta m={m} showStatus={false} />
+      </div>
+    )
+  }
 
   if (m.image) {
     const size = thumbSize(m.image.width, m.image.height)
@@ -57,6 +131,7 @@ function Bubble({ m, mine, isLast, images }: { m: ChatMessage; mine: boolean; is
     const pct = Math.round((t?.progress ?? 0) * 100)
     return (
       <div className={cn('cut animate-rise max-w-full p-1', shape)}>
+        {quote && <div className="px-1 pt-1">{quote}</div>}
         {/* Size reserved from the stored dimensions, so loading never shifts the list. */}
         <div className="relative max-w-full" style={{ width: size.width, aspectRatio: `${size.width} / ${size.height}` }}>
           <button
@@ -91,7 +166,11 @@ function Bubble({ m, mine, isLast, images }: { m: ChatMessage; mine: boolean; is
             </span>
           )}
         </div>
-        {m.text && <div className="max-w-[300px] px-2 pt-1.5 text-base leading-6 font-normal [overflow-wrap:anywhere] whitespace-pre-wrap">{m.text}</div>}
+        {m.text && (
+          <div className="max-w-[300px] px-2 pt-1.5 text-base leading-6 font-normal [overflow-wrap:anywhere] whitespace-pre-wrap">
+            <MessageText text={m.text} />
+          </div>
+        )}
         <Meta m={m} showStatus={showStatus} block />
       </div>
     )
@@ -99,7 +178,8 @@ function Bubble({ m, mine, isLast, images }: { m: ChatMessage; mine: boolean; is
 
   return (
     <div className={cn('cut animate-rise max-w-full px-3 pt-2 pb-1.5 text-base leading-6 font-normal [overflow-wrap:anywhere] whitespace-pre-wrap', shape)}>
-      {m.text}
+      {quote}
+      <MessageText text={m.text} />
       <Meta m={m} showStatus={showStatus} />
     </div>
   )
@@ -110,7 +190,8 @@ export const MessageGroup = memo(function MessageGroup({
   messages,
   peerName,
   queuedNoteAfter,
-  images
+  images,
+  actions
 }: {
   from: ChatMessage['from']
   messages: ChatMessage[]
@@ -118,13 +199,14 @@ export const MessageGroup = memo(function MessageGroup({
   /** Id of the message under which "Waiting for … to come online" appears. */
   queuedNoteAfter: string | null
   images: ImageActions
+  actions: MessageActions
 }): ReactNode {
   const mine = from === 'me'
   const first = messages[0]
   return (
     <div className={cn('flex gap-2.5 pt-4', mine && 'justify-end')}>
       {!mine && <Avatar name={peerName} who="peer" size={32} />}
-      <div className={cn('flex max-w-[68%] min-w-0 flex-col gap-0.5', mine ? 'items-end' : 'items-start')}>
+      <div className={cn('flex w-[68%] min-w-0 flex-col gap-0.5', mine ? 'items-end' : 'items-start')}>
         {!mine && (
           <div className="mb-1 ml-0.5 flex items-baseline gap-2">
             <span className="label text-cyan">{peerName}</span>
@@ -132,8 +214,8 @@ export const MessageGroup = memo(function MessageGroup({
           </div>
         )}
         {messages.map((m, i) => (
-          <div key={m.id} className={cn('flex max-w-full flex-col', mine ? 'items-end' : 'items-start')}>
-            <Bubble m={m} mine={mine} isLast={i === messages.length - 1} images={images} />
+          <div key={m.id} className={cn('flex w-full flex-col', mine ? 'items-end' : 'items-start')}>
+            <MessageRow m={m} mine={mine} isLast={i === messages.length - 1} images={images} actions={actions} peerName={peerName} />
             {m.id === queuedNoteAfter && (
               <div className="data mt-1.5 flex items-center gap-1.5 text-queued">
                 <Clock aria-hidden="true" className="size-3.5" />
@@ -146,3 +228,41 @@ export const MessageGroup = memo(function MessageGroup({
     </div>
   )
 })
+
+/** One message with its hover toolbar, right-click menu and reactions. */
+function MessageRow({
+  m,
+  mine,
+  isLast,
+  images,
+  actions,
+  peerName
+}: {
+  m: ChatMessage
+  mine: boolean
+  isLast: boolean
+  images: ImageActions
+  actions: MessageActions
+  peerName: string
+}): ReactNode {
+  const [menuOpen, setMenuOpen] = useState(false)
+  return (
+    <div
+      data-message-id={m.id}
+      className={cn(
+        'group/msg relative flex w-full flex-col transition-shadow duration-300',
+        mine ? 'items-end' : 'items-start',
+        actions.highlightId === m.id && 'shadow-[0_0_0_2px_var(--cyan),0_0_14px_rgba(0,229,255,.45)]'
+      )}
+      onContextMenu={(e) => {
+        if ((e.target as HTMLElement).closest('a')) return // keep the normal menu for links
+        e.preventDefault()
+        setMenuOpen(true)
+      }}
+    >
+      <MessageToolbar m={m} mine={mine} actions={actions} menuOpen={menuOpen} onMenuOpenChange={setMenuOpen} />
+      <Bubble m={m} mine={mine} isLast={isLast} images={images} peerName={peerName} onJump={actions.onJump} />
+      <ReactionChips m={m} mine={mine} actions={actions} peerName={peerName} />
+    </div>
+  )
+}

@@ -21,10 +21,10 @@ export interface HushState {
   dismissFlush: () => void
   /** Image transfers in progress / finished / failed, by message id. */
   transfers: Record<string, ImageTransfer>
-  sendImage: (image: OutgoingImage, caption: string) => Promise<void>
+  sendImage: (image: OutgoingImage, caption: string, replyTo?: string) => Promise<void>
   retryImage: (id: string) => void
   loadOlder: () => void
-  send: (text: string) => Promise<void>
+  send: (text: string, replyTo?: string) => Promise<void>
   markRead: (ids: string[]) => void
   updateSettings: (patch: Partial<Settings>) => Promise<void>
 }
@@ -44,6 +44,8 @@ export function useHush(): HushState {
   const loading = useRef(false)
   const hasMoreRef = useRef(false)
   hasMoreRef.current = hasMore
+  const messagesRef = useRef<ChatMessage[]>([])
+  messagesRef.current = messages
 
   useEffect(() => {
     let alive = true
@@ -54,6 +56,18 @@ export function useHush(): HushState {
         case 'message':
           setMessages((prev) => insertSorted(prev, e.message, hasMoreRef.current))
           break
+        case 'event': {
+          // An edit, deletion or reaction: re-read that message and any loaded replies quoting it.
+          const ids = [e.target, ...messagesRef.current.filter((m) => m.replyTo?.id === e.target).map((m) => m.id)]
+          void api.getMessages(ids).then((fresh) => {
+            if (!alive) return
+            const byId = new Map(fresh.map((m) => [m.id, m]))
+            setMessages((prev) =>
+              prev.flatMap((m) => (byId.has(m.id) ? [byId.get(m.id)!] : ids.includes(m.id) ? [] : [m])) // missing = deleted for me
+            )
+          })
+          break
+        }
         case 'pairing':
           setSnapshot((s) => s && { ...s, pairing: e.pairing })
           break
@@ -145,9 +159,9 @@ export function useHush(): HushState {
       })
   }, [hasMore, messages])
 
-  const send = useCallback(async (text: string) => {
+  const send = useCallback(async (text: string, replyTo?: string) => {
     // The main process echoes the new message back as a 'message' event.
-    await window.hush.sendMessage(text)
+    await window.hush.sendMessage(text, replyTo)
   }, [])
 
   const markRead = useCallback((ids: string[]) => {
@@ -164,8 +178,8 @@ export function useHush(): HushState {
 
   const dismissFlush = useCallback(() => setFlush(null), [])
 
-  const sendImage = useCallback(async (image: OutgoingImage, caption: string) => {
-    await window.hush.sendImage(image, caption)
+  const sendImage = useCallback(async (image: OutgoingImage, caption: string, replyTo?: string) => {
+    await window.hush.sendImage(image, caption, replyTo)
   }, [])
 
   const retryImage = useCallback((id: string) => {

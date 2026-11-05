@@ -1,7 +1,7 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react'
-import { CircleAlert, ImagePlus, LoaderCircle, SendHorizontal, Smile, X } from 'lucide-react'
+import { Check, CircleAlert, ImagePlus, LoaderCircle, Pencil, Reply, SendHorizontal, Smile, X } from 'lucide-react'
 import { IMAGE_MIME, MAX_TEXT_LENGTH } from '../../../../shared/protocol'
-import type { OutgoingImage } from '../../../../shared/types'
+import type { ChatMessage, OutgoingImage } from '../../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -16,6 +16,12 @@ const TYPING_REFRESH_MS = 3000
 const TYPING_IDLE_MS = 4000
 const MAX_ATTACHMENTS = 10
 
+/** Writing a reply to a message, or editing one of your own. */
+export interface ComposerMode {
+  kind: 'reply' | 'edit'
+  message: ChatMessage
+}
+
 export interface ComposerHandle {
   /** Adds dropped/pasted/picked files to the tray (validated first). */
   addFiles: (files: File[]) => void
@@ -29,13 +35,22 @@ export function Composer({
   onSendImage,
   onTyping,
   inputRef,
-  handleRef
+  handleRef,
+  mode,
+  onCancelMode,
+  onEdit,
+  onEditLast
 }: {
   peerName: string
   disabled: boolean
   disabledHint?: string
-  onSend: (text: string) => Promise<void>
-  onSendImage: (image: OutgoingImage, caption: string) => Promise<void>
+  onSend: (text: string, replyTo?: string) => Promise<void>
+  onSendImage: (image: OutgoingImage, caption: string, replyTo?: string) => Promise<void>
+  mode: ComposerMode | null
+  onCancelMode: () => void
+  onEdit: (id: string, text: string) => Promise<void>
+  /** ↑ in an empty message box: edit your last message. */
+  onEditLast: () => void
   onTyping: (on: boolean) => void
   inputRef?: Ref<HTMLTextAreaElement>
   handleRef?: Ref<ComposerHandle>
@@ -49,6 +64,25 @@ export function Composer({
   const ta = useRef<HTMLTextAreaElement | null>(null)
   const filePicker = useRef<HTMLInputElement>(null)
   const typing = useRef({ on: false, lastSent: 0, idle: undefined as ReturnType<typeof setTimeout> | undefined })
+  const editing = mode?.kind === 'edit' ? mode.message : null
+
+  // Entering edit mode puts the message's text in the box; reply mode just focuses it.
+  const modeKey = mode ? `${mode.kind}:${mode.message.id}` : ''
+  useEffect(() => {
+    if (!mode) return
+    if (mode.kind === 'edit') setText(mode.message.text)
+    requestAnimationFrame(() => {
+      const el = ta.current
+      el?.focus()
+      if (el) el.setSelectionRange(el.value.length, el.value.length)
+    })
+    // Runs only when the mode itself changes (not on every render of the same mode).
+  }, [modeKey])
+
+  const cancelMode = (): void => {
+    if (editing) setText('')
+    onCancelMode()
+  }
 
   useLayoutEffect(() => {
     const el = ta.current
@@ -115,24 +149,41 @@ export function Composer({
     ta.current?.focus()
   }
 
-  const canSend = !disabled && !sending && preparing === 0 && (text.trim() !== '' || attachments.length > 0)
+  const canSend = editing
+    ? !disabled && !sending && (text.trim() !== '' || !!editing.image)
+    : !disabled && !sending && preparing === 0 && (text.trim() !== '' || attachments.length > 0)
 
   const send = async (): Promise<void> => {
     if (!canSend) return
     const value = text.trim()
     const queue = attachments
+    const replyTo = mode?.kind === 'reply' ? mode.message.id : undefined
     stopTyping()
     setError(null)
+    if (editing) {
+      setSending(true)
+      try {
+        await onEdit(editing.id, value)
+        setText('')
+        onCancelMode()
+      } catch {
+        setError("The edit couldn't be saved.")
+      } finally {
+        setSending(false)
+      }
+      return
+    }
     setText('')
+    if (replyTo) onCancelMode()
     if (queue.length === 0) {
-      void onSend(value).catch(() => setText(value)) // keep the text if sending failed
+      void onSend(value, replyTo).catch(() => setText(value)) // keep the text if sending failed
       return
     }
     setSending(true)
     try {
       // Each image is its own message; the text becomes the caption of the last one.
       for (let i = 0; i < queue.length; i++) {
-        await onSendImage(queue[i].outgoing, i === queue.length - 1 ? value : '')
+        await onSendImage(queue[i].outgoing, i === queue.length - 1 ? value : '', i === 0 ? replyTo : undefined)
         URL.revokeObjectURL(queue[i].previewUrl)
         setAttachments((prev) => prev.filter((a) => a.key !== queue[i].key))
       }
@@ -168,6 +219,27 @@ export function Composer({
   return (
     <div className="flex-none pb-3.5">
       <div className="mx-auto max-w-[760px] px-6">
+        {mode && (
+          <div className="mb-1.5 flex items-center gap-2 border-l-2 border-cyan bg-surface py-1 pr-1 pl-3 text-sm">
+            {editing ? <Pencil aria-hidden="true" className="size-4 flex-none text-cyan" /> : <Reply aria-hidden="true" className="size-4 flex-none text-cyan" />}
+            <span className="min-w-0 flex-1 truncate">
+              {editing ? (
+                'Editing message'
+              ) : (
+                <>
+                  Replying to <b className="font-semibold">{mode.message.from === 'me' ? 'yourself' : peerName}</b>
+                  <span className="text-text-muted">: {mode.message.text || (mode.message.image ? 'Photo' : '')}</span>
+                </>
+              )}
+            </span>
+            <span className="data text-text-muted" aria-hidden="true">
+              ESC
+            </span>
+            <Button variant="icon" size="icon" className="size-7" aria-label={editing ? 'Cancel editing' : 'Cancel reply'} onClick={cancelMode}>
+              <X className="size-4" />
+            </Button>
+          </div>
+        )}
         {trayVisible && (
           <ul aria-label="Images to send" className="m-0 mb-2 flex list-none flex-wrap gap-2 p-0">
             {attachments.map((a) => (
@@ -218,7 +290,7 @@ export function Composer({
           />
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="icon" size="icon-lg" aria-label="Attach images" disabled={disabled || sending} onClick={() => filePicker.current?.click()}>
+              <Button variant="icon" size="icon-lg" aria-label="Attach images" disabled={disabled || sending || !!editing} onClick={() => filePicker.current?.click()}>
                 <ImagePlus className="size-5" />
               </Button>
             </TooltipTrigger>
@@ -239,7 +311,13 @@ export function Composer({
             disabled={disabled}
             aria-describedby={error ? 'composer-error' : undefined}
             placeholder={
-              disabled ? disabledHint : attachments.length ? 'Add a caption (optional)' : `Message ${peerName}`
+              disabled
+                ? disabledHint
+                : editing
+                  ? 'Edit your message'
+                  : attachments.length
+                    ? 'Add a caption (optional)'
+                    : `Message ${peerName}`
             }
             onChange={(e) => update(e.target.value)}
             onBlur={stopTyping}
@@ -254,6 +332,12 @@ export function Composer({
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault()
                 void send()
+              } else if (e.key === 'Escape' && mode) {
+                e.preventDefault()
+                cancelMode()
+              } else if (e.key === 'ArrowUp' && !mode && text === '' && attachments.length === 0) {
+                e.preventDefault()
+                onEditLast()
               }
             }}
             className="max-h-[200px] min-h-[42px] flex-1 resize-none border-0 bg-transparent px-1.5 py-[9px] font-sans text-base leading-6 font-normal text-text caret-cyan outline-none placeholder:text-text-muted focus-visible:outline-none disabled:cursor-not-allowed"
@@ -274,8 +358,13 @@ export function Composer({
               <EmojiPanel onPick={insertEmoji} />
             </PopoverContent>
           </Popover>
-          <Button size="icon-lg" aria-label={sending ? 'Sending…' : 'Send message'} disabled={!canSend} onClick={() => void send()}>
-            {sending ? <LoaderCircle className="animate-spin" /> : <SendHorizontal />}
+          <Button
+            size="icon-lg"
+            aria-label={sending ? 'Sending…' : editing ? 'Save edit' : 'Send message'}
+            disabled={!canSend}
+            onClick={() => void send()}
+          >
+            {sending ? <LoaderCircle className="animate-spin" /> : editing ? <Check /> : <SendHorizontal />}
           </Button>
         </div>
         {error ? (
@@ -285,8 +374,16 @@ export function Composer({
           </div>
         ) : (
           <div className="data mx-1 mt-1.5 text-text-muted">
-            <kbd className="font-[inherit] text-text">ENTER</kbd> send · <kbd className="font-[inherit] text-text">SHIFT+ENTER</kbd> new line · drop or
-            paste images
+            <kbd className="font-[inherit] text-text">ENTER</kbd> {editing ? 'save' : 'send'} · <kbd className="font-[inherit] text-text">SHIFT+ENTER</kbd> new line ·{' '}
+            {mode ? (
+              <>
+                <kbd className="font-[inherit] text-text">ESC</kbd> cancel
+              </>
+            ) : (
+              <>
+                <kbd className="font-[inherit] text-text">↑</kbd> edit last · drop or paste images
+              </>
+            )}
           </div>
         )}
       </div>
