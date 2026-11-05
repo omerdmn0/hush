@@ -27,6 +27,23 @@ export interface ImageTransfer {
   progress: number
 }
 
+export type CallDirection = 'in' | 'out'
+export const CALL_OUTCOMES = ['ongoing', 'completed', 'missed', 'declined', 'cancelled', 'no-answer', 'busy', 'failed'] as const
+export type CallOutcome = (typeof CALL_OUTCOMES)[number]
+
+/** One call as remembered on this computer (call history). */
+export interface CallRecord {
+  /** The call's UUID (same on both computers). */
+  id: string
+  direction: CallDirection
+  /** When it started ringing. */
+  startedAt: number
+  /** When audio connected, if it did. */
+  connectedAt: number | null
+  endedAt: number | null
+  outcome: CallOutcome
+}
+
 /** An image picked in the UI, prepared (validated + preview made) by the renderer. */
 export interface OutgoingImage {
   bytes: Uint8Array
@@ -106,6 +123,8 @@ export type HushEvent =
   | { type: 'net'; net: NetState }
   | { type: 'settings'; settings: Settings }
   | { type: 'transfer'; transfer: ImageTransfer }
+  /** A call-history entry was added or updated. */
+  | { type: 'call-log'; record: CallRecord }
   /** WebRTC signaling from the other app. */
   | { type: 'call'; signal: CallSignal }
   /** Messages that were queued while offline have now been delivered. */
@@ -123,6 +142,9 @@ export interface HushApi {
   retryImage(id: string): void
   /** Sends WebRTC signaling to the other app; resolves false if it's offline. */
   sendCallSignal(signal: CallSignal): Promise<boolean>
+  listCalls(): Promise<CallRecord[]>
+  /** Adds or updates a call-history entry. */
+  logCall(record: CallRecord): void
   markRead(ids: string[]): void
   setTyping(on: boolean): void
   updateSettings(patch: Partial<Settings>): Promise<Settings>
@@ -139,6 +161,8 @@ export const IPC = {
   sendImage: 'hush:send-image',
   retryImage: 'hush:retry-image',
   callSignal: 'hush:call-signal',
+  listCalls: 'hush:list-calls',
+  logCall: 'hush:log-call',
   markRead: 'hush:mark-read',
   setTyping: 'hush:set-typing',
   updateSettings: 'hush:update-settings',

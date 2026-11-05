@@ -1,4 +1,4 @@
-import type { ChatMessage } from '../../../shared/types'
+import type { CallRecord, ChatMessage } from '../../../shared/types'
 import { dayLabel, startOfDay } from './format'
 
 /** Consecutive messages from the same sender within this window share one group (MASTER.md §6). */
@@ -15,6 +15,7 @@ export type TimelineItem =
   | { kind: 'day'; key: string; label: string }
   | { kind: 'group'; key: string; from: ChatMessage['from']; messages: ChatMessage[] }
   | { kind: 'notice'; key: string; notice: DeliveryNotice }
+  | { kind: 'call'; key: string; call: CallRecord }
 
 /**
  * Turns a flat message list into date separators, sender groups and delivery notices.
@@ -24,12 +25,14 @@ export type TimelineItem =
 export function buildTimeline(
   messages: readonly ChatMessage[],
   now: number = Date.now(),
-  notices: readonly DeliveryNotice[] = []
+  notices: readonly DeliveryNotice[] = [],
+  calls: readonly CallRecord[] = []
 ): TimelineItem[] {
-  type Entry = { at: number; tie: string; m?: ChatMessage; n?: DeliveryNotice }
+  type Entry = { at: number; tie: string; m?: ChatMessage; n?: DeliveryNotice; c?: CallRecord }
   const entries: Entry[] = [
     ...messages.map((m) => ({ at: m.sentAt, tie: `0${m.id}`, m })),
-    ...notices.map((n) => ({ at: n.at, tie: `1${n.id}`, n })) // notices sort after messages at the same ms
+    ...calls.map((c) => ({ at: c.startedAt, tie: `1${c.id}`, c })),
+    ...notices.map((n) => ({ at: n.at, tie: `2${n.id}`, n })) // notices sort last at the same ms
   ].sort((a, b) => a.at - b.at || a.tie.localeCompare(b.tie))
   const items: TimelineItem[] = []
   let day: number | null = null
@@ -45,6 +48,11 @@ export function buildTimeline(
     if (e.n) {
       group = null
       items.push({ kind: 'notice', key: `notice-${e.n.id}`, notice: e.n })
+      continue
+    }
+    if (e.c) {
+      group = null
+      items.push({ kind: 'call', key: `call-${e.c.id}`, call: e.c })
       continue
     }
     const m = e.m!

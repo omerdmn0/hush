@@ -61,6 +61,14 @@ describe('buildTimeline', () => {
     expect(items.map((i) => i.kind)).toEqual(['day', 'group', 'notice', 'group'])
   })
 
+  it('places call-history entries by start time and breaks groups around them', () => {
+    const t = at(2026, 11, 5, 20, 0)
+    const items = buildTimeline([msg('me', t), msg('me', t + 120_000)], NOW, [], [
+      { id: 'c1', direction: 'out', startedAt: t + 60_000, connectedAt: t + 65_000, endedAt: t + 90_000, outcome: 'completed' }
+    ])
+    expect(items.map((i) => i.kind)).toEqual(['day', 'group', 'call', 'group'])
+  })
+
   it('returns nothing for an empty history', () => {
     expect(buildTimeline([], NOW)).toEqual([])
   })

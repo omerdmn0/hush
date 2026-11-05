@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import Database from 'better-sqlite3'
 import type { ImageMeta } from '../shared/protocol'
-import type { ChatImage, ChatMessage, HistoryCursor, MessageStatus } from '../shared/types'
+import { CALL_OUTCOMES, type CallRecord, type ChatImage, type ChatMessage, type HistoryCursor, type MessageStatus } from '../shared/types'
+import { isUuid } from '../shared/protocol'
 
 /**
  * A message as stored. `authorId` is a stable install id, not "me"/"peer".
@@ -60,7 +61,20 @@ const MIGRATIONS: Migration[] = [
   },
 
   // v3 — stage d: image metadata (JSON); the image files themselves are stored on disk.
-  (db) => db.exec(`ALTER TABLE messages ADD COLUMN image TEXT;`)
+  (db) => db.exec(`ALTER TABLE messages ADD COLUMN image TEXT;`),
+
+  // v4 — call history (each computer keeps its own view of each call).
+  (db) =>
+    db.exec(`
+      CREATE TABLE calls (
+        id           TEXT PRIMARY KEY,
+        direction    TEXT NOT NULL CHECK (direction IN ('in','out')),
+        started_at   INTEGER NOT NULL,
+        connected_at INTEGER,
+        ended_at     INTEGER,
+        outcome      TEXT NOT NULL
+      );
+      CREATE INDEX calls_by_time ON calls (started_at);`)
 ]
 
 // Status only ever moves forward, so replayed or out-of-order receipts are harmless.
@@ -86,6 +100,8 @@ export class HushDb {
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
     this.migrate()
+    // A call still "ongoing" means Hush quit mid-call; close it off.
+    this.db.exec(`UPDATE calls SET outcome = CASE WHEN connected_at IS NOT NULL THEN 'completed' ELSE 'failed' END WHERE outcome = 'ongoing'`)
   }
 
   close(): void {
@@ -239,6 +255,44 @@ export class HushDb {
       .prepare(`SELECT id FROM messages WHERE author_id = ? AND status IN (${statuses.map(() => '?').join(',')})`)
       .all(authorId, ...statuses) as { id: string }[]
     return rows.map((r) => r.id)
+  }
+
+  // ---------- call history ----------
+
+  /** Inserts or updates a call record (validated: it comes from the UI). */
+  logCall(r: CallRecord): void {
+    const ok =
+      isUuid(r.id) &&
+      (r.direction === 'in' || r.direction === 'out') &&
+      Number.isSafeInteger(r.startedAt) &&
+      [r.connectedAt, r.endedAt].every((t) => t === null || Number.isSafeInteger(t)) &&
+      CALL_OUTCOMES.includes(r.outcome)
+    if (!ok) throw new Error('Invalid call record')
+    this.db
+      .prepare(
+        `INSERT INTO calls (id, direction, started_at, connected_at, ended_at, outcome) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET connected_at = excluded.connected_at, ended_at = excluded.ended_at, outcome = excluded.outcome`
+      )
+      .run(r.id.toLowerCase(), r.direction, r.startedAt, r.connectedAt, r.endedAt, r.outcome)
+  }
+
+  listCalls(): CallRecord[] {
+    const rows = this.db.prepare('SELECT * FROM calls ORDER BY started_at').all() as {
+      id: string
+      direction: 'in' | 'out'
+      started_at: number
+      connected_at: number | null
+      ended_at: number | null
+      outcome: CallRecord['outcome']
+    }[]
+    return rows.map((r) => ({
+      id: r.id,
+      direction: r.direction,
+      startedAt: r.started_at,
+      connectedAt: r.connected_at,
+      endedAt: r.ended_at,
+      outcome: r.outcome
+    }))
   }
 
   /** Image messages written by anyone but `selfId` (candidates for downloading). */

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ChatMessage, HushEvent, ImageTransfer, OutgoingImage, Settings, Snapshot } from '../../../shared/types'
+import type { CallRecord, ChatMessage, HushEvent, ImageTransfer, OutgoingImage, Settings, Snapshot } from '../../../shared/types'
 import type { DeliveryNotice } from './timeline'
 
 const PAGE = 100
@@ -12,6 +12,8 @@ export interface HushState {
   hasMore: boolean
   loadingOlder: boolean
   peerTyping: boolean
+  /** Call history, oldest first. */
+  calls: CallRecord[]
   /** Session-only "N queued messages delivered" lines. */
   notices: DeliveryNotice[]
   /** The most recent flush, for the pop-up; null once it has been dismissed. */
@@ -37,6 +39,7 @@ export function useHush(): HushState {
   const [notices, setNotices] = useState<DeliveryNotice[]>([])
   const [flush, setFlush] = useState<DeliveryNotice | null>(null)
   const [transfers, setTransfers] = useState<Record<string, ImageTransfer>>({})
+  const [calls, setCalls] = useState<CallRecord[]>([])
   const typingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loading = useRef(false)
   const hasMoreRef = useRef(false)
@@ -50,6 +53,9 @@ export function useHush(): HushState {
       switch (e.type) {
         case 'message':
           setMessages((prev) => insertSorted(prev, e.message, hasMoreRef.current))
+          break
+        case 'call-log':
+          setCalls((prev) => [...prev.filter((c) => c.id !== e.record.id), e.record].sort((a, b) => a.startedAt - b.startedAt))
           break
         case 'transfer': {
           const t = e.transfer
@@ -90,9 +96,10 @@ export function useHush(): HushState {
 
     // Subscribe first so nothing is missed between the snapshot and the first page.
     const off = api.onEvent(onEvent)
-    void Promise.all([api.getSnapshot(), api.listMessages(undefined, PAGE)]).then(([snap, page]) => {
+    void Promise.all([api.getSnapshot(), api.listMessages(undefined, PAGE), api.listCalls()]).then(([snap, page, history]) => {
       if (!alive) return
       setSnapshot(snap)
+      setCalls((live) => [...history.filter((h) => !live.some((c) => c.id === h.id)), ...live].sort((a, b) => a.startedAt - b.startedAt))
       setMessages((live) => {
         const ids = new Set(page.messages.map((m) => m.id))
         return [...page.messages, ...live.filter((m) => !ids.has(m.id))]
@@ -160,6 +167,7 @@ export function useHush(): HushState {
     hasMore,
     loadingOlder,
     peerTyping,
+    calls,
     notices,
     flush,
     dismissFlush,

@@ -140,12 +140,37 @@ describe('migration from stage b (v1)', () => {
     raw.close()
 
     const migrated = new HushDb(file)
-    expect(migrated.version).toBe(3)
+    expect(migrated.version).toBe(4)
     expect(migrated.getMessage(ids.mineEarly)?.seq).toBe(1)
     expect(migrated.getMessage(ids.mineLate)?.seq).toBe(2)
     expect(migrated.getMessage(ids.theirs)?.seq).toBeNull()
     expect(migrated.contiguousSeq(PEER)).toBe(0) // so the peer re-sends and fills it in
     expect(migrated.createOwnMessage(ME, 'next', 400).seq).toBe(3)
     migrated.close()
+  })
+})
+
+describe('call history', () => {
+  it('stores, updates and lists call records in time order', () => {
+    const a = randomUUID()
+    const b = randomUUID()
+    db.logCall({ id: b, direction: 'in', startedAt: 200, connectedAt: null, endedAt: 230, outcome: 'missed' })
+    db.logCall({ id: a, direction: 'out', startedAt: 100, connectedAt: 105, endedAt: null, outcome: 'ongoing' })
+    db.logCall({ id: a, direction: 'out', startedAt: 100, connectedAt: 105, endedAt: 400, outcome: 'completed' })
+    expect(db.listCalls().map((c) => [c.id, c.outcome, c.endedAt])).toEqual([
+      [a, 'completed', 400],
+      [b, 'missed', 230]
+    ])
+    expect(() => db.logCall({ id: 'nope', direction: 'out', startedAt: 1, connectedAt: null, endedAt: null, outcome: 'missed' })).toThrow()
+  })
+
+  it('closes calls left "ongoing" when Hush quit mid-call', () => {
+    const live = randomUUID()
+    const ringing = randomUUID()
+    db.logCall({ id: live, direction: 'out', startedAt: 1, connectedAt: 5, endedAt: null, outcome: 'ongoing' })
+    db.logCall({ id: ringing, direction: 'in', startedAt: 2, connectedAt: null, endedAt: null, outcome: 'ongoing' })
+    db.close()
+    db = new HushDb(join(dir, 'hush.db'))
+    expect(db.listCalls().map((c) => c.outcome)).toEqual(['completed', 'failed'])
   })
 })

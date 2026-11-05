@@ -1,8 +1,10 @@
 import type { CallEndReason, CallSignal } from '../../../shared/protocol'
+import type { CallDirection, CallRecord } from '../../../shared/types'
 import {
   candidateAllowed,
   ENDED_VISIBLE_MS,
   endedText,
+  outcomeFor,
   RECONNECT_GRACE_MS,
   RING_TIMEOUT_MS,
   yieldToIncoming,
@@ -32,6 +34,8 @@ export interface CallDeps {
   speakerId: () => string
   /** Dev pairing mode: allow any network interface for media. */
   anyNetwork: () => boolean
+  /** Saves a call-history entry. */
+  logCall: (record: CallRecord) => void
 }
 
 /**
@@ -49,6 +53,8 @@ export class CallController {
   private ringTimer: ReturnType<typeof setTimeout> | undefined
   private graceTimer: ReturnType<typeof setTimeout> | undefined
   private endedTimer: ReturnType<typeof setTimeout> | undefined
+  /** History entry for the current call; null until an invitation was actually sent/received. */
+  private record: CallRecord | null = null
   private readonly ringer = new Ringer()
   readonly audio: HTMLAudioElement
 
@@ -79,18 +85,28 @@ export class CallController {
 
   // ---------- user actions ----------
 
+  // Every await below re-checks `current(id)`: while we wait, the call can be cancelled or —
+  // if both pressed Call at once — replaced by the other side's call (see onInvite).
+
   async start(): Promise<void> {
     if (this.busy) return
     this.reset()
     const id = crypto.randomUUID()
     this.callId = id
     this.set({ ...IDLE, phase: 'outgoing' })
-    if (!(await this.openMic())) return this.finish('mic', 'system', false)
+    if (!(await this.openMic(id))) {
+      if (this.current(id)) this.finish('mic', 'system', false)
+      return
+    }
     const pc = this.createPc(id)
     const offer = await pc.createOffer()
+    if (!this.current(id)) return
     await pc.setLocalDescription(offer)
-    if (this.callId !== id) return // cancelled meanwhile
-    if (!(await this.deps.send({ t: 'call', id, sdp: offer.sdp ?? '' }))) return this.finish('offline', 'system', false)
+    if (!this.current(id)) return
+    const sent = await this.deps.send({ t: 'call', id, sdp: offer.sdp ?? '' })
+    if (!this.current(id)) return
+    if (!sent) return this.finish('offline', 'system', false)
+    this.newRecord(id, 'out')
     this.ringer.start('ringback', this.deps.speakerId())
     this.ringTimer = setTimeout(() => this.endCall('timeout'), RING_TIMEOUT_MS)
   }
@@ -100,17 +116,21 @@ export class CallController {
     if (this.view.phase !== 'incoming' || !id || !this.remoteOffer) return
     this.ringer.stop()
     clearTimeout(this.ringTimer)
+    const offer = this.remoteOffer
     this.set({ phase: 'connecting' })
-    if (!(await this.openMic())) {
+    if (!(await this.openMic(id))) {
+      if (!this.current(id)) return
       void this.deps.send({ t: 'call-end', id, reason: 'failed' })
       return this.finish('mic', 'system', false)
     }
     const pc = this.createPc(id)
-    await pc.setRemoteDescription({ type: 'offer', sdp: this.remoteOffer })
+    await pc.setRemoteDescription({ type: 'offer', sdp: offer })
+    if (!this.current(id)) return
     await this.flushIce()
     const answer = await pc.createAnswer()
+    if (!this.current(id)) return
     await pc.setLocalDescription(answer)
-    if (this.callId === id) void this.deps.send({ t: 'call-answer', id, sdp: answer.sdp ?? '' })
+    if (this.current(id)) void this.deps.send({ t: 'call-answer', id, sdp: answer.sdp ?? '' })
   }
 
   decline(): void {
@@ -187,6 +207,7 @@ export class CallController {
       this.teardown()
       this.callId = id
       this.remoteOffer = sdp
+      this.newRecord(id, 'in')
       this.set({ phase: 'incoming' })
       void this.deps.send({ t: 'call-ringing', id })
       return this.accept()
@@ -199,6 +220,7 @@ export class CallController {
     this.reset()
     this.callId = id
     this.remoteOffer = sdp
+    this.newRecord(id, 'in')
     this.set({ ...IDLE, phase: 'incoming' })
     void this.deps.send({ t: 'call-ringing', id })
     this.ringer.start('incoming', this.deps.speakerId())
@@ -207,13 +229,25 @@ export class CallController {
 
   // ---------- internals ----------
 
-  private async openMic(): Promise<boolean> {
-    try {
-      this.local = await getMic(this.deps.micId())
-      return true
-    } catch {
+  private newRecord(id: string, direction: CallDirection): void {
+    this.record = { id, direction, startedAt: Date.now(), connectedAt: null, endedAt: null, outcome: 'ongoing' }
+  }
+
+  /** True while `id` is still the call this controller is handling. */
+  private current(id: string): boolean {
+    return this.callId === id
+  }
+
+  /** Opens the microphone for call `id`; a stream that arrives after the call changed is discarded. */
+  private async openMic(id: string): Promise<boolean> {
+    const stream = await getMic(this.deps.micId()).catch(() => null)
+    if (!stream) return false
+    if (!this.current(id)) {
+      stream.getTracks().forEach((t) => t.stop())
       return false
     }
+    this.local = stream
+    return true
   }
 
   private createPc(id: string): RTCPeerConnection {
@@ -235,7 +269,14 @@ export class CallController {
       switch (pc.connectionState) {
         case 'connected':
           clearTimeout(this.graceTimer)
-          if (this.view.phase !== 'active') this.set({ phase: 'active', connectedAt: Date.now() })
+          if (this.view.phase !== 'active') {
+            const now = Date.now()
+            this.set({ phase: 'active', connectedAt: now })
+            if (this.record) {
+              this.record = { ...this.record, connectedAt: now }
+              this.deps.logCall(this.record)
+            }
+          }
           break
         case 'disconnected':
           clearTimeout(this.graceTimer)
@@ -263,6 +304,11 @@ export class CallController {
 
   private finish(reason: Parameters<typeof endedText>[0], by: EndedBy, withDuration: boolean): void {
     const duration = withDuration && this.view.connectedAt ? Date.now() - this.view.connectedAt : null
+    if (this.record) {
+      const r = this.record
+      this.deps.logCall({ ...r, endedAt: Date.now(), outcome: outcomeFor(r.direction, reason, r.connectedAt !== null) })
+      this.record = null
+    }
     this.teardown()
     this.callId = null
     this.set({ ...IDLE, phase: 'ended', endedText: endedText(reason, by, this.deps.peerName(), duration) })

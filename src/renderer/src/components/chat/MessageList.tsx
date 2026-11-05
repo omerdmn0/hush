@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import type { ChatMessage } from '../../../../shared/types'
-import { CircleCheck } from 'lucide-react'
+import { CircleCheck, Phone, PhoneIncoming, PhoneMissed, PhoneOff, PhoneOutgoing } from 'lucide-react'
+import type { CallRecord } from '../../../../shared/types'
+import { Button } from '@/components/ui/button'
+import { callLogText } from '@/lib/callLogic'
+import { cn } from '@/lib/utils'
+import type { CallAction } from '@/lib/view'
 import { formatTime } from '@/lib/format'
 import { buildTimeline, lastQueuedId, type DeliveryNotice, type TimelineItem } from '@/lib/timeline'
 import { Avatar } from '@/components/common'
@@ -18,6 +23,8 @@ const Column = ({ children }: { children: ReactNode }): ReactNode => (
 export function MessageList({
   messages,
   notices,
+  calls,
+  callAction,
   peerName,
   typing,
   hasMore,
@@ -27,6 +34,8 @@ export function MessageList({
 }: {
   messages: ChatMessage[]
   notices: DeliveryNotice[]
+  calls: CallRecord[]
+  callAction: CallAction
   peerName: string
   typing: boolean
   hasMore: boolean
@@ -34,7 +43,7 @@ export function MessageList({
   onLoadOlder: () => void
   images: ImageActions
 }): ReactNode {
-  const items = useMemo(() => buildTimeline(messages, Date.now(), notices), [messages, notices])
+  const items = useMemo(() => buildTimeline(messages, Date.now(), notices, calls), [messages, notices, calls])
 
   // Virtuoso keeps the scroll position on prepend when firstItemIndex drops by exactly the
   // number of prepended items. Recomputed idempotently during render (StrictMode-safe).
@@ -98,6 +107,8 @@ export function MessageList({
               </div>
             ) : item.kind === 'notice' ? (
               <NoticeLine notice={item.notice} peerName={peerName} />
+            ) : item.kind === 'call' ? (
+              <CallLine call={item.call} peerName={peerName} callAction={callAction} />
             ) : (
               <MessageGroup from={item.from} messages={item.messages} peerName={peerName} queuedNoteAfter={noteAfter} images={images} />
             )}
@@ -150,6 +161,34 @@ function NoticeLine({ notice, peerName }: { notice: DeliveryNotice; peerName: st
         {deliveredText(notice.count)} · {formatTime(notice.at)}
         <span className="sr-only"> to {peerName}</span>
       </span>
+    </div>
+  )
+}
+
+function CallLine({ call, peerName, callAction }: { call: CallRecord; peerName: string; callAction: CallAction }): ReactNode {
+  const missed = call.outcome === 'missed'
+  const done = call.outcome === 'completed' || call.outcome === 'ongoing'
+  const Icon = missed ? PhoneMissed : !done ? PhoneOff : call.direction === 'out' ? PhoneOutgoing : PhoneIncoming
+  return (
+    <div className={cn('rule pt-[18px]', missed && '[--rule-c:color-mix(in_srgb,var(--danger-text)_45%,transparent)]')}>
+      <span className={cn('label inline-flex items-center gap-1.5', missed ? 'text-danger-text' : done ? 'text-cyan' : 'text-text-muted')}>
+        <Icon aria-hidden="true" className="size-3.5" />
+        {callLogText(call, peerName)} · {formatTime(call.startedAt)}
+      </span>
+      {missed && (
+        <Button
+          variant="secondary"
+          size="sm"
+          className="h-7"
+          aria-disabled={!callAction.enabled}
+          aria-label={callAction.enabled ? `Call ${peerName} back` : `Call back (${callAction.hint})`}
+          title={callAction.enabled ? undefined : callAction.hint}
+          onClick={() => callAction.enabled && callAction.onCall()}
+        >
+          <Phone />
+          Call back
+        </Button>
+      )}
     </div>
   )
 }

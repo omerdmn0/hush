@@ -1,6 +1,7 @@
 // Pure call decisions (unit-tested); the WebRTC plumbing lives in call.ts.
 import { isTailscaleIp } from '../../../shared/ip'
 import type { CallEndReason } from '../../../shared/protocol'
+import type { CallDirection, CallOutcome, CallRecord } from '../../../shared/types'
 
 /** Ring for this long before giving up ("No answer"). */
 export const RING_TIMEOUT_MS = 45_000
@@ -61,4 +62,50 @@ export function endedText(reason: CallEndReason | 'offline' | 'mic' | 'lost', by
 export function formatDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
   return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map((n) => String(n).padStart(2, '0')).join(':')
+}
+
+/** How a finished call is remembered in the history. */
+export function outcomeFor(
+  direction: CallDirection,
+  reason: CallEndReason | 'offline' | 'mic' | 'lost',
+  connected: boolean
+): CallOutcome {
+  if (connected) return 'completed'
+  switch (reason) {
+    case 'declined':
+      return 'declined'
+    case 'cancelled':
+      return direction === 'in' ? 'missed' : 'cancelled'
+    case 'timeout':
+      return direction === 'in' ? 'missed' : 'no-answer'
+    case 'busy':
+      return 'busy'
+    case 'lost':
+      return direction === 'in' ? 'missed' : 'failed'
+    default:
+      return 'failed'
+  }
+}
+
+/** Timeline line for a call-history entry, from this computer's point of view. */
+export function callLogText(r: CallRecord, peerName: string): string {
+  const duration = r.connectedAt && r.endedAt ? ` · ${formatDuration(r.endedAt - r.connectedAt).replace(/^00:/, '')}` : ''
+  const out = r.direction === 'out'
+  switch (r.outcome) {
+    case 'completed':
+    case 'ongoing':
+      return (out ? `You called ${peerName}` : `${peerName} called you`) + duration
+    case 'missed':
+      return `Missed call from ${peerName}`
+    case 'declined':
+      return out ? `${peerName} declined your call` : `You declined a call from ${peerName}`
+    case 'cancelled':
+      return `You cancelled a call to ${peerName}`
+    case 'no-answer':
+      return `${peerName} didn't answer`
+    case 'busy':
+      return `${peerName} was busy`
+    case 'failed':
+      return out ? `Call to ${peerName} failed` : `Call from ${peerName} failed`
+  }
 }

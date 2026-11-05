@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url'
 import icon from '../../resources/icon.png?asset'
 import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame } from '../shared/protocol'
 import { isTailscaleIp } from '../shared/ip'
-import { IPC, type HistoryCursor, type HushEvent, type NetState, type OutgoingImage, type Settings } from '../shared/types'
+import { IPC, type CallRecord, type HistoryCursor, type HushEvent, type NetState, type OutgoingImage, type Settings } from '../shared/types'
 import { ChatService } from './chat'
 import { HushDb } from './db'
 import { ImageStore } from './images'
@@ -167,6 +167,17 @@ if (!app.requestSingleInstanceLock()) {
       throw new Error('Invalid image')
     }
     return chat.sendImage(img, caption) // validates type, signature, size and preview
+  })
+
+  ipcMain.handle(IPC.listCalls, () => db.listCalls())
+
+  ipcMain.on(IPC.logCall, (_e, record: CallRecord) => {
+    try {
+      db.logCall(record)
+      send({ type: 'call-log', record: db.listCalls().find((c) => c.id === record.id.toLowerCase())! })
+    } catch {
+      // ignore malformed records
+    }
   })
 
   ipcMain.on(IPC.retryImage, (_e, id: unknown) => {

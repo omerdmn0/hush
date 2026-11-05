@@ -20,7 +20,8 @@ export function useCall(opts: Options): { view: CallView; call: CallController }
         peerName: () => latest.current.peerName,
         micId: () => latest.current.micId,
         speakerId: () => latest.current.speakerId,
-        anyNetwork: () => latest.current.devPairing
+        anyNetwork: () => latest.current.devPairing,
+        logCall: (record) => window.hush.logCall(record)
       })
   )
   const view = useSyncExternalStore(

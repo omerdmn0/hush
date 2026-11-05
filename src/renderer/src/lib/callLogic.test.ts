@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { candidateAllowed, endedText, formatDuration, yieldToIncoming } from './callLogic'
+import { callLogText, candidateAllowed, endedText, formatDuration, outcomeFor, yieldToIncoming } from './callLogic'
 
 const cand = (addr: string, type = 'host'): string => `candidate:842163049 1 udp 1677729535 ${addr} 50404 typ ${type} generation 0`
 
@@ -38,5 +38,27 @@ describe('endedText', () => {
   it('formats durations', () => {
     expect(formatDuration(0)).toBe('00:00:00')
     expect(formatDuration(3_725_400)).toBe('01:02:05')
+  })
+})
+
+describe('call history', () => {
+  it('maps how a call ended to its history outcome', () => {
+    expect(outcomeFor('out', 'hangup', true)).toBe('completed')
+    expect(outcomeFor('in', 'failed', true)).toBe('completed') // audio dropped after talking
+    expect(outcomeFor('in', 'cancelled', false)).toBe('missed')
+    expect(outcomeFor('in', 'timeout', false)).toBe('missed')
+    expect(outcomeFor('out', 'timeout', false)).toBe('no-answer')
+    expect(outcomeFor('out', 'cancelled', false)).toBe('cancelled')
+    expect(outcomeFor('in', 'declined', false)).toBe('declined')
+    expect(outcomeFor('out', 'busy', false)).toBe('busy')
+  })
+  it('words entries from this computer’s point of view', () => {
+    const base = { id: 'x', startedAt: 0, connectedAt: 1_000, endedAt: 253_000, direction: 'out' as const, outcome: 'completed' as const }
+    expect(callLogText(base, 'Mira')).toBe('You called Mira · 04:12')
+    expect(callLogText({ ...base, direction: 'in' }, 'Mira')).toBe('Mira called you · 04:12')
+    expect(callLogText({ ...base, endedAt: 3_726_000 }, 'Mira')).toBe('You called Mira · 01:02:05')
+    expect(callLogText({ ...base, direction: 'in', outcome: 'missed', connectedAt: null }, 'Mira')).toBe('Missed call from Mira')
+    expect(callLogText({ ...base, outcome: 'declined', connectedAt: null }, 'Mira')).toBe('Mira declined your call')
+    expect(callLogText({ ...base, outcome: 'no-answer', connectedAt: null }, 'Mira')).toBe("Mira didn't answer")
   })
 })

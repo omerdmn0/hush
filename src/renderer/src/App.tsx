@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { ChatMessage } from '../../shared/types'
+import type { CallRecord, ChatMessage } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatHeader } from '@/components/chat/ChatHeader'
 import { CircleCheck, ImagePlus } from 'lucide-react'
@@ -199,12 +199,14 @@ export default function App(): ReactNode {
             )}
             {!peer ? (
               <FirstRun ownIp={snapshot.net.ownIp} onOpenSettings={openConnection} />
-            ) : messages.length === 0 && !hush.peerTyping ? (
+            ) : messages.length === 0 && hush.calls.length === 0 && !hush.peerTyping ? (
               <EmptyChat peerName={peer.name} onSayHi={() => composer.current?.focus()} />
             ) : (
               <MessageList
                 messages={messages}
                 notices={hush.notices}
+                calls={visibleCalls(hush.calls, messages, hush.hasMore)}
+                callAction={callAction}
                 peerName={peer.name}
                 typing={hush.peerTyping}
                 hasMore={hush.hasMore}
@@ -335,4 +337,11 @@ function callAnnouncement(v: CallView, peerName: string): string | null {
     default:
       return null
   }
+}
+
+/** Calls older than the loaded part of history appear once paging reaches them. */
+function visibleCalls(calls: CallRecord[], messages: ChatMessage[], hasMore: boolean): CallRecord[] {
+  if (!hasMore || messages.length === 0) return calls
+  const oldest = messages[0].sentAt
+  return calls.filter((c) => c.startedAt >= oldest)
 }
