@@ -3,12 +3,10 @@ import { Phone } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Avatar, HudLabel, StatusTag } from '@/components/common'
-import type { PeerView } from '@/lib/view'
+import type { CallAction, PeerView } from '@/lib/view'
 
-export function ChatHeader({ peer }: { peer: PeerView | null }): ReactNode {
+export function ChatHeader({ peer, call }: { peer: PeerView | null; call: CallAction }): ReactNode {
   const online = peer?.presence === 'online'
-  // Voice calls arrive in stage e.
-  const hint = !peer ? 'No one linked yet' : !online ? `${peer.name} is offline` : "Voice calls aren't available yet"
   return (
     <header className="relative flex h-16 flex-none items-center gap-3 bg-app pr-4 pl-6 after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-[linear-gradient(90deg,var(--cyan),var(--edge)_45%,var(--edge))] after:opacity-80">
       {peer && <Avatar name={peer.name} who="peer" size={32} />}
@@ -20,11 +18,17 @@ export function ChatHeader({ peer }: { peer: PeerView | null }): ReactNode {
       <div className="flex-1" />
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button variant="icon" size="icon" aria-label={`Voice call (${hint})`} aria-disabled>
+          <Button
+            variant="icon"
+            size="icon"
+            aria-label={call.enabled ? call.hint : `Voice call (${call.hint})`}
+            aria-disabled={!call.enabled}
+            onClick={() => call.enabled && call.onCall()}
+          >
             <Phone className="size-5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{hint}</TooltipContent>
+        <TooltipContent>{call.hint}</TooltipContent>
       </Tooltip>
     </header>
   )

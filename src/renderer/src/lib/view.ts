@@ -8,3 +8,10 @@ export interface PeerView {
   /** "13:11" — last time they were seen online, if ever. */
   lastSeen?: string
 }
+
+/** Whether the Call buttons work right now, and why not. */
+export interface CallAction {
+  enabled: boolean
+  hint: string
+  onCall: () => void
+}

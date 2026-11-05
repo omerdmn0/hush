@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Check, CircleAlert, Copy, RefreshCw, Upload, X } from 'lucide-react'
+import { Check, CircleAlert, Copy, Mic, RefreshCw, Upload, Volume2, X } from 'lucide-react'
 import { checkPeerIp, type PeerIpProblem } from '../../../../shared/ip'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -8,6 +8,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import type { NetState, Settings } from '../../../../shared/types'
 import { Avatar, StatusTag } from '@/components/common'
+import { getMic } from '@/lib/call'
+import { Ringer } from '@/lib/ringtone'
+import { useAudioDevices, type AudioDevice } from '@/lib/useAudioDevices'
 import { cn } from '@/lib/utils'
 import type { PeerView } from '@/lib/view'
 
@@ -116,9 +119,7 @@ export function SettingsScreen({
           </Module>
 
           <Module index={3} id="audio" title="Audio">
-            <DeviceSelect id="mic" label="Microphone" />
-            <DeviceSelect id="speaker" label="Speaker" />
-            <p className="m-0 text-xs text-text-muted">Device selection is wired up together with voice calls.</p>
+            <AudioSettings settings={settings} onChange={onChange} />
           </Module>
 
           <Module index={4} id="notifications" title="Notifications">
@@ -297,19 +298,156 @@ function PeerIpField({ value, ownIp, onSave }: { value: string; ownIp: string | 
   )
 }
 
-function DeviceSelect({ id, label }: { id: string; label: string }): ReactNode {
+const SYSTEM_DEFAULT = 'default'
+
+function AudioSettings({ settings, onChange }: { settings: Settings; onChange: (patch: Partial<Settings>) => Promise<void> }): ReactNode {
+  const { mics, speakers, refresh } = useAudioDevices()
+  const unlabelled = mics.length > 0 && mics.every((m) => /^Microphone \d+$/.test(m.label))
+  return (
+    <>
+      <DeviceSelect id="mic" label="Microphone" value={settings.micId} devices={mics} onChange={(micId) => void onChange({ micId })} />
+      <MicTest micId={settings.micId} onPermission={refresh} />
+      <DeviceSelect id="speaker" label="Speaker" value={settings.speakerId} devices={speakers} onChange={(speakerId) => void onChange({ speakerId })} />
+      <div>
+        <SpeakerTest speakerId={settings.speakerId} />
+      </div>
+      {unlabelled && <p className="m-0 text-xs text-text-muted">Device names appear after you test the microphone once.</p>}
+    </>
+  )
+}
+
+function DeviceSelect({
+  id,
+  label,
+  value,
+  devices,
+  onChange
+}: {
+  id: string
+  label: string
+  value: string
+  devices: AudioDevice[]
+  onChange: (deviceId: string) => void
+}): ReactNode {
+  // A saved device that is currently unplugged shows as the system default.
+  const current = devices.some((d) => d.id === value) ? value : SYSTEM_DEFAULT
   return (
     <div className="flex max-w-[420px] flex-col gap-1.5">
       <Label htmlFor={id}>{label}</Label>
-      <Select disabled defaultValue="default">
+      <Select value={current} onValueChange={(v) => onChange(v === SYSTEM_DEFAULT ? '' : v)}>
         <SelectTrigger id={id}>
           <SelectValue />
         </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="default">System default</SelectItem>
+        <SelectContent position="popper">
+          <SelectItem value={SYSTEM_DEFAULT}>System default</SelectItem>
+          {devices.map((d) => (
+            <SelectItem key={d.id} value={d.id}>
+              {d.label}
+            </SelectItem>
+          ))}
         </SelectContent>
       </Select>
     </div>
+  )
+}
+
+const METER_SEGMENTS = 24
+
+/** Live input level from the chosen microphone, so you can check it before a call. */
+function MicTest({ micId, onPermission }: { micId: string; onPermission: () => void }): ReactNode {
+  const [testing, setTesting] = useState(false)
+  const [level, setLevel] = useState(0)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!testing) return
+    let stream: MediaStream | null = null
+    let ctx: AudioContext | null = null
+    let frame = 0
+    let stopped = false
+    getMic(micId)
+      .then((s) => {
+        if (stopped) return s.getTracks().forEach((t) => t.stop())
+        stream = s
+        onPermission() // labels become available now
+        ctx = new AudioContext()
+        const analyser = ctx.createAnalyser()
+        analyser.fftSize = 512
+        ctx.createMediaStreamSource(s).connect(analyser)
+        const data = new Uint8Array(analyser.fftSize)
+        const tick = (): void => {
+          analyser.getByteTimeDomainData(data)
+          let peak = 0
+          for (const v of data) peak = Math.max(peak, Math.abs(v - 128))
+          setLevel(Math.min(1, peak / 64))
+          frame = requestAnimationFrame(tick)
+        }
+        tick()
+      })
+      .catch(() => {
+        setError('Hush can’t use your microphone. Check that it’s connected and that Hush is allowed to use it.')
+        setTesting(false)
+      })
+    return () => {
+      stopped = true
+      cancelAnimationFrame(frame)
+      stream?.getTracks().forEach((t) => t.stop())
+      void ctx?.close()
+      setLevel(0)
+    }
+  }, [testing, micId, onPermission])
+
+  const lit = Math.round(level * METER_SEGMENTS)
+  return (
+    <div className="flex max-w-[420px] flex-col gap-1.5">
+      <span id="mic-level" className="text-sm font-semibold">
+        Input level
+      </span>
+      <div
+        role="meter"
+        aria-labelledby="mic-level"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(level * 100)}
+        className="flex h-3 gap-[3px]"
+      >
+        {Array.from({ length: METER_SEGMENTS }, (_, i) => (
+          <span key={i} className={cn('flex-1', i < lit ? (i >= 19 ? 'bg-queued' : 'bg-online') : 'bg-pressed')} />
+        ))}
+      </div>
+      <div className="flex items-center gap-3">
+        <Button variant="secondary" size="sm" onClick={() => (setError(null), setTesting((t) => !t))}>
+          <Mic />
+          {testing ? 'Stop test' : 'Test microphone'}
+        </Button>
+        <span className="text-xs text-text-muted">{testing ? 'Speak — the bars should move.' : 'Check your microphone before a call.'}</span>
+      </div>
+      {error && (
+        <span role="alert" className="flex items-start gap-1.5 text-xs text-danger-text">
+          <CircleAlert aria-hidden="true" className="mt-px size-3.5 flex-none" />
+          {error}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function SpeakerTest({ speakerId }: { speakerId: string }): ReactNode {
+  const [playing, setPlaying] = useState(false)
+  const play = (): void => {
+    const ringer = new Ringer()
+    ringer.start('incoming', speakerId)
+    setPlaying(true)
+    setTimeout(() => {
+      ringer.stop()
+      setPlaying(false)
+    }, 1600)
+  }
+  return (
+    <Button variant="secondary" size="sm" onClick={play} disabled={playing}>
+      <Volume2 />
+      {playing ? 'Playing…' : 'Play test sound'}
+    </Button>
   )
 }
 

@@ -8,6 +8,7 @@ const api: HushApi = {
   sendMessage: (text) => ipcRenderer.invoke(IPC.sendMessage, text),
   sendImage: (image, caption) => ipcRenderer.invoke(IPC.sendImage, image, caption),
   retryImage: (id) => ipcRenderer.send(IPC.retryImage, id),
+  sendCallSignal: (signal) => ipcRenderer.invoke(IPC.callSignal, signal),
   markRead: (ids) => ipcRenderer.send(IPC.markRead, ids),
   setTyping: (on) => ipcRenderer.send(IPC.setTyping, on),
   updateSettings: (patch) => ipcRenderer.invoke(IPC.updateSettings, patch),

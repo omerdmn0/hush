@@ -4,7 +4,7 @@ import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import icon from '../../resources/icon.png?asset'
-import { DEFAULT_PORT, MAX_TEXT_LENGTH } from '../shared/protocol'
+import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame } from '../shared/protocol'
 import { isTailscaleIp } from '../shared/ip'
 import { IPC, type HistoryCursor, type HushEvent, type NetState, type OutgoingImage, type Settings } from '../shared/types'
 import { ChatService } from './chat'
@@ -29,6 +29,13 @@ const peerPort = Number(env('HUSH_PEER_PORT') ?? DEFAULT_PORT)
 
 if (dev) app.setPath('userData', join(app.getPath('appData'), profile ? `Hush-dev-${profile}` : 'Hush-dev'))
 
+// Dev-only: fake microphone + auto-granted prompt, so calls can be tested without hardware.
+if (env('HUSH_FAKE_MEDIA')) {
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream')
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
+}
+const devPairing = env('HUSH_PEER') !== undefined
+
 // hush-img://<message-id>/thumb|full serves stored images to the UI (must be declared before ready).
 protocol.registerSchemesAsPrivileged([{ scheme: 'hush-img', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
@@ -49,6 +56,8 @@ if (!app.requestSingleInstanceLock()) {
     displayName: userInfo().username,
     peerIp: '',
     notifications: true,
+    micId: '',
+    speakerId: '',
     ...db.getSetting<Partial<Settings>>('settings')
   }
 
@@ -76,6 +85,10 @@ if (!app.requestSingleInstanceLock()) {
   link.on('problem', (message) => {
     net.error = message
     send({ type: 'net', net: { ...net } })
+  })
+  // Call signaling is relayed to the UI untouched (it holds the WebRTC connection).
+  link.on('frame', (frame) => {
+    if (isCallSignal(frame)) send({ type: 'call', signal: frame })
   })
   link.on('up', () => {
     if (net.error && net.listening) {
@@ -114,6 +127,8 @@ if (!app.requestSingleInstanceLock()) {
     })
 
     mainWindow.once('ready-to-show', () => mainWindow?.show())
+    // Gather WebRTC candidates on every interface, so the Tailscale address is among them.
+    mainWindow.webContents.setWebRTCIPHandlingPolicy('default')
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
 
@@ -127,7 +142,14 @@ if (!app.requestSingleInstanceLock()) {
 
   // ---------- IPC (inputs from the renderer are validated here) ----------
 
-  ipcMain.handle(IPC.snapshot, () => ({ settings: visible(settings), peer: chat.peerState(), net: { ...net } }))
+  ipcMain.handle(IPC.snapshot, () => ({ settings: visible(settings), peer: chat.peerState(), net: { ...net }, devPairing }))
+
+  ipcMain.handle(IPC.callSignal, (_e, signal: unknown) => {
+    // Same validation as frames from the network.
+    const frame = parseFrame(JSON.stringify(signal ?? null))
+    if (!frame || !isCallSignal(frame)) return false
+    return link.send(frame)
+  })
 
   ipcMain.handle(IPC.listMessages, (_e, before?: HistoryCursor, limit?: number) => {
     const cursor =
@@ -163,6 +185,8 @@ if (!app.requestSingleInstanceLock()) {
     const next = { ...settings }
     if (typeof patch.displayName === 'string') next.displayName = patch.displayName.trim().slice(0, 40)
     if (typeof patch.notifications === 'boolean') next.notifications = patch.notifications
+    if (typeof patch.micId === 'string' && patch.micId.length <= 256) next.micId = patch.micId
+    if (typeof patch.speakerId === 'string' && patch.speakerId.length <= 256) next.speakerId = patch.speakerId
     if (typeof patch.peerIp === 'string') {
       const ip = patch.peerIp.trim()
       if (ip !== '' && !isTailscaleIp(ip)) throw new Error('Not a Tailscale IP')

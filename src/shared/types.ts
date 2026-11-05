@@ -1,3 +1,5 @@
+import type { CallSignal } from './protocol'
+
 // Types shared by the main process, preload and renderer.
 
 export type MessageStatus = 'queued' | 'sent' | 'delivered' | 'read'
@@ -60,6 +62,9 @@ export interface Settings {
   displayName: string
   peerIp: string
   notifications: boolean
+  /** Preferred microphone / speaker (MediaDeviceInfo.deviceId); '' = system default. */
+  micId: string
+  speakerId: string
 }
 
 export type Presence = 'online' | 'offline'
@@ -86,6 +91,11 @@ export interface Snapshot {
   settings: Settings
   peer: PeerState
   net: NetState
+  /**
+   * Dev pairing mode (two copies over loopback): calls may use any network interface instead of
+   * Tailscale only, and test hooks are exposed. Always false in installed builds.
+   */
+  devPairing: boolean
 }
 
 export type HushEvent =
@@ -96,6 +106,8 @@ export type HushEvent =
   | { type: 'net'; net: NetState }
   | { type: 'settings'; settings: Settings }
   | { type: 'transfer'; transfer: ImageTransfer }
+  /** WebRTC signaling from the other app. */
+  | { type: 'call'; signal: CallSignal }
   /** Messages that were queued while offline have now been delivered. */
   | { type: 'flushed'; count: number; at: number }
 
@@ -109,6 +121,8 @@ export interface HushApi {
   sendImage(image: OutgoingImage, caption: string): Promise<ChatMessage>
   /** Try downloading a failed image again. */
   retryImage(id: string): void
+  /** Sends WebRTC signaling to the other app; resolves false if it's offline. */
+  sendCallSignal(signal: CallSignal): Promise<boolean>
   markRead(ids: string[]): void
   setTyping(on: boolean): void
   updateSettings(patch: Partial<Settings>): Promise<Settings>
@@ -124,6 +138,7 @@ export const IPC = {
   sendMessage: 'hush:send-message',
   sendImage: 'hush:send-image',
   retryImage: 'hush:retry-image',
+  callSignal: 'hush:call-signal',
   markRead: 'hush:mark-read',
   setTyping: 'hush:set-typing',
   updateSettings: 'hush:update-settings',

@@ -3,17 +3,19 @@ import { Phone, Settings, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Avatar, HudLabel, Logo, StatusTag } from '@/components/common'
-import type { PeerView } from '@/lib/view'
+import type { CallAction, PeerView } from '@/lib/view'
 
 export function Sidebar({
   peer,
   myName,
+  call,
   onOpenSettings,
   onLinkPeer,
   settingsButtonRef
 }: {
   peer: PeerView | null
   myName: string
+  call: CallAction
   onOpenSettings: () => void
   onLinkPeer: () => void
   settingsButtonRef: Ref<HTMLButtonElement>
@@ -31,7 +33,7 @@ export function Sidebar({
       </div>
 
       <HudLabel className="px-4 pt-2 pb-1.5">Link</HudLabel>
-      {peer ? <PeerCard peer={peer} /> : <NoPeerCard onOpenSettings={onLinkPeer} />}
+      {peer ? <PeerCard peer={peer} call={call} /> : <NoPeerCard onOpenSettings={onLinkPeer} />}
 
       <div className="flex-1" />
       <div className="data mx-4 mb-3 flex items-start gap-2 text-text-muted">
@@ -57,10 +59,8 @@ export function Sidebar({
   )
 }
 
-function PeerCard({ peer }: { peer: PeerView }): ReactNode {
+function PeerCard({ peer, call }: { peer: PeerView; call: CallAction }): ReactNode {
   const online = peer.presence === 'online'
-  // Voice calls arrive in stage e.
-  const callHint = online ? "Voice calls aren't available yet" : `${peer.name} is offline`
   return (
     <div className="cut panel mx-3 flex flex-col items-center gap-1.5 px-4 pt-[18px] pb-4 text-center">
       <div className="reticle">
@@ -74,14 +74,15 @@ function PeerCard({ peer }: { peer: PeerView }): ReactNode {
         <TooltipTrigger asChild>
           <Button
             className="mt-2.5 w-full"
-            aria-disabled
-            aria-label={`Call ${peer.name} (${callHint})`}
+            aria-disabled={!call.enabled}
+            aria-label={call.enabled ? call.hint : `Call ${peer.name} (${call.hint})`}
+            onClick={() => call.enabled && call.onCall()}
           >
             <Phone />
             Call
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{callHint}</TooltipContent>
+        <TooltipContent>{call.hint}</TooltipContent>
       </Tooltip>
     </div>
   )

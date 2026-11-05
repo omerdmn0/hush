@@ -84,3 +84,21 @@ describe('images', () => {
     expect(sniffImage(new TextEncoder().encode('<svg xmlns='))).toBeNull()
   })
 })
+
+describe('call signaling', () => {
+  it('accepts valid call frames', () => {
+    expect(parseFrame(j({ t: 'call', id: A, sdp: 'v=0' }))).toEqual({ t: 'call', id: A, sdp: 'v=0' })
+    expect(parseFrame(j({ t: 'call-answer', id: A, sdp: 'v=0' }))).toMatchObject({ t: 'call-answer' })
+    expect(parseFrame(j({ t: 'call-ringing', id: A }))).toEqual({ t: 'call-ringing', id: A })
+    expect(parseFrame(j({ t: 'call-ice', id: A, candidate: 'candidate:1 1 udp 1 100.64.0.1 5000 typ host', mid: '0', line: 0 }))).toMatchObject({ t: 'call-ice', mid: '0' })
+    expect(parseFrame(j({ t: 'call-ice', id: A, candidate: '', mid: null, line: null }))).toMatchObject({ t: 'call-ice', candidate: '' })
+    expect(parseFrame(j({ t: 'call-end', id: A, reason: 'declined' }))).toEqual({ t: 'call-end', id: A, reason: 'declined' })
+  })
+  it('rejects malformed call frames', () => {
+    expect(parseFrame(j({ t: 'call', id: A, sdp: '' }))).toBeNull()
+    expect(parseFrame(j({ t: 'call', id: A, sdp: 'x'.repeat(32_001) }))).toBeNull()
+    expect(parseFrame(j({ t: 'call-ice', id: A, candidate: 'x'.repeat(1025), mid: null, line: null }))).toBeNull()
+    expect(parseFrame(j({ t: 'call-ice', id: A, candidate: 'c', mid: 5, line: 0 }))).toBeNull()
+    expect(parseFrame(j({ t: 'call-end', id: A, reason: 'exploded' }))).toBeNull()
+  })
+})

@@ -3,6 +3,8 @@ import type { ChatMessage } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatHeader } from '@/components/chat/ChatHeader'
 import { CircleCheck, ImagePlus } from 'lucide-react'
+import { CallBar } from '@/components/chat/CallBar'
+import { IncomingCall } from '@/components/chat/IncomingCall'
 import { deliveredText, MessageList } from '@/components/chat/MessageList'
 import { Composer, type ComposerHandle } from '@/components/chat/Composer'
 import { Lightbox } from '@/components/chat/Lightbox'
@@ -10,8 +12,11 @@ import type { ImageActions } from '@/components/chat/MessageGroup'
 import { EmptyChat, FirstRun } from '@/components/chat/EmptyStates'
 import { SettingsScreen, type SectionId } from '@/components/settings/SettingsScreen'
 import { formatLastSeen } from '@/lib/format'
+import type { CallView } from '@/lib/call'
+import { useAudioDevices } from '@/lib/useAudioDevices'
+import { useCall } from '@/lib/useCall'
 import { useHush } from '@/lib/useHush'
-import type { PeerView } from '@/lib/view'
+import type { CallAction, PeerView } from '@/lib/view'
 
 /** True while the user can actually see the chat (window focused and visible). */
 function useWindowActive(): boolean {
@@ -82,6 +87,26 @@ export default function App(): ReactNode {
     }
   }, [snapshot])
 
+  const { view: callView, call } = useCall({
+    peerName: peer?.name ?? 'Peer',
+    peerOnline: peer?.presence === 'online',
+    micId: snapshot?.settings.micId ?? '',
+    speakerId: snapshot?.settings.speakerId ?? '',
+    devPairing: snapshot?.devPairing ?? false
+  })
+  const { mics } = useAudioDevices()
+  const callAction: CallAction = {
+    enabled: peer?.presence === 'online' && !call.busy,
+    hint: !peer
+      ? 'No one linked yet'
+      : peer.presence !== 'online'
+        ? `${peer.name} is offline`
+        : call.busy
+          ? 'Already in a call'
+          : `Call ${peer.name}`,
+    onCall: () => void call.start()
+  }
+
   // Read receipts: mark their messages read while the chat is actually on screen.
   useEffect(() => {
     if (!windowActive || screen !== 'chat') return
@@ -130,6 +155,7 @@ export default function App(): ReactNode {
           <Sidebar
             peer={peer}
             myName={snapshot.settings.displayName}
+            call={callAction}
             onOpenSettings={() => openSettings()}
             onLinkPeer={openConnection}
             settingsButtonRef={settingsButton}
@@ -156,7 +182,21 @@ export default function App(): ReactNode {
               if (peer) composerHandle.current?.addFiles([...e.dataTransfer.files])
             }}
           >
-            <ChatHeader peer={peer} />
+            <ChatHeader peer={peer} call={callAction} />
+            {peer && (
+              <CallBar
+                view={callView}
+                peerName={peer.name}
+                mics={mics}
+                micId={snapshot.settings.micId}
+                onMicChange={(micId) => {
+                  void hush.updateSettings({ micId })
+                  void call.switchMic(micId)
+                }}
+                onToggleMute={() => call.toggleMute()}
+                onHangUp={() => call.hangUp()}
+              />
+            )}
             {!peer ? (
               <FirstRun ownIp={snapshot.net.ownIp} onOpenSettings={openConnection} />
             ) : messages.length === 0 && !hush.peerTyping ? (
@@ -189,6 +229,12 @@ export default function App(): ReactNode {
           </main>
         </>
       )}
+      <IncomingCall
+        open={callView.phase === 'incoming'}
+        peerName={peer?.name ?? 'Peer'}
+        onAccept={() => void call.accept()}
+        onDecline={() => call.decline()}
+      />
       <Lightbox
         message={viewing && (messages.find((m) => m.id === viewing.id) ?? viewing)}
         peerName={peer?.name ?? 'Peer'}
@@ -200,6 +246,7 @@ export default function App(): ReactNode {
         typing={hush.peerTyping}
         lastIncomingId={lastIncomingId(messages)}
         flushText={hush.flush && peer ? deliveredText(hush.flush.count, peer.name) : null}
+        callText={callAnnouncement(callView, peer?.name ?? 'Peer')}
       />
     </div>
   )
@@ -215,14 +262,19 @@ function LiveAnnouncer({
   peerName,
   typing,
   lastIncomingId,
-  flushText
+  flushText,
+  callText
 }: {
   peerName: string
   typing: boolean
   lastIncomingId: string | null
   flushText: string | null
+  callText: string | null
 }): ReactNode {
   const [text, setText] = useState('')
+  useEffect(() => {
+    if (callText) setText(callText)
+  }, [callText])
   useEffect(() => {
     if (flushText) setText(flushText)
   }, [flushText])
@@ -270,4 +322,17 @@ function DropZone({ peerName }: { peerName: string }): ReactNode {
       </div>
     </div>
   )
+}
+
+function callAnnouncement(v: CallView, peerName: string): string | null {
+  switch (v.phase) {
+    case 'incoming':
+      return `${peerName} is calling`
+    case 'active':
+      return `Call with ${peerName} connected`
+    case 'ended':
+      return v.endedText
+    default:
+      return null
+  }
 }

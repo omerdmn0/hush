@@ -12,8 +12,12 @@
 // receiver then *pulls* the full file with `blob-req {id, offset}`; the owner streams binary
 // chunks (see encodeChunk). Pulling from an offset makes transfers resumable, and the SHA-256
 // in the metadata lets the receiver reject a corrupted file.
+//
+// Calls (stage e): WebRTC signaling rides on the same link — `call` (offer), `call-ringing`,
+// `call-answer`, `call-ice`, `call-end`. Media then flows peer-to-peer (DTLS-SRTP), restricted
+// to Tailscale addresses; no STUN/TURN servers are used.
 
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 export const DEFAULT_PORT = 47821
 /** Upper bound for a single frame on the wire. */
 export const MAX_FRAME_BYTES = 256 * 1024
@@ -29,6 +33,11 @@ export const MAX_IMAGE_BYTES = 25 * 1024 * 1024
 const MAX_IMAGE_SIDE = 20_000
 /** Inline preview (base64 WebP/JPEG/PNG) must stay well inside one frame. */
 const MAX_THUMB_BASE64 = 200_000
+const MAX_SDP = 32_000
+const MAX_CANDIDATE = 1_024
+export const CALL_END_REASONS = ['hangup', 'declined', 'busy', 'cancelled', 'timeout', 'failed'] as const
+export type CallEndReason = (typeof CALL_END_REASONS)[number]
+
 /** Bytes of image data per binary chunk. */
 export const CHUNK_BYTES = 128 * 1024
 
@@ -52,6 +61,13 @@ export type Frame =
   | { t: 'blob-req'; id: string; offset: number }
   /** "I can't serve that image" (not mine, or the file is gone). */
   | { t: 'blob-err'; id: string }
+  /** Call invitation carrying the caller's SDP offer. */
+  | { t: 'call'; id: string; sdp: string }
+  /** The callee's app received the invitation and is ringing. */
+  | { t: 'call-ringing'; id: string }
+  | { t: 'call-answer'; id: string; sdp: string }
+  | { t: 'call-ice'; id: string; candidate: string; mid: string | null; line: number | null }
+  | { t: 'call-end'; id: string; reason: CallEndReason }
   /** Sent once per connection by both sides; see the sync model above. */
   | { t: 'sync'; have: Record<string, number>; read: Record<string, number> }
   /** "These messages are stored on my side" → sender marks them delivered. */
@@ -124,6 +140,11 @@ function lowercaseIds(f: Frame): Frame {
       }
     case 'blob-req':
     case 'blob-err':
+    case 'call':
+    case 'call-ringing':
+    case 'call-answer':
+    case 'call-ice':
+    case 'call-end':
       return { ...f, id: lc(f.id) }
     default:
       return f
@@ -165,6 +186,25 @@ function parseRaw(raw: string): Frame | null {
       return isUuid(f.id) && isInt(f.offset, 0, MAX_IMAGE_BYTES) ? { t: 'blob-req', id: f.id, offset: f.offset } : null
     case 'blob-err':
       return isUuid(f.id) ? { t: 'blob-err', id: f.id } : null
+    case 'call':
+    case 'call-answer':
+      return isUuid(f.id) && typeof f.sdp === 'string' && f.sdp.length > 0 && f.sdp.length <= MAX_SDP
+        ? { t: f.t, id: f.id, sdp: f.sdp }
+        : null
+    case 'call-ringing':
+      return isUuid(f.id) ? { t: 'call-ringing', id: f.id } : null
+    case 'call-ice':
+      return isUuid(f.id) &&
+        typeof f.candidate === 'string' &&
+        f.candidate.length <= MAX_CANDIDATE &&
+        (f.mid === null || (typeof f.mid === 'string' && f.mid.length <= 64)) &&
+        (f.line === null || isInt(f.line, 0, 64))
+        ? { t: 'call-ice', id: f.id, candidate: f.candidate, mid: f.mid as string | null, line: f.line as number | null }
+        : null
+    case 'call-end':
+      return isUuid(f.id) && CALL_END_REASONS.includes(f.reason as CallEndReason)
+        ? { t: 'call-end', id: f.id, reason: f.reason as CallEndReason }
+        : null
     case 'sync': {
       const have = seqMap(f.have)
       const read = seqMap(f.read)
@@ -224,3 +264,7 @@ export function sniffImage(bytes: Uint8Array): ImageMime | null {
     return 'image/webp'
   return null
 }
+
+export type CallSignal = Extract<Frame, { t: 'call' | 'call-ringing' | 'call-answer' | 'call-ice' | 'call-end' }>
+
+export const isCallSignal = (f: Frame): f is CallSignal => f.t === 'call' || f.t.startsWith('call-')

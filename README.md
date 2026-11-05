@@ -3,8 +3,8 @@
 Private chat for two people, peer-to-peer over Tailscale. No servers, no accounts, no cloud —
 messages live only on your two computers.
 
-> **Status:** stage d — text and image chat with history, offline queue and sync. Voice calls,
-> notifications and packaging follow in later stages. A full setup guide for
+> **Status:** stage e — text, images and voice calls, with history, offline queue and sync.
+> Notifications, tray and packaging follow in later stages. A full setup guide for
 > both users (installing Tailscale, finding each other's IP) will be added once the app is complete.
 
 ## Development
@@ -31,6 +31,12 @@ Tailscale. Each has its own data folder (`~/.config/Hush-dev-a` / `-b` on Linux)
 between the two windows, quit one to see offline/queued behaviour, and restart it to see history
 persist. These overrides only work in development builds, never in an installed app.
 
+To try calls without a microphone, run the pair with a fake audio device (it plays a beep):
+
+```sh
+HUSH_FAKE_MEDIA=1 npm run pair
+```
+
 ### How it works
 
 - Each app listens on its own Tailscale IP, port **47821**, and only accepts the configured peer IP.
@@ -41,12 +47,16 @@ persist. These overrides only work in development builds, never in an installed 
   *queued*. On every connection both apps exchange one `sync` frame ("I have your messages up to
   N, and have read up to R"); each then sends whatever the other is missing. Nothing is lost or
   duplicated, and read receipts made offline catch up too. Both apps must run the same protocol
-  version (currently 3) — Hush shows an error if they don't.
+  version (currently 4) — Hush shows an error if they don't.
 - **Images** (PNG, JPEG, GIF, WebP, up to 25 MB) are added by drag-and-drop, paste or the file
   picker. The message carries a small preview; the receiver then pulls the full file in chunks,
   resuming after interruptions and checking its SHA-256 before showing it. Files are stored in the
   app data folder under `images/`, named by message id, and shown to the UI only through the
   private `hush-img://` scheme.
+- **Voice calls** use WebRTC audio. Call setup travels over the same link; the audio then goes
+  directly between the two computers, encrypted by WebRTC (DTLS-SRTP) and by Tailscale. Hush uses
+  no STUN/TURN servers and only offers/accepts network paths on Tailscale addresses (100.x).
+  Microphone and speaker are chosen in Settings → Audio.
 - History and settings are stored in `hush.db` (SQLite) in the app's data folder and never leave
   the two computers.
 
