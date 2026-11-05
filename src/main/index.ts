@@ -61,24 +61,42 @@ if (env('HUSH_FAKE_MEDIA')) {
 }
 const devPairing = env('HUSH_PEER') !== undefined
 
+// Electron only uses the Linux keyring by itself on desktops it recognises (GNOME, Xfce,
+// Cinnamon…). On others — Hyprland, Sway, i3… — it silently uses a fixed key instead. So ask for
+// the Secret Service (GNOME Keyring, KeePassXC…) explicitly, except on KDE, where Electron picks
+// KWallet itself, or when the user chose a store with --password-store.
+if (process.platform === 'linux' && !app.commandLine.hasSwitch('password-store') && !/KDE/i.test(process.env.XDG_CURRENT_DESKTOP ?? '')) {
+  app.commandLine.appendSwitch('password-store', 'gnome-libsecret')
+}
+
 /**
- * The OS keychain via Electron safeStorage: DPAPI on Windows; GNOME Keyring / KWallet on Linux.
- * On Linux without either, Electron would fall back to a hard-coded key ("basic_text"), which
- * protects nothing — so that counts as "no keychain" and an app password is required instead.
- * Dev-only HUSH_NO_KEYCHAIN simulates that.
+ * The OS keychain via Electron safeStorage: DPAPI on Windows; the keyring on Linux.
+ * On Linux, Electron can fall back to a hard-coded key — openly ("basic_text"), or silently when
+ * the keyring isn't reachable (it still reports the keyring backend but writes "v10" data). Only
+ * "v11" data is encrypted with a key kept in the keyring, so anything else counts as "no
+ * keychain" and an app password is required instead. Dev-only HUSH_NO_KEYCHAIN simulates that.
  */
 const osProtector: OsProtector = {
-  available: async () =>
-    !env('HUSH_NO_KEYCHAIN') &&
-    (await safeStorage.isAsyncEncryptionAvailable()) &&
-    !(process.platform === 'linux' && ['basic_text', 'unknown'].includes(safeStorage.getSelectedStorageBackend())),
+  available: async () => {
+    if (env('HUSH_NO_KEYCHAIN') || !(await safeStorage.isAsyncEncryptionAvailable())) return false
+    if (process.platform === 'linux' && ['basic_text', 'unknown'].includes(safeStorage.getSelectedStorageBackend())) return false
+    try {
+      await osProtector.encrypt('probe')
+      return true
+    } catch {
+      return false
+    }
+  },
   name: () => {
     if (process.platform === 'win32') return 'Windows'
     if (process.platform === 'darwin') return 'macOS Keychain'
-    const backend = safeStorage.getSelectedStorageBackend()
-    return backend === 'gnome_libsecret' ? 'GNOME Keyring' : backend.startsWith('kwallet') ? 'KWallet' : 'the system keychain'
+    return safeStorage.getSelectedStorageBackend().startsWith('kwallet') ? 'KWallet' : 'your system keyring'
   },
-  encrypt: (plain) => safeStorage.encryptStringAsync(plain),
+  encrypt: async (plain) => {
+    const sealed = await safeStorage.encryptStringAsync(plain)
+    if (process.platform === 'linux' && sealed.subarray(0, 3).toString() !== 'v11') throw new Error('The system keyring isn’t reachable')
+    return sealed
+  },
   decrypt: async (sealed) => (await safeStorage.decryptStringAsync(sealed)).result
 }
 

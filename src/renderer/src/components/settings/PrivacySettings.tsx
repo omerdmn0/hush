@@ -143,7 +143,7 @@ function AppPassword({ privacy, peerName }: { privacy: PrivacyState; peerName: s
           on
             ? privacy.osAvailable
               ? 'Hush asks for it every time it starts.'
-              : `Hush asks for it every time it starts. It's required here: this computer has no system keychain (like GNOME Keyring or KWallet).`
+              : `Hush asks for it every time it starts. It's required here: this computer has no system keychain (like GNOME Keyring or KWallet) running.`
             : `Optional: ask for a password every time Hush starts. If you forget it, your history can only come back from a backup or from ${peerName}.`
         }
       >

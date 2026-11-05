@@ -104,9 +104,11 @@ your Tailscale network. If one of you reinstalls Hush, you'll see *Identity chan
 with each other, then **Pair again**.
 
 **App password (Linux without a keyring):** Hush stores everything encrypted and keeps the key in
-your system keychain (Windows does this automatically; on Linux that's GNOME Keyring or KWallet).
-If your Linux desktop has neither, Hush asks you to choose an **app password** at first start and
-asks for it every time it starts. Don't lose it — without it, only a backup or the other computer
+your system keychain. Windows does this automatically. On Linux, Hush uses KWallet on KDE and the
+Secret Service everywhere else — GNOME Keyring (or KeePassXC), on any desktop including Hyprland,
+Sway or i3, as long as it's running and unlocked at login (on Arch: `gnome-keyring` + `libsecret`;
+on Ubuntu/Fedora it's already there). If there's no keyring, Hush asks you to choose an
+**app password** at first start and asks for it every time it starts. Don't lose it — without it, only a backup or the other computer
 can bring your history back.
 
 ---
@@ -251,8 +253,10 @@ These development overrides are ignored in installed builds.
 - At rest: one random data key encrypts database fields (`enc1:` prefix) and files (128 KB
   chunks, each AES-256-GCM with its index and a "last chunk" flag authenticated, so images can be
   read in ranges). Partial downloads are stored as sealed records. The data key is wrapped by
-  Electron `safeStorage` (DPAPI / libsecret / KWallet) or by an scrypt-derived app-password key;
-  Linux's `basic_text` fallback is treated as no keychain.
+  Electron `safeStorage` (DPAPI / libsecret / KWallet) or by an scrypt-derived app-password key.
+  On Linux, Hush passes `--password-store=gnome-libsecret` outside KDE (Electron otherwise uses a
+  fixed key on desktops it doesn't recognise), and only trusts output marked `v11` (keyring-held
+  key): `basic_text`, or `v10` data from an unreachable keyring, count as no keychain.
 - Recovery: an app that sees its peer return under a new device id remembers the old one. The new
   install asks for it (`recover-req`), adopts it, and the normal sync sends back the peer's own
   messages too (whenever a `sync` shows the peer holds fewer of its own messages than we do).

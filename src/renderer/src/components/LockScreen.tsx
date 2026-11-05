@@ -55,7 +55,7 @@ export function LockScreen(): ReactNode {
           <h1 className="display m-0 text-base">{title}</h1>
           <p className="m-0 text-sm leading-5 text-text-muted">
             {info.mode === 'create'
-              ? `Your messages are stored encrypted. This computer has no system keychain (like GNOME Keyring or KWallet) to keep the key safe, so Hush protects it with a password instead. You'll enter it each time Hush starts.`
+              ? `Your messages are stored encrypted. This computer has no system keychain (like GNOME Keyring or KWallet) running to keep the key safe, so Hush protects it with a password instead. You'll enter it each time Hush starts.`
               : info.mode === 'unlock'
                 ? 'Your messages are encrypted on this computer. Enter your app password to open them.'
                 : `Hush keeps its key in ${info.osName}, which didn't hand it over. Unlock it (logging out and back in usually does), then try again.`}
