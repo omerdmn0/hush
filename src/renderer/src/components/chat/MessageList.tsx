@@ -16,13 +16,28 @@ const Column = ({ children }: { children: ReactNode }): ReactNode => (
 export function MessageList({
   messages,
   peerName,
-  typing
+  typing,
+  hasMore,
+  loadingOlder,
+  onLoadOlder
 }: {
   messages: ChatMessage[]
   peerName: string
   typing: boolean
+  hasMore: boolean
+  loadingOlder: boolean
+  onLoadOlder: () => void
 }): ReactNode {
   const items = useMemo(() => buildTimeline(messages), [messages])
+
+  // Virtuoso keeps the scroll position on prepend when firstItemIndex drops by exactly the
+  // number of prepended items. Recomputed idempotently during render (StrictMode-safe).
+  const firstIndex = useRef(FIRST_INDEX)
+  const prev = useRef<{ oldestId: string | undefined; count: number }>({ oldestId: messages[0]?.id, count: items.length })
+  if (messages[0]?.id !== prev.current.oldestId && prev.current.count > 0) {
+    firstIndex.current -= Math.max(0, items.length - prev.current.count)
+  }
+  prev.current = { oldestId: messages[0]?.id, count: items.length }
   const noteAfter = useMemo(() => lastQueuedId(messages), [messages])
   const scroller = useRef<HTMLElement | null>(null)
   const wrapper = useRef<HTMLDivElement>(null)
@@ -61,7 +76,9 @@ export function MessageList({
           scroller.current?.addEventListener('scroll', onScroll, { passive: true })
         }}
         data={items}
-        context={{ typing, peerName }}
+        context={{ typing, peerName, hasMore, loadingOlder }}
+        firstItemIndex={firstIndex.current}
+        startReached={() => hasMore && onLoadOlder()}
         computeItemKey={(_, item) => item.key}
         initialTopMostItemIndex={{ index: 'LAST', align: 'end' }}
         alignToBottom
@@ -84,14 +101,27 @@ export function MessageList({
   )
 }
 
+const FIRST_INDEX = 1_000_000
+
 interface ListContext {
   typing: boolean
   peerName: string
+  hasMore: boolean
+  loadingOlder: boolean
 }
 
 // Stable component identities, so Virtuoso doesn't remount header/footer on every render.
 const COMPONENTS = {
-  Header: (): ReactNode => <div className="h-2" />,
+  Header: ({ context }: { context?: ListContext }): ReactNode =>
+    context?.loadingOlder || !context?.hasMore ? (
+      <Column>
+        <div className="rule pt-4 pb-1">
+          <span className="label">{context?.loadingOlder ? 'Loading history…' : 'Start of your history'}</span>
+        </div>
+      </Column>
+    ) : (
+      <div className="h-2" />
+    ),
   Footer: ({ context }: { context?: ListContext }): ReactNode => (
     <Column>
       {context?.typing && <TypingIndicator peerName={context.peerName} />}

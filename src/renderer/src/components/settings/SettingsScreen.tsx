@@ -6,14 +6,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import type { NetState, Settings } from '../../../../shared/types'
 import { Avatar, StatusTag } from '@/components/common'
 import { cn } from '@/lib/utils'
-
-export interface Settings {
-  displayName: string
-  peerIp: string
-  notifications: boolean
-}
+import type { PeerView } from '@/lib/view'
 
 const SECTIONS = [
   { id: 'profile', title: 'Profile' },
@@ -31,16 +27,18 @@ const IP_ERRORS: Record<Exclude<PeerIpProblem, 'empty'>, string> = {
 
 export function SettingsScreen({
   settings,
+  net,
+  peer,
   onChange,
-  ownIp,
-  onRefreshOwnIp,
+  onReconnect,
   onClose,
   initialSection = 'profile'
 }: {
   settings: Settings
-  onChange: (patch: Partial<Settings>) => void
-  ownIp: string | null | undefined
-  onRefreshOwnIp: () => void
+  net: NetState
+  peer: PeerView | null
+  onChange: (patch: Partial<Settings>) => Promise<void>
+  onReconnect: () => void
   onClose: () => void
   initialSection?: SectionId
 }): ReactNode {
@@ -112,17 +110,9 @@ export function SettingsScreen({
           </Module>
 
           <Module index={2} id="connection" title="Connection">
-            <div className="cut panel panel-sm flex items-center gap-3 px-3.5 py-3 [--fill-c:var(--sunken)]">
-              <StatusTag online={false} />
-              <div className="flex-1">
-                <div className="font-semibold">Not connected</div>
-                <div className="text-xs text-text-muted">
-                  {settings.peerIp ? 'Connecting arrives in the next build. Messages you send wait in the queue.' : 'Add the other person’s IP below.'}
-                </div>
-              </div>
-            </div>
-            <OwnIpField ownIp={ownIp} onRefresh={onRefreshOwnIp} />
-            <PeerIpField value={settings.peerIp} ownIp={ownIp ?? null} onSave={(peerIp) => onChange({ peerIp })} />
+            <ConnectionStatus settings={settings} net={net} peer={peer} onReconnect={onReconnect} />
+            <OwnIpField ownIp={net.ownIp} onRefresh={onReconnect} />
+            <PeerIpField value={settings.peerIp} ownIp={net.ownIp} onSave={(peerIp) => onChange({ peerIp })} />
           </Module>
 
           <Module index={3} id="audio" title="Audio">
@@ -145,7 +135,7 @@ export function SettingsScreen({
                 id="notif"
                 aria-describedby="notif-help"
                 checked={settings.notifications}
-                onCheckedChange={(notifications) => onChange({ notifications })}
+                onCheckedChange={(notifications) => void onChange({ notifications })}
               />
             </div>
           </Module>
@@ -178,14 +168,16 @@ function SavedMark(): ReactNode {
   )
 }
 
-function NameField({ value, onSave }: { value: string; onSave: (v: string) => void }): ReactNode {
+function NameField({ value, onSave }: { value: string; onSave: (v: string) => Promise<void> }): ReactNode {
   const [draft, setDraft] = useState(value)
   const [saved, setSaved] = useState(false)
   const commit = (): void => {
     const v = draft.trim()
-    if (v === value) return
-    onSave(v)
-    setSaved(true)
+    if (v === value || v === '') {
+      setDraft(value) // an empty name isn't allowed; restore the saved one
+      return
+    }
+    void onSave(v).then(() => setSaved(true))
   }
   return (
     <div className="flex max-w-[420px] flex-col gap-1.5">
@@ -204,14 +196,14 @@ function NameField({ value, onSave }: { value: string; onSave: (v: string) => vo
         onKeyDown={(e) => e.key === 'Enter' && commit()}
       />
       <span id="display-name-help" className="text-xs text-text-muted" aria-live="polite">
-        How your name appears to the other person.
+        How your name appears to the other person. Updates on their side right away when you're connected.
         {saved && <SavedMark />}
       </span>
     </div>
   )
 }
 
-function OwnIpField({ ownIp, onRefresh }: { ownIp: string | null | undefined; onRefresh: () => void }): ReactNode {
+function OwnIpField({ ownIp, onRefresh }: { ownIp: string | null; onRefresh: () => void }): ReactNode {
   const [copied, setCopied] = useState(false)
   const copy = async (): Promise<void> => {
     if (!ownIp) return
@@ -229,7 +221,7 @@ function OwnIpField({ ownIp, onRefresh }: { ownIp: string | null | undefined; on
           readOnly
           aria-labelledby="own-ip-label"
           aria-describedby="own-ip-help"
-          value={ownIp ?? (ownIp === null ? 'Not detected' : 'Checking…')}
+          value={ownIp ?? 'Not detected'}
           className={cn('font-mono tracking-[0.04em]', !ownIp && 'text-text-muted')}
         />
         {ownIp ? (
@@ -238,7 +230,7 @@ function OwnIpField({ ownIp, onRefresh }: { ownIp: string | null | undefined; on
             {copied ? 'Copied' : 'Copy'}
           </Button>
         ) : (
-          <Button variant="secondary" onClick={onRefresh} disabled={ownIp === undefined}>
+          <Button variant="secondary" onClick={onRefresh}>
             <RefreshCw />
             Retry
           </Button>
@@ -247,15 +239,13 @@ function OwnIpField({ ownIp, onRefresh }: { ownIp: string | null | undefined; on
       <span id="own-ip-help" className="text-xs text-text-muted" aria-live="polite">
         {ownIp
           ? 'Detected from Tailscale. Send this to the other person so they can add you.'
-          : ownIp === null
-            ? 'Tailscale isn’t running on this computer, or isn’t logged in. Start it, then press Retry.'
-            : 'Looking for Tailscale…'}
+          : 'Tailscale isn’t running on this computer, or isn’t logged in. Start it, then press Retry.'}
       </span>
     </div>
   )
 }
 
-function PeerIpField({ value, ownIp, onSave }: { value: string; ownIp: string | null; onSave: (v: string) => void }): ReactNode {
+function PeerIpField({ value, ownIp, onSave }: { value: string; ownIp: string | null; onSave: (v: string) => Promise<void> }): ReactNode {
   const [draft, setDraft] = useState(value)
   const [problem, setProblem] = useState<PeerIpProblem | null>(null)
   const [saved, setSaved] = useState(false)
@@ -265,8 +255,10 @@ function PeerIpField({ value, ownIp, onSave }: { value: string; ownIp: string | 
     const p = checkPeerIp(v, ownIp)
     setProblem(p)
     if ((p === null || p === 'empty') && v !== value) {
-      onSave(v)
-      setSaved(p === null)
+      void onSave(v).then(
+        () => setSaved(p === null),
+        () => setProblem('not-tailscale')
+      )
     }
   }
   const error = problem && problem !== 'empty' ? IP_ERRORS[problem] : null
@@ -317,6 +309,67 @@ function DeviceSelect({ id, label }: { id: string; label: string }): ReactNode {
           <SelectItem value="default">System default</SelectItem>
         </SelectContent>
       </Select>
+    </div>
+  )
+}
+
+function ConnectionStatus({
+  settings,
+  net,
+  peer,
+  onReconnect
+}: {
+  settings: Settings
+  net: NetState
+  peer: PeerView | null
+  onReconnect: () => void
+}): ReactNode {
+  const online = peer?.presence === 'online'
+  const name = peer?.name ?? 'the other person'
+  let title: string
+  let detail: string
+  let problem = false
+  if (online) {
+    title = `Connected to ${name}`
+    detail = `Direct over Tailscale · ${settings.peerIp}:${net.port}`
+  } else if (!net.ownIp) {
+    title = 'Tailscale isn’t running'
+    detail = 'Start Tailscale on this computer. Hush connects automatically once it’s up.'
+    problem = true
+  } else if (net.error) {
+    title = 'Can’t connect'
+    detail = net.error
+    problem = true
+  } else if (!settings.peerIp) {
+    title = 'Not set up'
+    detail = 'Add the other person’s Tailscale IP below.'
+  } else {
+    title = `Waiting for ${name}`
+    detail = `${name === 'the other person' ? 'Their' : `${name}'s`} Hush isn’t reachable right now. It keeps trying in the background; messages you send stay queued.`
+  }
+  return (
+    <div
+      role="status"
+      className={cn(
+        'cut panel panel-sm flex items-center gap-3 px-3.5 py-3 [--fill-c:var(--sunken)]',
+        problem && '[--edge-c:var(--danger-text)]'
+      )}
+    >
+      {problem ? (
+        <CircleAlert aria-hidden="true" className="size-5 flex-none text-danger-text" />
+      ) : (
+        <StatusTag online={online} />
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="font-semibold">{title}</div>
+        <div className="text-xs text-text-muted">{detail}</div>
+      </div>
+      {!online && settings.peerIp && net.ownIp && (
+        <Button variant="secondary" onClick={onReconnect}>
+          <RefreshCw />
+          Retry now
+        </Button>
+      )}
     </div>
   )
 }

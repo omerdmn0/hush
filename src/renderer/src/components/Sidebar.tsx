@@ -8,16 +8,12 @@ import type { PeerView } from '@/lib/view'
 export function Sidebar({
   peer,
   myName,
-  inCall,
-  onCall,
   onOpenSettings,
   onLinkPeer,
   settingsButtonRef
 }: {
   peer: PeerView | null
   myName: string
-  inCall: boolean
-  onCall: () => void
   onOpenSettings: () => void
   onLinkPeer: () => void
   settingsButtonRef: Ref<HTMLButtonElement>
@@ -35,7 +31,7 @@ export function Sidebar({
       </div>
 
       <HudLabel className="px-4 pt-2 pb-1.5">Link</HudLabel>
-      {peer ? <PeerCard peer={peer} inCall={inCall} onCall={onCall} /> : <NoPeerCard onOpenSettings={onLinkPeer} />}
+      {peer ? <PeerCard peer={peer} /> : <NoPeerCard onOpenSettings={onLinkPeer} />}
 
       <div className="flex-1" />
       <div className="data mx-4 mb-3 flex items-start gap-2 text-text-muted">
@@ -61,9 +57,10 @@ export function Sidebar({
   )
 }
 
-function PeerCard({ peer, inCall, onCall }: { peer: PeerView; inCall: boolean; onCall: () => void }): ReactNode {
+function PeerCard({ peer }: { peer: PeerView }): ReactNode {
   const online = peer.presence === 'online'
-  const callHint = !online ? `${peer.name} is offline` : inCall ? 'Already in a call' : `Call ${peer.name}`
+  // Voice calls arrive in stage e.
+  const callHint = online ? "Voice calls aren't available yet" : `${peer.name} is offline`
   return (
     <div className="cut panel mx-3 flex flex-col items-center gap-1.5 px-4 pt-[18px] pb-4 text-center">
       <div className="reticle">
@@ -77,9 +74,8 @@ function PeerCard({ peer, inCall, onCall }: { peer: PeerView; inCall: boolean; o
         <TooltipTrigger asChild>
           <Button
             className="mt-2.5 w-full"
-            aria-disabled={!online || inCall}
-            aria-label={callHint}
-            onClick={() => online && !inCall && onCall()}
+            aria-disabled
+            aria-label={`Call ${peer.name} (${callHint})`}
           >
             <Phone />
             Call

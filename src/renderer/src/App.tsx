@@ -1,50 +1,59 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ChatMessage } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatHeader } from '@/components/chat/ChatHeader'
-import { CallBar } from '@/components/chat/CallBar'
 import { MessageList } from '@/components/chat/MessageList'
 import { Composer } from '@/components/chat/Composer'
 import { EmptyChat, FirstRun } from '@/components/chat/EmptyStates'
-import { SettingsScreen, type SectionId, type Settings } from '@/components/settings/SettingsScreen'
-import { DEMO_PEER, demoMessages } from '@/lib/demo'
+import { SettingsScreen, type SectionId } from '@/components/settings/SettingsScreen'
+import { formatLastSeen } from '@/lib/format'
+import { useHush } from '@/lib/useHush'
 import type { PeerView } from '@/lib/view'
 
-interface CallState {
-  startedAt: number
-  muted: boolean
+/** True while the user can actually see the chat (window focused and visible). */
+function useWindowActive(): boolean {
+  const [active, setActive] = useState(() => document.hasFocus() && document.visibilityState === 'visible')
+  useEffect(() => {
+    const update = (): void => setActive(document.hasFocus() && document.visibilityState === 'visible')
+    window.addEventListener('focus', update)
+    window.addEventListener('blur', update)
+    document.addEventListener('visibilitychange', update)
+    return () => {
+      window.removeEventListener('focus', update)
+      window.removeEventListener('blur', update)
+      document.removeEventListener('visibilitychange', update)
+    }
+  }, [])
+  return active
 }
 
 export default function App(): ReactNode {
+  const hush = useHush()
+  const { snapshot, messages, markRead } = hush
   const [screen, setScreen] = useState<'chat' | 'settings'>('chat')
   const [settingsSection, setSettingsSection] = useState<SectionId>('profile')
-  // Settings live in memory for now; they are saved to disk from stage b on.
-  const [settings, setSettings] = useState<Settings>({ displayName: '', peerIp: '', notifications: true })
-  const [ownIp, setOwnIp] = useState<string | null | undefined>(undefined)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [call, setCall] = useState<CallState | null>(null)
-  const [announcement, setAnnouncement] = useState('')
-  const [demo, setDemo] = useState(false)
-  const [demoOnline, setDemoOnline] = useState(false)
-  const [typing, setTyping] = useState(false)
+  const windowActive = useWindowActive()
 
   const settingsButton = useRef<HTMLButtonElement>(null)
   const composer = useRef<HTMLTextAreaElement>(null)
-  const typingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  useEffect(() => () => clearTimeout(typingTimer.current), [])
 
-  const refreshOwnIp = useCallback(() => {
-    setOwnIp(undefined)
-    window.hush.getTailscaleIp().then(setOwnIp, () => setOwnIp(null))
-  }, [])
-  useEffect(refreshOwnIp, [refreshOwnIp])
+  const peer: PeerView | null = useMemo(() => {
+    if (!snapshot?.settings.peerIp) return null
+    const p = snapshot.peer
+    return {
+      name: p.name ?? 'Peer',
+      ip: snapshot.settings.peerIp,
+      presence: p.presence,
+      lastSeen: p.lastSeen ? formatLastSeen(p.lastSeen) : undefined
+    }
+  }, [snapshot])
 
-  const peer: PeerView | null = demo
-    ? { ...DEMO_PEER, presence: demoOnline ? 'online' : 'offline', lastSeen: '13:11' }
-    : settings.peerIp
-      ? { name: 'Peer', ip: settings.peerIp, presence: 'offline' }
-      : null
-  const peerOnline = peer?.presence === 'online'
+  // Read receipts: mark their messages read while the chat is actually on screen.
+  useEffect(() => {
+    if (!windowActive || screen !== 'chat') return
+    const unread = messages.filter((m) => m.from === 'peer' && m.status !== 'read').map((m) => m.id)
+    if (unread.length) markRead(unread)
+  }, [messages, windowActive, screen, markRead])
 
   const openSettings = (section: SectionId = 'profile'): void => {
     setSettingsSection(section)
@@ -56,24 +65,6 @@ export default function App(): ReactNode {
     requestAnimationFrame(() => settingsButton.current?.focus())
   }, [])
 
-  const send = (text: string): void => {
-    const m: ChatMessage = { id: crypto.randomUUID(), from: 'me', text, sentAt: Date.now(), status: peerOnline ? 'sent' : 'queued' }
-    setMessages((prev) => [...prev, m])
-    if (demo && peerOnline) {
-      setTimeout(() => setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, status: 'delivered' } : x))), 700)
-    }
-  }
-
-  const startCall = (): void => {
-    if (!peerOnline || call) return
-    setCall({ startedAt: Date.now(), muted: false })
-    setAnnouncement(`Call with ${peer?.name} started`)
-  }
-  const hangUp = (): void => {
-    setCall(null)
-    setAnnouncement('Call ended')
-  }
-
   // Esc closes settings (unless a popover inside already handled it).
   useEffect(() => {
     if (screen !== 'settings') return
@@ -84,53 +75,19 @@ export default function App(): ReactNode {
     return () => window.removeEventListener('keydown', onKey)
   }, [screen, closeSettings])
 
-  // Development-only preview shortcuts: Ctrl+Shift+D sample chat, O peer online/offline, C call bar.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return
-    const onKey = (e: KeyboardEvent): void => {
-      if (!e.ctrlKey || !e.shiftKey) return
-      const k = e.key.toLowerCase()
-      if (k === 'd') {
-        e.preventDefault()
-        setDemo(!demo)
-        setMessages(demo ? [] : demoMessages())
-        setDemoOnline(false)
-        setTyping(false)
-        setCall(null)
-      } else if (k === 'o' && demo) {
-        e.preventDefault()
-        setDemoOnline(!demoOnline)
-        if (!demoOnline) {
-          const queued = messages.filter((m) => m.status === 'queued').length
-          setMessages(messages.map((m) => (m.status === 'queued' ? { ...m, status: 'delivered' } : m)))
-          if (queued > 0) setAnnouncement(`${queued} queued messages delivered to ${DEMO_PEER.name}`)
-          clearTimeout(typingTimer.current)
-          typingTimer.current = setTimeout(() => {
-            setTyping(true)
-            setAnnouncement(`${DEMO_PEER.name} is typing`)
-          }, 1400)
-        } else {
-          clearTimeout(typingTimer.current)
-          setTyping(false)
-          setCall(null)
-        }
-      } else if (k === 'c' && demo) {
-        e.preventDefault()
-        setCall(call ? null : { startedAt: Date.now() - 763_000, muted: false })
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [demo, demoOnline, messages, call])
+  if (!snapshot) {
+    return <div className="scanlines h-full bg-app" aria-busy="true" />
+  }
 
   return (
     <div className="scanlines flex h-full">
       {screen === 'settings' ? (
         <SettingsScreen
-          settings={settings}
-          onChange={(patch) => setSettings((s) => ({ ...s, ...patch }))}
-          ownIp={ownIp}
-          onRefreshOwnIp={refreshOwnIp}
+          settings={snapshot.settings}
+          net={snapshot.net}
+          peer={peer}
+          onChange={hush.updateSettings}
+          onReconnect={() => window.hush.reconnect()}
           onClose={closeSettings}
           initialSection={settingsSection}
         />
@@ -138,39 +95,62 @@ export default function App(): ReactNode {
         <>
           <Sidebar
             peer={peer}
-            myName={settings.displayName}
-            inCall={call !== null}
-            onCall={startCall}
+            myName={snapshot.settings.displayName}
             onOpenSettings={() => openSettings()}
             onLinkPeer={openConnection}
             settingsButtonRef={settingsButton}
           />
           <main className="hud-grid relative flex min-w-0 flex-1 flex-col bg-app">
-            <ChatHeader peer={peer} inCall={call !== null} onCall={startCall} />
-            {call && peer && (
-              <CallBar
-                peerName={peer.name}
-                startedAt={call.startedAt}
-                micLabel="System default"
-                muted={call.muted}
-                onToggleMute={() => setCall((c) => c && { ...c, muted: !c.muted })}
-                onHangUp={hangUp}
-              />
-            )}
+            <ChatHeader peer={peer} />
             {!peer ? (
-              <FirstRun ownIp={ownIp} onOpenSettings={openConnection} />
-            ) : messages.length === 0 ? (
+              <FirstRun ownIp={snapshot.net.ownIp} onOpenSettings={openConnection} />
+            ) : messages.length === 0 && !hush.peerTyping ? (
               <EmptyChat peerName={peer.name} onSayHi={() => composer.current?.focus()} />
             ) : (
-              <MessageList messages={messages} peerName={peer.name} typing={typing} />
+              <MessageList
+                messages={messages}
+                peerName={peer.name}
+                typing={hush.peerTyping}
+                hasMore={hush.hasMore}
+                loadingOlder={hush.loadingOlder}
+                onLoadOlder={hush.loadOlder}
+              />
             )}
-            <Composer peerName={peer?.name ?? ''} disabled={!peer} onSend={send} inputRef={composer} />
+            <Composer
+              peerName={peer?.name ?? ''}
+              disabled={!peer}
+              onSend={hush.send}
+              onTyping={(on) => window.hush.setTyping(on)}
+              inputRef={composer}
+            />
           </main>
         </>
       )}
-      <div role="status" aria-live="polite" className="sr-only">
-        {announcement}
-      </div>
+      <LiveAnnouncer peerName={peer?.name ?? ''} typing={hush.peerTyping} lastIncomingId={lastIncomingId(messages)} />
+    </div>
+  )
+}
+
+function lastIncomingId(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].from === 'peer') return messages[i].id
+  return null
+}
+
+/** The app's single polite status region (MASTER.md §7): typing and new messages. */
+function LiveAnnouncer({ peerName, typing, lastIncomingId }: { peerName: string; typing: boolean; lastIncomingId: string | null }): ReactNode {
+  const [text, setText] = useState('')
+  const seen = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    if (typing) setText(`${peerName} is typing`)
+  }, [typing, peerName])
+  useEffect(() => {
+    // Skip the history that is already there on startup; announce only new arrivals.
+    if (seen.current !== undefined && lastIncomingId && lastIncomingId !== seen.current) setText(`New message from ${peerName}`)
+    seen.current = lastIncomingId
+  }, [lastIncomingId, peerName])
+  return (
+    <div role="status" aria-live="polite" className="sr-only">
+      {text}
     </div>
   )
 }

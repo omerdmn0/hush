@@ -27,6 +27,15 @@ export function dayLabel(ts: number, now: number = Date.now()): string {
   return `${WEEKDAYS[d.getDay()]} ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`
 }
 
+/** "Last seen" label: "13:11" today, "yesterday 22:40", otherwise "03.11 21:04". */
+export function formatLastSeen(ts: number, now: number = Date.now()): string {
+  const diff = daysBetween(ts, now)
+  if (diff === 0) return formatTime(ts)
+  if (diff === 1) return `yesterday ${formatTime(ts)}`
+  const d = new Date(ts)
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${formatTime(ts)}`
+}
+
 /** Full timestamp for tooltips, e.g. "Tuesday, 3 November 2026 at 21:04". */
 export function fullDateTime(ts: number): string {
   return new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'short', hourCycle: 'h23' }).format(ts)
