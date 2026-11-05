@@ -26,7 +26,8 @@ const make = (authorId: string, seq: number | null, sentAt: number, status: Stor
   seq,
   body: `msg ${seq} at ${sentAt}`,
   sentAt,
-  status
+  status,
+  image: null
 })
 
 describe('HushDb', () => {
@@ -139,7 +140,7 @@ describe('migration from stage b (v1)', () => {
     raw.close()
 
     const migrated = new HushDb(file)
-    expect(migrated.version).toBe(2)
+    expect(migrated.version).toBe(3)
     expect(migrated.getMessage(ids.mineEarly)?.seq).toBe(1)
     expect(migrated.getMessage(ids.mineLate)?.seq).toBe(2)
     expect(migrated.getMessage(ids.theirs)?.seq).toBeNull()

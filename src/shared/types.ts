@@ -3,10 +3,36 @@
 export type MessageStatus = 'queued' | 'sent' | 'delivered' | 'read'
 
 export interface ChatImage {
-  src: string
   width: number
   height: number
-  alt?: string
+  mime: string
+  size: number
+  /** Small preview, always available. */
+  thumbUrl: string
+  /** Full image; only loadable once `ready`. */
+  fullUrl: string
+  /** True when the full file is stored on this computer. */
+  ready: boolean
+}
+
+/** Progress of an image moving between the two computers. */
+export interface ImageTransfer {
+  id: string
+  /** 'down' = we are receiving it, 'up' = the other side is pulling it from us. */
+  direction: 'down' | 'up'
+  state: 'active' | 'done' | 'failed'
+  /** 0…1 */
+  progress: number
+}
+
+/** An image picked in the UI, prepared (validated + preview made) by the renderer. */
+export interface OutgoingImage {
+  bytes: Uint8Array
+  mime: string
+  width: number
+  height: number
+  /** Small WebP preview. */
+  thumb: Uint8Array
 }
 
 export interface ChatMessage {
@@ -69,6 +95,7 @@ export type HushEvent =
   | { type: 'typing'; on: boolean }
   | { type: 'net'; net: NetState }
   | { type: 'settings'; settings: Settings }
+  | { type: 'transfer'; transfer: ImageTransfer }
   /** Messages that were queued while offline have now been delivered. */
   | { type: 'flushed'; count: number; at: number }
 
@@ -79,6 +106,9 @@ export interface HushApi {
   /** Newest-last page of history; pass the oldest loaded message to page backwards. */
   listMessages(before?: HistoryCursor, limit?: number): Promise<{ messages: ChatMessage[]; hasMore: boolean }>
   sendMessage(text: string): Promise<ChatMessage>
+  sendImage(image: OutgoingImage, caption: string): Promise<ChatMessage>
+  /** Try downloading a failed image again. */
+  retryImage(id: string): void
   markRead(ids: string[]): void
   setTyping(on: boolean): void
   updateSettings(patch: Partial<Settings>): Promise<Settings>
@@ -92,6 +122,8 @@ export const IPC = {
   snapshot: 'hush:snapshot',
   listMessages: 'hush:list-messages',
   sendMessage: 'hush:send-message',
+  sendImage: 'hush:send-image',
+  retryImage: 'hush:retry-image',
   markRead: 'hush:mark-read',
   setTyping: 'hush:set-typing',
   updateSettings: 'hush:update-settings',

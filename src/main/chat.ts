@@ -1,7 +1,10 @@
-import { MAX_TEXT_LENGTH, type Frame } from '../shared/protocol'
-import type { ChatMessage, HistoryCursor, HushEvent, PeerState } from '../shared/types'
-import { toChatMessage, type HushDb } from './db'
+import { randomUUID } from 'node:crypto'
+import { IMAGE_MIME, MAX_IMAGE_BYTES, MAX_TEXT_LENGTH, sniffImage, type Frame, type ImageMeta, type ImageMime } from '../shared/protocol'
+import type { ChatMessage, HistoryCursor, HushEvent, OutgoingImage, PeerState } from '../shared/types'
+import { toChatMessage, type HushDb, type StoredMessage } from './db'
+import { sha256, type ImageStore } from './images'
 import type { LinkPeer, PeerLink } from './link'
+import { Transfers } from './transfers'
 
 /** Messages re-sent per database page during sync. */
 const SYNC_PAGE = 200
@@ -9,6 +12,9 @@ const SYNC_PAGE = 200
 const ACK_BATCH_MS = 50
 /** "N queued messages delivered" is reported once deliveries go quiet for this long. */
 const FLUSH_QUIET_MS = 600
+/** Inline previews larger than this are refused (they must fit in one frame as base64). */
+const MAX_THUMB_BYTES = 150 * 1024
+const PREVIEW_TYPES = new Set<string>(['image/webp', 'image/jpeg', 'image/png'])
 
 /**
  * Chat logic on top of a PeerLink: stores messages, sends receipts, tracks presence, and
@@ -25,13 +31,17 @@ export class ChatService {
   private flushWatch = new Set<string>()
   private flushCount = 0
   private flushTimer: ReturnType<typeof setTimeout> | undefined
+  readonly transfers: Transfers
 
   constructor(
     private readonly db: HushDb,
     private readonly link: PeerLink,
     private readonly selfId: string,
-    private readonly emit: (e: HushEvent) => void
+    private readonly emit: (e: HushEvent) => void,
+    private readonly store: ImageStore,
+    opts: { chunkBytes?: number } = {}
   ) {
+    this.transfers = new Transfers(db, store, link, selfId, emit, opts.chunkBytes)
     link.on('up', (peer) => this.onUp(peer))
     link.on('down', () => this.onDown())
     link.on('frame', (frame, peer) => void this.onFrame(frame, peer))
@@ -47,19 +57,45 @@ export class ChatService {
 
   listMessages(before: HistoryCursor | undefined, limit: number): { messages: ChatMessage[]; hasMore: boolean } {
     const { rows, hasMore } = this.db.listMessages(before, Math.min(Math.max(limit, 1), 500))
-    return { messages: rows.map((m) => toChatMessage(m, this.selfId)), hasMore }
+    return { messages: rows.map((m) => this.toChat(m)), hasMore }
+  }
+
+  /** Validates an image prepared by the UI, stores it, and sends it like a message. */
+  async sendImage(img: OutgoingImage, caption: string): Promise<ChatMessage> {
+    const body = caption.trim()
+    const mime = img.mime as ImageMime
+    const valid =
+      IMAGE_MIME.includes(mime) &&
+      img.bytes.length > 0 &&
+      img.bytes.length <= MAX_IMAGE_BYTES &&
+      sniffImage(img.bytes) === mime &&
+      img.thumb.length > 0 &&
+      img.thumb.length <= MAX_THUMB_BYTES &&
+      PREVIEW_TYPES.has(sniffImage(img.thumb) ?? '') &&
+      [img.width, img.height].every((n) => Number.isInteger(n) && n >= 1 && n <= 20_000) &&
+      body.length <= MAX_TEXT_LENGTH
+    if (!valid) throw new Error('Not a supported image')
+
+    const meta: ImageMeta = { mime, width: img.width, height: img.height, size: img.bytes.length, sha256: sha256(img.bytes) }
+    const id = randomUUID()
+    this.store.saveOwn(id, meta, img.bytes, img.thumb)
+    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), meta, id)
+    this.emit({ type: 'message', message: this.toChat(stored) })
+    const ok = await this.link.send(this.msgFrame(stored))
+    if (ok) this.advanceMine([stored.id], 'sent')
+    return this.toChat(this.db.getMessage(stored.id)!)
   }
 
   async send(text: string): Promise<ChatMessage> {
     const body = text.trim()
     if (!body || body.length > MAX_TEXT_LENGTH) throw new Error('Message is empty or too long')
     const stored = this.db.createOwnMessage(this.selfId, body, Date.now())
-    this.emit({ type: 'message', message: toChatMessage(stored, this.selfId) })
+    this.emit({ type: 'message', message: this.toChat(stored) })
 
     // Offline: stays queued and goes out with the next sync.
     const ok = await this.link.send(this.msgFrame(stored))
     if (ok) this.advanceMine([stored.id], 'sent')
-    return toChatMessage(this.db.getMessage(stored.id)!, this.selfId)
+    return this.toChat(this.db.getMessage(stored.id)!)
   }
 
   /** The user has seen these incoming messages. */
@@ -88,9 +124,11 @@ export class ChatService {
       have: { [this.selfId]: this.db.contiguousSeq(this.selfId), [peer.id]: this.db.contiguousSeq(peer.id) },
       read: { [peer.id]: this.db.readSeq(peer.id) }
     })
+    this.transfers.onUp()
   }
 
   private onDown(): void {
+    this.transfers.onDown()
     this.db.setSetting('peerLastSeen', Date.now())
     this.emit({ type: 'typing', on: false })
     this.emit({ type: 'peer', peer: this.peerState() })
@@ -101,17 +139,30 @@ export class ChatService {
       case 'msg': {
         // On a direct link the author must be the connected peer.
         if (frame.author !== peer.id) return
-        const stored = {
+        let image: ImageMeta | null = null
+        if (frame.image) {
+          const { thumb, ...meta } = frame.image
+          // Store the preview before the message, so the UI never shows a message without it.
+          if (!this.db.getMessage(frame.id)) {
+            const bytes = Buffer.from(thumb, 'base64')
+            if (!PREVIEW_TYPES.has(sniffImage(bytes) ?? '') || bytes.length > MAX_THUMB_BYTES) return
+            this.store.saveThumb(frame.id, bytes)
+          }
+          image = meta
+        }
+        const stored: StoredMessage = {
           id: frame.id,
           authorId: frame.author,
           seq: frame.seq,
           body: frame.body,
           sentAt: frame.sentAt,
-          status: 'delivered' as const
+          status: 'delivered',
+          image
         }
         if (this.db.insertMessage(stored)) {
           this.emit({ type: 'typing', on: false })
-          this.emit({ type: 'message', message: toChatMessage(stored, this.selfId) })
+          this.emit({ type: 'message', message: this.toChat(stored) })
+          if (image) this.transfers.want(stored.id)
         }
         // Always ack, even duplicates — the sender may have missed the first ack.
         this.queueAck(frame.id)
@@ -119,6 +170,10 @@ export class ChatService {
       }
       case 'sync':
         await this.onSync(frame)
+        break
+      case 'blob-req':
+      case 'blob-err':
+        this.transfers.onFrame(frame)
         break
       case 'ack':
         this.advanceMine(frame.ids, 'delivered')
@@ -158,8 +213,13 @@ export class ChatService {
 
   // ---------- helpers ----------
 
-  private msgFrame(m: { id: string; seq: number | null; body: string; sentAt: number }): Frame {
-    return { t: 'msg', id: m.id, author: this.selfId, seq: m.seq!, body: m.body, sentAt: m.sentAt }
+  private msgFrame(m: StoredMessage): Frame {
+    const frame: Frame = { t: 'msg', id: m.id, author: this.selfId, seq: m.seq!, body: m.body, sentAt: m.sentAt }
+    return m.image ? { ...frame, image: { ...m.image, thumb: this.store.readThumbBase64(m.id) } } : frame
+  }
+
+  private toChat(m: StoredMessage): ChatMessage {
+    return toChatMessage(m, this.selfId, (id) => this.store.hasFull(id, m.image))
   }
 
   private queueAck(id: string): void {

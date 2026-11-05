@@ -1,12 +1,17 @@
 import { memo, type ReactNode } from 'react'
-import { Check, CheckCheck, Clock } from 'lucide-react'
-import type { ChatMessage, MessageStatus } from '../../../../shared/types'
+import { Check, CheckCheck, CircleAlert, Clock, LoaderCircle } from 'lucide-react'
+import type { ChatMessage, ImageTransfer, MessageStatus } from '../../../../shared/types'
+import { Button } from '@/components/ui/button'
 import { Avatar } from '@/components/common'
 import { formatTime, fullDateTime } from '@/lib/format'
+import { thumbSize } from '@/lib/images'
 import { cn } from '@/lib/utils'
 
-const THUMB_MAX_W = 300
-const THUMB_MAX_H = 320
+export interface ImageActions {
+  transfers: Record<string, ImageTransfer>
+  onOpen: (m: ChatMessage) => void
+  onRetry: (id: string) => void
+}
 
 function StatusIcon({ status }: { status: MessageStatus }): ReactNode {
   const cls = 'size-3.5'
@@ -38,25 +43,55 @@ function Meta({ m, showStatus, block }: { m: ChatMessage; showStatus: boolean; b
   )
 }
 
-function Bubble({ m, mine, isLast }: { m: ChatMessage; mine: boolean; isLast: boolean }): ReactNode {
+function Bubble({ m, mine, isLast, images }: { m: ChatMessage; mine: boolean; isLast: boolean; images: ImageActions }): ReactNode {
   // Status shown on the last bubble of a group and on anything not yet read (MASTER.md §6).
   const showStatus = mine && (isLast || m.status !== 'read')
   const shape = mine ? 'shape-mine' : 'shape-theirs'
 
   if (m.image) {
-    const scale = Math.min(1, THUMB_MAX_W / m.image.width, THUMB_MAX_H / m.image.height)
+    const size = thumbSize(m.image.width, m.image.height)
+    const t = images.transfers[m.id]
+    const failed = !mine && !m.image.ready && t?.state === 'failed'
+    const receiving = !mine && !m.image.ready && !failed
+    const sending = mine && t?.direction === 'up' && t.state === 'active'
+    const pct = Math.round((t?.progress ?? 0) * 100)
     return (
       <div className={cn('cut animate-rise max-w-full p-1', shape)}>
-        {/* Size reserved up front so loading never shifts the list. Click-to-enlarge arrives in stage d. */}
-        <img
-          src={m.image.src}
-          alt={m.image.alt ?? ''}
-          width={Math.round(m.image.width * scale)}
-          height={Math.round(m.image.height * scale)}
-          className="block max-w-full bg-pressed object-cover"
-          draggable={false}
-        />
-        {m.text && <div className="px-2 pt-1.5 text-base leading-6 font-normal">{m.text}</div>}
+        {/* Size reserved from the stored dimensions, so loading never shifts the list. */}
+        <div className="relative max-w-full" style={{ width: size.width, aspectRatio: `${size.width} / ${size.height}` }}>
+          <button
+            type="button"
+            onClick={() => images.onOpen(m)}
+            aria-label={`Open image${m.text ? `: ${m.text}` : ''}`}
+            className="block h-full w-full cursor-zoom-in focus-visible:outline-offset-[-3px]"
+          >
+            <img src={m.image.thumbUrl} alt="" className="block h-full w-full bg-pressed object-cover" draggable={false} />
+          </button>
+          {receiving && (
+            <div className="data pointer-events-none absolute inset-0 grid content-center justify-items-center gap-2 bg-[rgba(4,3,10,.6)] text-text">
+              <LoaderCircle aria-hidden="true" className="size-5 animate-spin" />
+              <span>RECEIVING {pct}%</span>
+              <span className="h-1 w-32 overflow-hidden bg-white/20" aria-hidden="true">
+                <span className="block h-full bg-cyan shadow-[0_0_8px_var(--cyan)]" style={{ width: `${pct}%` }} />
+              </span>
+            </div>
+          )}
+          {failed && (
+            <div role="alert" className="data absolute inset-0 grid content-center justify-items-center gap-2 bg-[rgba(4,3,10,.7)] text-text">
+              <CircleAlert aria-hidden="true" className="size-5 text-danger-text" />
+              <span>COULDN&apos;T DOWNLOAD</span>
+              <Button variant="secondary" size="sm" onClick={() => images.onRetry(m.id)}>
+                Retry
+              </Button>
+            </div>
+          )}
+          {sending && (
+            <span className="data pointer-events-none absolute top-1.5 right-1.5 bg-[rgba(4,3,10,.75)] px-1.5 py-0.5 text-text">
+              SENDING {pct}%
+            </span>
+          )}
+        </div>
+        {m.text && <div className="max-w-[300px] px-2 pt-1.5 text-base leading-6 font-normal [overflow-wrap:anywhere] whitespace-pre-wrap">{m.text}</div>}
         <Meta m={m} showStatus={showStatus} block />
       </div>
     )
@@ -74,13 +109,15 @@ export const MessageGroup = memo(function MessageGroup({
   from,
   messages,
   peerName,
-  queuedNoteAfter
+  queuedNoteAfter,
+  images
 }: {
   from: ChatMessage['from']
   messages: ChatMessage[]
   peerName: string
   /** Id of the message under which "Waiting for … to come online" appears. */
   queuedNoteAfter: string | null
+  images: ImageActions
 }): ReactNode {
   const mine = from === 'me'
   const first = messages[0]
@@ -96,7 +133,7 @@ export const MessageGroup = memo(function MessageGroup({
         )}
         {messages.map((m, i) => (
           <div key={m.id} className={cn('flex max-w-full flex-col', mine ? 'items-end' : 'items-start')}>
-            <Bubble m={m} mine={mine} isLast={i === messages.length - 1} />
+            <Bubble m={m} mine={mine} isLast={i === messages.length - 1} images={images} />
             {m.id === queuedNoteAfter && (
               <div className="data mt-1.5 flex items-center gap-1.5 text-queued">
                 <Clock aria-hidden="true" className="size-3.5" />

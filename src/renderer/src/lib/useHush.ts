@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ChatMessage, HushEvent, Settings, Snapshot } from '../../../shared/types'
+import type { ChatMessage, HushEvent, ImageTransfer, OutgoingImage, Settings, Snapshot } from '../../../shared/types'
 import type { DeliveryNotice } from './timeline'
 
 const PAGE = 100
@@ -17,6 +17,10 @@ export interface HushState {
   /** The most recent flush, for the pop-up; null once it has been dismissed. */
   flush: DeliveryNotice | null
   dismissFlush: () => void
+  /** Image transfers in progress / finished / failed, by message id. */
+  transfers: Record<string, ImageTransfer>
+  sendImage: (image: OutgoingImage, caption: string) => Promise<void>
+  retryImage: (id: string) => void
   loadOlder: () => void
   send: (text: string) => Promise<void>
   markRead: (ids: string[]) => void
@@ -32,6 +36,7 @@ export function useHush(): HushState {
   const [peerTyping, setPeerTyping] = useState(false)
   const [notices, setNotices] = useState<DeliveryNotice[]>([])
   const [flush, setFlush] = useState<DeliveryNotice | null>(null)
+  const [transfers, setTransfers] = useState<Record<string, ImageTransfer>>({})
   const typingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loading = useRef(false)
   const hasMoreRef = useRef(false)
@@ -46,6 +51,14 @@ export function useHush(): HushState {
         case 'message':
           setMessages((prev) => insertSorted(prev, e.message, hasMoreRef.current))
           break
+        case 'transfer': {
+          const t = e.transfer
+          setTransfers((prev) => ({ ...prev, [t.id]: t }))
+          if (t.direction === 'down' && t.state === 'done') {
+            setMessages((prev) => prev.map((m) => (m.id === t.id && m.image ? { ...m, image: { ...m.image, ready: true } } : m)))
+          }
+          break
+        }
         case 'flushed': {
           const notice = { id: `${e.at}`, at: e.at, count: e.count }
           setNotices((prev) => [...prev, notice])
@@ -132,6 +145,15 @@ export function useHush(): HushState {
 
   const dismissFlush = useCallback(() => setFlush(null), [])
 
+  const sendImage = useCallback(async (image: OutgoingImage, caption: string) => {
+    await window.hush.sendImage(image, caption)
+  }, [])
+
+  const retryImage = useCallback((id: string) => {
+    setTransfers((prev) => ({ ...prev, [id]: { id, direction: 'down', state: 'active', progress: 0 } }))
+    window.hush.retryImage(id)
+  }, [])
+
   return {
     snapshot,
     messages,
@@ -141,6 +163,9 @@ export function useHush(): HushState {
     notices,
     flush,
     dismissFlush,
+    transfers,
+    sendImage,
+    retryImage,
     loadOlder,
     send,
     markRead,

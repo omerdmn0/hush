@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { ChatMessage } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatHeader } from '@/components/chat/ChatHeader'
-import { CircleCheck } from 'lucide-react'
+import { CircleCheck, ImagePlus } from 'lucide-react'
 import { deliveredText, MessageList } from '@/components/chat/MessageList'
-import { Composer } from '@/components/chat/Composer'
+import { Composer, type ComposerHandle } from '@/components/chat/Composer'
+import { Lightbox } from '@/components/chat/Lightbox'
+import type { ImageActions } from '@/components/chat/MessageGroup'
 import { EmptyChat, FirstRun } from '@/components/chat/EmptyStates'
 import { SettingsScreen, type SectionId } from '@/components/settings/SettingsScreen'
 import { formatLastSeen } from '@/lib/format'
@@ -37,6 +39,37 @@ export default function App(): ReactNode {
 
   const settingsButton = useRef<HTMLButtonElement>(null)
   const composer = useRef<HTMLTextAreaElement>(null)
+  const composerHandle = useRef<ComposerHandle>(null)
+  const [viewing, setViewing] = useState<ChatMessage | null>(null)
+  // The thumbnail that opened the viewer, so focus can go back to it (MASTER.md §7).
+  const viewerOpener = useRef<HTMLElement | null>(null)
+  const openViewer = useCallback((m: ChatMessage) => {
+    viewerOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setViewing(m)
+  }, [])
+  const restoreFocus = useCallback(() => {
+    const el = viewerOpener.current
+    ;(el?.isConnected ? el : composer.current)?.focus()
+  }, [])
+  const [dragging, setDragging] = useState(false)
+  const dragDepth = useRef(0)
+
+  // Never let a file dropped anywhere navigate the window to it.
+  useEffect(() => {
+    const block = (e: DragEvent): void => e.preventDefault()
+    window.addEventListener('dragover', block)
+    window.addEventListener('drop', block)
+    return () => {
+      window.removeEventListener('dragover', block)
+      window.removeEventListener('drop', block)
+    }
+  }, [])
+
+  const { transfers, retryImage } = hush
+  const imageActions: ImageActions = useMemo(
+    () => ({ transfers, onOpen: openViewer, onRetry: retryImage }),
+    [transfers, openViewer, retryImage]
+  )
 
   const peer: PeerView | null = useMemo(() => {
     if (!snapshot?.settings.peerIp) return null
@@ -101,7 +134,28 @@ export default function App(): ReactNode {
             onLinkPeer={openConnection}
             settingsButtonRef={settingsButton}
           />
-          <main className="hud-grid relative flex min-w-0 flex-1 flex-col bg-app">
+          <main
+            className="hud-grid relative flex min-w-0 flex-1 flex-col bg-app"
+            onDragEnter={(e) => {
+              if (!peer || !e.dataTransfer.types.includes('Files')) return
+              dragDepth.current++
+              setDragging(true)
+            }}
+            onDragLeave={() => {
+              if (dragDepth.current > 0 && --dragDepth.current === 0) setDragging(false)
+            }}
+            onDragOver={(e) => {
+              if (!peer) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'copy'
+            }}
+            onDrop={(e) => {
+              e.preventDefault()
+              dragDepth.current = 0
+              setDragging(false)
+              if (peer) composerHandle.current?.addFiles([...e.dataTransfer.files])
+            }}
+          >
             <ChatHeader peer={peer} />
             {!peer ? (
               <FirstRun ownIp={snapshot.net.ownIp} onOpenSettings={openConnection} />
@@ -116,6 +170,7 @@ export default function App(): ReactNode {
                 hasMore={hush.hasMore}
                 loadingOlder={hush.loadingOlder}
                 onLoadOlder={hush.loadOlder}
+                images={imageActions}
               />
             )}
             {hush.flush && peer && (
@@ -125,12 +180,21 @@ export default function App(): ReactNode {
               peerName={peer?.name ?? ''}
               disabled={!peer}
               onSend={hush.send}
+              onSendImage={hush.sendImage}
               onTyping={(on) => window.hush.setTyping(on)}
               inputRef={composer}
+              handleRef={composerHandle}
             />
+            {dragging && peer && <DropZone peerName={peer.name} />}
           </main>
         </>
       )}
+      <Lightbox
+        message={viewing && (messages.find((m) => m.id === viewing.id) ?? viewing)}
+        peerName={peer?.name ?? 'Peer'}
+        onClose={() => setViewing(null)}
+        onClosed={restoreFocus}
+      />
       <LiveAnnouncer
         peerName={peer?.name ?? ''}
         typing={hush.peerTyping}
@@ -191,6 +255,19 @@ function FlushToast({ text, onDone }: { text: string; onDone: () => void }): Rea
     >
       <CircleCheck className="size-4 text-online" />
       <span className="data text-text">{text}</span>
+    </div>
+  )
+}
+
+/** Overlay while files are dragged over the chat (MASTER.md states gallery). */
+function DropZone({ peerName }: { peerName: string }): ReactNode {
+  return (
+    <div className="pointer-events-none absolute inset-2 z-40 grid place-items-center border-2 border-dashed border-cyan bg-[color-mix(in_srgb,var(--bg-app)_88%,var(--cyan))] text-center">
+      <div>
+        <ImagePlus aria-hidden="true" className="mx-auto mb-1.5 size-7 text-cyan" />
+        <div className="label text-cyan">Drop to send to {peerName}</div>
+        <div className="text-xs text-text-muted">PNG, JPEG, GIF or WebP · up to 25 MB · you can add a caption first</div>
+      </div>
     </div>
   )
 }

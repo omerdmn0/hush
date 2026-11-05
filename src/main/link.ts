@@ -38,6 +38,8 @@ interface LinkEvents {
   up: [peer: LinkPeer]
   down: []
   frame: [frame: Frame, peer: LinkPeer]
+  /** Binary frame (image chunk) from a handshaken peer. */
+  binary: [data: Uint8Array, peer: LinkPeer]
   listening: [listening: boolean, error: string | null]
   problem: [message: string]
 }
@@ -57,6 +59,7 @@ const BACKOFF_MAX_MS = 30_000
 const RELISTEN_MS = 10_000
 
 const normalize = (addr: string | undefined): string => (addr ?? '').replace(/^::ffff:/, '')
+const toBytes = (d: RawData): Uint8Array => (Array.isArray(d) ? Buffer.concat(d) : d instanceof ArrayBuffer ? new Uint8Array(d) : d)
 
 export class PeerLink extends EventEmitter<LinkEvents> {
   private cfg: LinkConfig
@@ -147,10 +150,19 @@ export class PeerLink extends EventEmitter<LinkEvents> {
    * other open one. Resolves false if offline or the write failed.
    */
   send(frame: Frame): Promise<boolean> {
+    return this.write(JSON.stringify(frame))
+  }
+
+  /** Sends a binary frame (image chunk); same delivery rules as send(). */
+  sendBinary(data: Uint8Array): Promise<boolean> {
+    return this.write(data)
+  }
+
+  private write(payload: string | Uint8Array): Promise<boolean> {
     const open = (c: Conn | null): c is Conn => c !== null && c.peer !== null && c.ws.readyState === WebSocket.OPEN
     const c = open(this.active) ? this.active : ([...this.conns].find(open) ?? null)
     if (!c) return Promise.resolve(false)
-    return new Promise((resolve) => c.ws.send(JSON.stringify(frame), (err) => resolve(!err)))
+    return new Promise((resolve) => c.ws.send(payload, { binary: typeof payload !== 'string' }, (err) => resolve(!err)))
   }
 
   // ---------- listening ----------
@@ -251,7 +263,10 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     ws.on('pong', () => (conn.alive = true))
     ws.on('close', () => this.onClose(conn))
     ws.on('message', (data: RawData, isBinary: boolean) => {
-      if (isBinary) return
+      if (isBinary) {
+        if (conn.peer) this.emit('binary', toBytes(data), conn.peer)
+        return
+      }
       const frame = parseFrame(data.toString())
       if (!frame) return
       if (!conn.peer) {

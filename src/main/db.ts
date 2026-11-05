@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import Database from 'better-sqlite3'
-import type { ChatMessage, HistoryCursor, MessageStatus } from '../shared/types'
+import type { ImageMeta } from '../shared/protocol'
+import type { ChatImage, ChatMessage, HistoryCursor, MessageStatus } from '../shared/types'
 
 /**
  * A message as stored. `authorId` is a stable install id, not "me"/"peer".
@@ -14,6 +15,8 @@ export interface StoredMessage {
   body: string
   sentAt: number
   status: MessageStatus
+  /** Present for image messages; the files live in the image store, named by message id. */
+  image: ImageMeta | null
 }
 
 type Migration = (db: Database.Database) => void
@@ -54,13 +57,16 @@ const MIGRATIONS: Migration[] = [
          WHERE author_id = ?`
       ).run(JSON.parse(self.value), JSON.parse(self.value))
     }
-  }
+  },
+
+  // v3 — stage d: image metadata (JSON); the image files themselves are stored on disk.
+  (db) => db.exec(`ALTER TABLE messages ADD COLUMN image TEXT;`)
 ]
 
 // Status only ever moves forward, so replayed or out-of-order receipts are harmless.
 const RANK = `CASE status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 END`
 const RANK_OF: Record<MessageStatus, number> = { queued: 0, sent: 1, delivered: 2, read: 3 }
-const COLUMNS = 'id, author_id, seq, body, sent_at, status'
+const COLUMNS = 'id, author_id, seq, body, sent_at, status, image'
 
 interface Row {
   id: string
@@ -69,6 +75,7 @@ interface Row {
   body: string
   sent_at: number
   status: MessageStatus
+  image: string | null
 }
 
 export class HushDb {
@@ -115,12 +122,12 @@ export class HushDb {
   // ---------- messages ----------
 
   /** Creates a message authored on this computer, assigning the next sequence number. */
-  createOwnMessage(authorId: string, body: string, sentAt: number): StoredMessage {
+  createOwnMessage(authorId: string, body: string, sentAt: number, image: ImageMeta | null = null, id: string = randomUUID()): StoredMessage {
     return this.db.transaction(() => {
       const { next } = this.db
         .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE author_id = ?')
         .get(authorId) as { next: number }
-      const m: StoredMessage = { id: randomUUID(), authorId, seq: next, body, sentAt, status: 'queued' }
+      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image }
       this.insertMessage(m)
       return m
     })()
@@ -134,10 +141,10 @@ export class HushDb {
   insertMessage(m: StoredMessage, receivedAt: number = Date.now()): boolean {
     const r = this.db
       .prepare(
-        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
       )
-      .run(m.id, m.authorId, m.seq, m.body, m.sentAt, receivedAt, m.status)
+      .run(m.id, m.authorId, m.seq, m.body, m.sentAt, receivedAt, m.status, m.image ? JSON.stringify(m.image) : null)
     if (r.changes === 1) return true
     if (m.seq !== null) {
       this.db.prepare('UPDATE messages SET seq = ? WHERE id = ? AND author_id = ? AND seq IS NULL').run(m.seq, m.id, m.authorId)
@@ -234,6 +241,14 @@ export class HushDb {
     return rows.map((r) => r.id)
   }
 
+  /** Image messages written by anyone but `selfId` (candidates for downloading). */
+  imageMessagesFromOthers(selfId: string): { id: string; image: ImageMeta }[] {
+    const rows = this.db
+      .prepare(`SELECT id, image FROM messages WHERE image IS NOT NULL AND author_id <> ? ORDER BY sent_at`)
+      .all(selfId) as { id: string; image: string }[]
+    return rows.map((r) => ({ id: r.id, image: JSON.parse(r.image) as ImageMeta }))
+  }
+
   /** Newest-last page of history, older than `before` when given. */
   listMessages(before: HistoryCursor | undefined, limit: number): { rows: StoredMessage[]; hasMore: boolean } {
     const rows = (
@@ -253,10 +268,36 @@ export class HushDb {
 }
 
 function toStored(r: Row): StoredMessage {
-  return { id: r.id, authorId: r.author_id, seq: r.seq, body: r.body, sentAt: r.sent_at, status: r.status }
+  return {
+    id: r.id,
+    authorId: r.author_id,
+    seq: r.seq,
+    body: r.body,
+    sentAt: r.sent_at,
+    status: r.status,
+    image: r.image ? (JSON.parse(r.image) as ImageMeta) : null
+  }
 }
 
-/** Converts a stored message for the UI, from this install's point of view. */
-export function toChatMessage(m: StoredMessage, selfId: string): ChatMessage {
-  return { id: m.id, from: m.authorId === selfId ? 'me' : 'peer', text: m.body, sentAt: m.sentAt, status: m.status }
+/**
+ * Converts a stored message for the UI, from this install's point of view.
+ * `imageReady` reports whether the full image file is on this computer.
+ */
+export function toChatMessage(m: StoredMessage, selfId: string, imageReady: (id: string) => boolean = () => false): ChatMessage {
+  const msg: ChatMessage = { id: m.id, from: m.authorId === selfId ? 'me' : 'peer', text: m.body, sentAt: m.sentAt, status: m.status }
+  if (m.image) msg.image = chatImage(m.id, m.image, imageReady(m.id))
+  return msg
+}
+
+export function chatImage(id: string, meta: ImageMeta, ready: boolean): ChatImage {
+  const key = id.toLowerCase()
+  return {
+    width: meta.width,
+    height: meta.height,
+    mime: meta.mime,
+    size: meta.size,
+    thumbUrl: `hush-img://${key}/thumb`,
+    fullUrl: `hush-img://${key}/full`,
+    ready
+  }
 }

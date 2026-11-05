@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { crc32, deflateSync } from 'node:zlib'
 import { once } from 'node:events'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -10,6 +11,7 @@ import type { Frame } from '../shared/protocol'
 import type { HushEvent } from '../shared/types'
 import { ChatService } from './chat'
 import { HushDb } from './db'
+import { ImageStore } from './images'
 import { PeerLink } from './link'
 
 const HOST = '127.0.0.1'
@@ -30,6 +32,7 @@ async function freePort(): Promise<number> {
 /** One "computer": a database that survives while the app (link + chat service) restarts. */
 class Side {
   readonly db: HushDb
+  readonly store: ImageStore
   readonly events: HushEvent[] = []
   link!: PeerLink
   chat!: ChatService
@@ -43,6 +46,7 @@ class Side {
   ) {
     const dir = mkdtempSync(join(tmpdir(), `hush-chat-${name}-`))
     this.db = new HushDb(file ?? join(dir, 'hush.db'))
+    this.store = new ImageStore(join(dir, 'images'))
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
     cleanups.push(() => this.db.close())
   }
@@ -50,7 +54,8 @@ class Side {
   /** Starts the app's networking (a fresh link + chat service, like an app launch). */
   start(): this {
     this.link = new PeerLink({ selfId: this.id, name: this.name, bindHost: HOST, port: this.port, peerHost: HOST, peerPort: this.peerPort })
-    this.chat = new ChatService(this.db, this.link, this.id, (e) => this.events.push(e))
+    // Tiny chunks so every test image spans many chunks (exercises resume and ordering).
+    this.chat = new ChatService(this.db, this.link, this.id, (e) => this.events.push(e), this.store, { chunkBytes: 1024 })
     const link = this.link
     cleanups.push(() => link.stop())
     link.start()
@@ -249,5 +254,123 @@ describe('ChatService — offline queue and sync', () => {
     expect(b.db.getMessage(m1)?.seq).toBe(1) // filled in by A's re-send
     expect(a.db.getMessage(m3)?.seq).toBe(1) // filled in by B's re-send
     expect([a.count(), b.count()]).toEqual([3, 3])
+  })
+})
+
+// ---------- images ----------
+
+/** A real PNG; `noise` makes it barely compressible so it spans many chunks. */
+function png(w: number, h: number, noise = false): Uint8Array {
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const len = Buffer.alloc(4)
+    len.writeUInt32BE(data.length)
+    const td = Buffer.concat([Buffer.from(type), data])
+    const crc = Buffer.alloc(4)
+    crc.writeUInt32BE(crc32(td))
+    return Buffer.concat([len, td, crc])
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(w, 0)
+  ihdr.writeUInt32BE(h, 4)
+  ihdr.set([8, 2, 0, 0, 0], 8) // 8-bit RGB
+  const raw = Buffer.alloc((w * 3 + 1) * h)
+  for (let i = 0; i < raw.length; i++) raw[i] = noise && i % (w * 3 + 1) !== 0 ? Math.floor(Math.random() * 256) : 0
+  return new Uint8Array(
+    Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))])
+  )
+}
+
+const outgoing = (bytes: Uint8Array): { bytes: Uint8Array; mime: string; width: number; height: number; thumb: Uint8Array } => ({
+  bytes,
+  mime: 'image/png',
+  width: 160,
+  height: 120,
+  thumb: png(16, 12)
+})
+const fullFile = (s: Side, id: string): string => s.store.fullPath(id, 'image/png')
+const transfer = (s: Side, id: string, state: string): boolean =>
+  s.events.some((e) => e.type === 'transfer' && e.transfer.id === id && e.transfer.state === state)
+
+describe('ChatService — images', () => {
+  it('shows the preview at once, then pulls the full image byte-for-byte', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const bytes = png(160, 120, true) // ~58 KB → ~57 chunks of 1 KB
+    const m = await a.chat.sendImage(outgoing(bytes), 'look at this')
+    expect(m.image).toMatchObject({ mime: 'image/png', width: 160, height: 120, ready: true, thumbUrl: `hush-img://${m.id}/thumb` })
+
+    await until(() => b.db.getMessage(m.id) !== undefined)
+    expect(existsSync(b.store.thumbPath(m.id))).toBe(true)
+    expect(b.db.getMessage(m.id)?.body).toBe('look at this')
+    await until(() => transfer(b, m.id, 'done'), 10_000)
+    expect(Buffer.compare(readFileSync(fullFile(b, m.id)), Buffer.from(bytes))).toBe(0)
+    expect(transfer(a, m.id, 'done')).toBe(true) // sender saw its upload finish
+  })
+
+  it('delivers an image sent while the peer was offline', async () => {
+    const [a, b] = await sides()
+    a.start()
+    const m = await a.chat.sendImage(outgoing(png(64, 48, true)), '')
+    expect(m.status).toBe('queued')
+    b.start()
+    await until(() => transfer(b, m.id, 'done'), 10_000)
+    expect(b.db.getMessage(m.id)?.body).toBe('')
+    await until(() => a.db.getMessage(m.id)?.status === 'delivered')
+  })
+
+  it('resumes an interrupted download from where it stopped', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const bytes = png(400, 300, true) // ~360 KB
+    const m = await a.chat.sendImage(outgoing(bytes), '')
+    await until(() => b.store.partSize(m.id) > 40_000, 10_000)
+    await b.stop()
+    const partial = b.store.partSize(m.id)
+    expect(partial).toBeGreaterThan(0)
+    expect(partial).toBeLessThan(bytes.length)
+
+    b.start()
+    await until(() => transfer(b, m.id, 'done') && existsSync(fullFile(b, m.id)), 15_000)
+    expect(Buffer.compare(readFileSync(fullFile(b, m.id)), Buffer.from(bytes))).toBe(0)
+  })
+
+  it('rejects a corrupted transfer after a few attempts and reports it as failed', async () => {
+    const [a, b] = await sides()
+    a.start()
+    const bytes = png(64, 48, true)
+    const m = await a.chat.sendImage(outgoing(bytes), '')
+    // The sender's file changes after sending, so its SHA-256 no longer matches.
+    const tampered = Buffer.from(bytes)
+    tampered[tampered.length - 20] ^= 0xff
+    writeFileSync(fullFile(a, m.id), tampered)
+    b.start()
+    await until(() => transfer(b, m.id, 'failed'), 10_000)
+    expect(existsSync(fullFile(b, m.id))).toBe(false)
+    expect(b.store.partSize(m.id)).toBe(0)
+  })
+
+  it('only serves images it wrote itself', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const m = await a.chat.sendImage(outgoing(png(32, 24)), '')
+    await until(() => transfer(b, m.id, 'done'))
+    const replies: Frame[] = []
+    a.link.on('frame', (f) => replies.push(f))
+    await a.link.send({ t: 'blob-req', id: m.id, offset: 0 }) // B holds it, but it's A's image
+    await until(() => replies.some((f) => f.t === 'blob-err' && f.id === m.id))
+  })
+
+  it('refuses files that are not really images', async () => {
+    const [a] = await sides()
+    a.start()
+    const fake = new TextEncoder().encode('<svg onload="alert(1)"></svg>')
+    await expect(a.chat.sendImage({ ...outgoing(fake), mime: 'image/png' }, '')).rejects.toThrow()
+    expect(a.count()).toBe(0)
   })
 })

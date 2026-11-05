@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chunkIds, MAX_TEXT_LENGTH, parseFrame } from './protocol'
+import { CHUNK_BYTES, chunkIds, decodeChunk, encodeChunk, MAX_TEXT_LENGTH, parseFrame, sniffImage } from './protocol'
 
 const A = '2f1c3a52-9d1e-4c4b-8a1f-0b6c2d3e4f50'
 const B = '8a7b6c5d-4e3f-4a1b-9c2d-1e0f2a3b4c5d'
@@ -46,5 +46,41 @@ describe('chunkIds', () => {
     const ids = Array.from({ length: 1201 }, () => A)
     expect(chunkIds(ids).map((c) => c.length)).toEqual([500, 500, 201])
     expect(chunkIds([])).toEqual([])
+  })
+})
+
+describe('images', () => {
+  const meta = { mime: 'image/png', width: 800, height: 600, size: 12345, sha256: 'a'.repeat(64) }
+  it('accepts a message with an inline preview and an empty caption', () => {
+    const f = parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1, image: { ...meta, thumb: 'UklGRg==' } }))
+    expect(f).toMatchObject({ t: 'msg', body: '', image: { mime: 'image/png', thumb: 'UklGRg==' } })
+  })
+  it('rejects bad image metadata', () => {
+    const bad = (image: unknown): unknown => parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1, image }))
+    expect(bad({ ...meta, mime: 'image/svg+xml', thumb: 'AA==' })).toBeNull()
+    expect(bad({ ...meta, size: 26 * 1024 * 1024, thumb: 'AA==' })).toBeNull()
+    expect(bad({ ...meta, sha256: 'xyz', thumb: 'AA==' })).toBeNull()
+    expect(bad({ ...meta, thumb: 'not base64!' })).toBeNull()
+    expect(bad({ ...meta })).toBeNull() // preview required
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1 }))).toBeNull() // empty without image
+  })
+  it('validates blob requests', () => {
+    expect(parseFrame(j({ t: 'blob-req', id: A, offset: 131072 }))).toEqual({ t: 'blob-req', id: A, offset: 131072 })
+    expect(parseFrame(j({ t: 'blob-req', id: A, offset: -1 }))).toBeNull()
+    expect(parseFrame(j({ t: 'blob-err', id: A }))).toEqual({ t: 'blob-err', id: A })
+  })
+  it('round-trips binary chunks and rejects oversized ones', () => {
+    const data = new Uint8Array([1, 2, 3, 250])
+    const c = decodeChunk(encodeChunk(A, 393216, data))
+    expect(c).toEqual({ id: A, offset: 393216, data })
+    expect(decodeChunk(new Uint8Array(20))).toBeNull()
+    expect(decodeChunk(new Uint8Array(20 + CHUNK_BYTES + 1))).toBeNull()
+  })
+  it('recognises image signatures', () => {
+    expect(sniffImage(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe('image/png')
+    expect(sniffImage(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe('image/jpeg')
+    expect(sniffImage(new TextEncoder().encode('GIF89a'))).toBe('image/gif')
+    expect(sniffImage(new TextEncoder().encode('RIFF\0\0\0\0WEBPVP8 '))).toBe('image/webp')
+    expect(sniffImage(new TextEncoder().encode('<svg xmlns='))).toBeNull()
   })
 })

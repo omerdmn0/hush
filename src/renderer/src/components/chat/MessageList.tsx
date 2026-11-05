@@ -5,7 +5,7 @@ import { CircleCheck } from 'lucide-react'
 import { formatTime } from '@/lib/format'
 import { buildTimeline, lastQueuedId, type DeliveryNotice, type TimelineItem } from '@/lib/timeline'
 import { Avatar } from '@/components/common'
-import { MessageGroup } from './MessageGroup'
+import { MessageGroup, type ImageActions } from './MessageGroup'
 
 const Column = ({ children }: { children: ReactNode }): ReactNode => (
   <div className="mx-auto max-w-[760px] px-6">{children}</div>
@@ -22,7 +22,8 @@ export function MessageList({
   typing,
   hasMore,
   loadingOlder,
-  onLoadOlder
+  onLoadOlder,
+  images
 }: {
   messages: ChatMessage[]
   notices: DeliveryNotice[]
@@ -31,6 +32,7 @@ export function MessageList({
   hasMore: boolean
   loadingOlder: boolean
   onLoadOlder: () => void
+  images: ImageActions
 }): ReactNode {
   const items = useMemo(() => buildTimeline(messages, Date.now(), notices), [messages, notices])
 
@@ -97,7 +99,7 @@ export function MessageList({
             ) : item.kind === 'notice' ? (
               <NoticeLine notice={item.notice} peerName={peerName} />
             ) : (
-              <MessageGroup from={item.from} messages={item.messages} peerName={peerName} queuedNoteAfter={noteAfter} />
+              <MessageGroup from={item.from} messages={item.messages} peerName={peerName} queuedNoteAfter={noteAfter} images={images} />
             )}
           </Column>
         )}

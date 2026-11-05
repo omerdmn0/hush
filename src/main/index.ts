@@ -1,13 +1,15 @@
-import { app, BrowserWindow, ipcMain, Menu, session } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, net as electronNet, protocol, session } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import icon from '../../resources/icon.png?asset'
 import { DEFAULT_PORT, MAX_TEXT_LENGTH } from '../shared/protocol'
 import { isTailscaleIp } from '../shared/ip'
-import { IPC, type HistoryCursor, type HushEvent, type NetState, type Settings } from '../shared/types'
+import { IPC, type HistoryCursor, type HushEvent, type NetState, type OutgoingImage, type Settings } from '../shared/types'
 import { ChatService } from './chat'
 import { HushDb } from './db'
+import { ImageStore } from './images'
 import { PeerLink } from './link'
 import { findTailscaleIp } from './tailscale'
 
@@ -26,6 +28,9 @@ const port = Number(env('HUSH_PORT') ?? DEFAULT_PORT)
 const peerPort = Number(env('HUSH_PEER_PORT') ?? DEFAULT_PORT)
 
 if (dev) app.setPath('userData', join(app.getPath('appData'), profile ? `Hush-dev-${profile}` : 'Hush-dev'))
+
+// hush-img://<message-id>/thumb|full serves stored images to the UI (must be declared before ready).
+protocol.registerSchemesAsPrivileged([{ scheme: 'hush-img', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
 // One Hush per data folder — a second copy would fight over the port and database.
 if (!app.requestSingleInstanceLock()) {
@@ -61,7 +66,8 @@ if (!app.requestSingleInstanceLock()) {
     peerHost: peerHostFor(settings),
     peerPort
   })
-  const chat = new ChatService(db, link, selfId, send)
+  const images = new ImageStore(join(app.getPath('userData'), 'images'))
+  const chat = new ChatService(db, link, selfId, send, images)
 
   link.on('listening', (listening, error) => {
     Object.assign(net, { listening, error })
@@ -134,6 +140,17 @@ if (!app.requestSingleInstanceLock()) {
     return chat.send(text)
   })
 
+  ipcMain.handle(IPC.sendImage, (_e, img: OutgoingImage, caption: unknown) => {
+    if (!(img?.bytes instanceof Uint8Array) || !(img.thumb instanceof Uint8Array) || typeof caption !== 'string') {
+      throw new Error('Invalid image')
+    }
+    return chat.sendImage(img, caption) // validates type, signature, size and preview
+  })
+
+  ipcMain.on(IPC.retryImage, (_e, id: unknown) => {
+    if (typeof id === 'string') chat.transfers.retry(id)
+  })
+
   ipcMain.on(IPC.markRead, (_e, ids: unknown) => {
     if (Array.isArray(ids) && ids.every((id) => typeof id === 'string')) chat.markRead(ids as string[])
   })
@@ -177,6 +194,13 @@ if (!app.requestSingleInstanceLock()) {
     // Microphone (calls), notifications and clipboard writes are the only permissions Hush needs.
     const allowed = new Set(['media', 'notifications', 'clipboard-sanitized-write'])
     session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(allowed.has(permission)))
+
+    protocol.handle('hush-img', (req) => {
+      const url = new URL(req.url)
+      const id = url.hostname
+      const file = images.resolve(id, url.pathname.slice(1), db.getMessage(id)?.image ?? null)
+      return file ? electronNet.fetch(pathToFileURL(file).toString()) : new Response('Not found', { status: 404 })
+    })
 
     link.start()
     createWindow()
