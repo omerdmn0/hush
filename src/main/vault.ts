@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto'
-import { closeSync, fstatSync, openSync, readSync, writeSync } from 'node:fs'
+import { closeSync, fstatSync, ftruncateSync, openSync, readSync, writeSync } from 'node:fs'
 
 /**
  * Encryption at rest. One random 256-bit data key encrypts message text, secrets and every
@@ -274,4 +274,57 @@ export function recordsLength(data: Buffer): { plain: number; bytes: number } {
     at = end
   }
   return { plain, bytes: at }
+}
+
+/**
+ * Measures a partial download on disk without reading it whole (it can be up to 1 GB): walks the
+ * record headers and drops a torn final record. Returns the plaintext bytes it holds.
+ */
+export function scanRecordFile(path: string): number {
+  let fd: number
+  try {
+    fd = openSync(path, 'r+')
+  } catch {
+    return 0
+  }
+  try {
+    const size = fstatSync(fd).size
+    const head = Buffer.alloc(4)
+    let at = 0
+    let plain = 0
+    while (at + 4 <= size) {
+      readSync(fd, head, 0, 4, at)
+      const len = head.readUInt32BE(0)
+      const end = at + 4 + NONCE + len + TAG
+      if (end > size) break
+      plain += len
+      at = end
+    }
+    if (at !== size) ftruncateSync(fd, at)
+    return plain
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Reads a partial download record by record from disk (never all at once). */
+export function* recordsFromFile(key: Buffer, path: string): Generator<Buffer> {
+  const fd = openSync(path, 'r')
+  try {
+    const size = fstatSync(fd).size
+    const head = Buffer.alloc(4)
+    let at = 0
+    while (at + 4 <= size) {
+      readSync(fd, head, 0, 4, at)
+      const len = head.readUInt32BE(0)
+      const total = 4 + NONCE + len + TAG
+      if (at + total > size) return
+      const rec = Buffer.alloc(total)
+      readSync(fd, rec, 0, total, at)
+      yield* openRecords(key, rec)
+      at += total
+    }
+  } finally {
+    closeSync(fd)
+  }
 }

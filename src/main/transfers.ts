@@ -1,7 +1,7 @@
 import { CHUNK_BYTES, decodeChunk, encodeChunk, type Frame } from '../shared/protocol'
 import type { HushEvent, ImageTransfer } from '../shared/types'
-import type { HushDb } from './db'
-import type { ImageStore } from './images'
+import { AUTO_DOWNLOAD_BYTES, type HushDb, type StoredMessage } from './db'
+import { blobOf, type ImageStore } from './images'
 import type { PeerLink } from './link'
 
 /** Re-request a download if no chunk arrives for this long. */
@@ -12,12 +12,11 @@ const MAX_ATTEMPTS = 3
 const PROGRESS_EVERY_MS = 150
 
 /**
- * Moves full-size images between the two computers.
+ * Moves attachments (full-size images, files, voice notes) between the two computers.
  *
  * Receiving is pull-based: for every image message from the other person whose file we lack,
  * we ask for it (`blob-req`) from the number of bytes we already have, so an interrupted
  * download resumes where it stopped. One download runs at a time, in message order.
- * Sending: we only ever serve images we wrote ourselves.
  */
 export class Transfers {
   private queue: string[] = []
@@ -27,6 +26,10 @@ export class Transfers {
   private lastProgress = new Map<string, number>()
   /** Upload generation per image: a newer request for the same image cancels the older stream. */
   private uploads = new Map<string, number>()
+  /** Downloads being checked and moved into place (async for big files). */
+  private finishing = new Set<string>()
+  /** Big files the user asked for (others download by themselves). */
+  private requested = new Set<string>()
 
   constructor(
     private readonly db: HushDb,
@@ -46,8 +49,9 @@ export class Transfers {
    */
   want(id: string): void {
     const m = this.db.getMessage(id)
-    if (!m?.image || this.store.hasFull(id, m.image)) return
-    if (this.current === id || this.queue.includes(id)) return
+    const blob = m ? blobOf(m) : null
+    if (!m || !blob || this.store.hasFull(id, blob) || !this.automatic(m)) return
+    if (this.current === id || this.queue.includes(id) || this.finishing.has(id)) return
     this.queue.push(id)
     this.pump()
   }
@@ -69,9 +73,15 @@ export class Transfers {
     }
   }
 
-  /** User pressed Retry on a failed image. */
+  /** Images, voice notes and files up to 100 MB come by themselves; bigger files when asked (or already started). */
+  private automatic(m: StoredMessage): boolean {
+    return !m.file || !!m.file.voice || m.file.size <= AUTO_DOWNLOAD_BYTES || this.requested.has(m.id) || this.store.partSize(m.id) > 0
+  }
+
+  /** User pressed Retry on a failed download, or Download on a big file. */
   retry(id: string): void {
     this.attempts.delete(id)
+    this.requested.add(id)
     this.want(id)
   }
 
@@ -82,7 +92,7 @@ export class Transfers {
    */
   onUp(): void {
     if (this.current) this.request(this.current)
-    for (const { id } of this.db.imageMessages()) {
+    for (const { id } of this.db.attachmentMessages()) {
       if ((this.attempts.get(id) ?? 0) < MAX_ATTEMPTS) this.want(id)
     }
     this.pump()
@@ -107,7 +117,8 @@ export class Transfers {
   private request(id: string): void {
     const offset = this.store.partSize(id)
     const m = this.db.getMessage(id)
-    if (m?.image) this.progress(id, 'down', 'active', offset / m.image.size, true)
+    const blob = m ? blobOf(m) : null
+    if (blob) this.progress(id, 'down', 'active', offset / blob.size, true)
     void this.link.send({ t: 'blob-req', id, offset })
     this.armStall(id)
   }
@@ -122,7 +133,8 @@ export class Transfers {
   private onChunk(data: Uint8Array): void {
     const chunk = decodeChunk(data)
     if (!chunk || chunk.id !== this.current) return
-    const meta = this.db.getMessage(chunk.id)?.image
+    const m = this.db.getMessage(chunk.id)
+    const meta = m ? blobOf(m) : null
     if (!meta) return
     const size = this.store.appendPart(chunk.id, chunk.offset, chunk.data, meta)
     if (size < 0) return // out of order (e.g. a cancelled stream); the stall timer re-requests
@@ -132,13 +144,20 @@ export class Transfers {
       return
     }
     clearTimeout(this.stallTimer)
+    const id = chunk.id
     this.current = null
-    if (this.store.finalize(chunk.id, meta)) {
-      this.attempts.delete(chunk.id)
-      this.progress(chunk.id, 'down', 'done', 1, true)
-    } else {
-      this.fail(chunk.id) // corrupt: the part file was discarded, try from scratch
-    }
+    this.finishing.add(id)
+    void this.store.finalize(id, meta).then((ok) => {
+      this.finishing.delete(id)
+      if (ok) {
+        this.attempts.delete(id)
+        this.requested.delete(id)
+        this.progress(id, 'down', 'done', 1, true)
+      } else {
+        this.fail(id) // corrupt: the part file was discarded, try from scratch
+      }
+      this.pump()
+    })
     this.pump()
   }
 
@@ -172,14 +191,14 @@ export class Transfers {
 
   private async serve(id: string, offset: number): Promise<void> {
     const m = this.db.getMessage(id)
-    // Any image we hold in full: ours, or theirs when they recover their history from us.
-    if (!m?.image || !this.store.hasFull(id, m.image) || offset > m.image.size) {
+    const meta = m ? blobOf(m) : null
+    // Any attachment we hold in full: ours, or theirs when they recover their history from us.
+    if (!meta || !this.store.hasFull(id, meta) || offset > meta.size) {
       await this.link.send({ t: 'blob-err', id })
       return
     }
     const gen = (this.uploads.get(id) ?? 0) + 1
     this.uploads.set(id, gen)
-    const meta = m.image
     for (let at = offset; at < meta.size; at += this.chunkBytes) {
       if (this.uploads.get(id) !== gen) return // superseded by a newer request
       const data = this.store.readChunk(id, meta, at, this.chunkBytes)

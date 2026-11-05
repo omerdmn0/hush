@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import Database from 'better-sqlite3'
-import type { ImageMeta } from '../shared/protocol'
-import { CALL_OUTCOMES, type CallRecord, type ChatImage, type ChatMessage, type HistoryCursor, type MessageStatus } from '../shared/types'
+import type { FileMeta, ImageMeta } from '../shared/protocol'
+import { isRiskyFile } from '../shared/files'
+import { CALL_OUTCOMES, type CallRecord, type ChatFile, type ChatImage, type ChatMessage, type HistoryCursor, type MessageStatus } from '../shared/types'
 import { isUuid } from '../shared/protocol'
 import { isSealedField, plainFields, type FieldCipher } from './vault'
 
@@ -27,6 +28,8 @@ export interface StoredMessage {
   data?: string | null
   /** The message this one answers (chat messages only). */
   replyTo?: string | null
+  /** Present for file messages (kind 'file'); the bytes live in the attachment store. */
+  file?: FileMeta | null
 }
 
 type Migration = (db: Database.Database) => void
@@ -98,13 +101,16 @@ const MIGRATIONS: Migration[] = [
   (db) =>
     db.exec(`
       ALTER TABLE messages ADD COLUMN reply_to TEXT;
-      ALTER TABLE messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;`)
+      ALTER TABLE messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;`),
+
+  // v7 — file attachments and voice notes (JSON description; bytes in the attachment store).
+  (db) => db.exec(`ALTER TABLE messages ADD COLUMN file TEXT;`)
 ]
 
 // Status only ever moves forward, so replayed or out-of-order receipts are harmless.
 const RANK = `CASE status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 END`
 const RANK_OF: Record<MessageStatus, number> = { queued: 0, sent: 1, delivered: 2, read: 3 }
-const COLUMNS = 'id, author_id, seq, body, sent_at, status, image, kind, ref, data, reply_to'
+const COLUMNS = 'id, author_id, seq, body, sent_at, status, image, kind, ref, data, reply_to, file'
 
 interface Row {
   id: string
@@ -118,6 +124,7 @@ interface Row {
   ref: string | null
   data: string | null
   reply_to: string | null
+  file: string | null
 }
 
 export class HushDb {
@@ -223,14 +230,15 @@ export class HushDb {
     image: ImageMeta | null = null,
     id: string = randomUUID(),
     event: { kind: string; ref: string; data: string | null } | null = null,
-    replyTo: string | null = null
+    replyTo: string | null = null,
+    file: FileMeta | null = null
   ): StoredMessage {
     return this.db.transaction(() => {
       const { top } = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ?').get(authorId) as { top: number }
       // After recovering history from the peer, numbering continues after the old messages
       // even before they have all arrived.
       const next = Math.max(top, this.getSetting<number>(`seqFloor:${authorId}`) ?? 0) + 1
-      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image, replyTo, ...(event ?? {}) }
+      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image, replyTo, file, ...(file ? { kind: 'file' } : {}), ...(event ?? {}) }
       this.insertMessage(m)
       return m
     })()
@@ -244,8 +252,8 @@ export class HushDb {
   insertMessage(m: StoredMessage, receivedAt: number = Date.now()): boolean {
     const r = this.db
       .prepare(
-        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image, kind, ref, data, reply_to)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image, kind, ref, data, reply_to, file)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
       )
       .run(
         m.id,
@@ -259,7 +267,8 @@ export class HushDb {
         m.kind ?? 'message',
         m.ref ?? null,
         m.data == null ? null : this.cipher.seal(m.data),
-        m.replyTo ?? null
+        m.replyTo ?? null,
+        m.file ? JSON.stringify(m.file) : null
       )
     if (r.changes === 1) return true
     if (m.seq !== null) {
@@ -282,7 +291,7 @@ export class HushDb {
 
   /** Every visible chat message, and every edit / delete (to build the in-memory search). */
   searchSource(): { messages: StoredMessage[]; events: StoredMessage[] } {
-    const messages = this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IS NULL AND hidden = 0 AND kind = 'message'`).all() as Row[]
+    const messages = this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IS NULL AND hidden = 0 AND kind IN ('message', 'file')`).all() as Row[]
     const events = this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE kind IN ('edit', 'delete')`).all() as Row[]
     return { messages: messages.map((r) => this.toStored(r)), events: events.map((r) => this.toStored(r)) }
   }
@@ -309,7 +318,7 @@ export class HushDb {
    */
   wipe(id: string): void {
     this.db.transaction(() => {
-      this.db.prepare(`UPDATE messages SET body = '', image = NULL WHERE id = ?`).run(id)
+      this.db.prepare(`UPDATE messages SET body = '', image = NULL, file = NULL WHERE id = ?`).run(id)
       this.db.prepare(`UPDATE messages SET data = '' WHERE ref = ? AND kind = 'edit'`).run(id)
     })()
   }
@@ -454,11 +463,16 @@ export class HushDb {
   }
 
   /** Image messages written by anyone but `selfId` (candidates for downloading). */
-  imageMessages(): { id: string; image: ImageMeta }[] {
+  /** Messages with an image or file attachment, oldest first. */
+  attachmentMessages(): { id: string; image: ImageMeta | null; file: FileMeta | null }[] {
     const rows = this.db
-      .prepare(`SELECT id, image FROM messages WHERE image IS NOT NULL ORDER BY sent_at`)
-      .all() as { id: string; image: string }[]
-    return rows.map((r) => ({ id: r.id, image: JSON.parse(r.image) as ImageMeta }))
+      .prepare(`SELECT id, image, file FROM messages WHERE image IS NOT NULL OR file IS NOT NULL ORDER BY sent_at`)
+      .all() as { id: string; image: string | null; file: string | null }[]
+    return rows.map((r) => ({
+      id: r.id,
+      image: r.image ? (JSON.parse(r.image) as ImageMeta) : null,
+      file: r.file ? (JSON.parse(r.file) as FileMeta) : null
+    }))
   }
 
   private toStored(r: Row): StoredMessage {
@@ -495,7 +509,8 @@ function toStored(r: Row, open: (s: string) => string): StoredMessage {
     kind: r.kind,
     ref: r.ref,
     data: r.data === null ? null : open(r.data),
-    replyTo: r.reply_to
+    replyTo: r.reply_to,
+    file: r.file ? (JSON.parse(r.file) as FileMeta) : null
   }
 }
 
@@ -506,14 +521,37 @@ function toStored(r: Row, open: (s: string) => string): StoredMessage {
 export function toChatMessage(m: StoredMessage, selfId: string, imageReady: (id: string) => boolean = () => false): ChatMessage {
   const msg: ChatMessage = { id: m.id, from: m.authorId === selfId ? 'me' : 'peer', text: m.body, sentAt: m.sentAt, status: m.status }
   if (m.image) msg.image = chatImage(m.id, m.image, imageReady(m.id))
+  if (m.file) msg.file = chatFile(m.id, m.file, imageReady(m.id))
   // A standalone message kind from a newer Hush: show a placeholder instead of breaking.
-  if (m.kind && m.kind !== 'message') {
+  if (m.kind && m.kind !== 'message' && m.kind !== 'file') {
     msg.text = ''
     msg.unsupported = true
-  } else if (m.body === '' && !m.image) {
+  } else if (m.body === '' && !m.image && !m.file) {
     msg.deleted = true // its content was wiped
   }
   return msg
+}
+
+/** Files from the other person up to this size download by themselves; bigger ones on request. */
+export const AUTO_DOWNLOAD_BYTES = 100 * 1024 * 1024
+
+export function chatFile(id: string, meta: FileMeta, ready: boolean): ChatFile {
+  const f: ChatFile = {
+    name: meta.name,
+    size: meta.size,
+    mime: meta.mime,
+    ready,
+    risky: isRiskyFile(meta.name),
+    autoDownload: !!meta.voice || meta.size <= AUTO_DOWNLOAD_BYTES
+  }
+  if (meta.voice) {
+    f.voice = {
+      durationMs: meta.voice.durationMs,
+      peaks: [...Buffer.from(meta.voice.peaks, 'base64')],
+      url: `hush-img://${id.toLowerCase()}/voice`
+    }
+  }
+  return f
 }
 
 export function chatImage(id: string, meta: ImageMeta, ready: boolean): ChatImage {

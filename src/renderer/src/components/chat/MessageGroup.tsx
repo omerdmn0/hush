@@ -1,5 +1,7 @@
-import { memo, useState, type ReactNode } from 'react'
-import { Ban, Check, CheckCheck, CircleAlert, Clock, Image as ImageIcon, LoaderCircle } from 'lucide-react'
+import { memo, useRef, useState, type ReactNode } from 'react'
+import { Ban, Check, CheckCheck, CircleAlert, Clock, Download, FileText, Image as ImageIcon, LoaderCircle, Mic, Pause, Play, ShieldAlert } from 'lucide-react'
+import { formatBytes } from '../../../../shared/files'
+import { formatClock } from '@/lib/voice'
 import type { ChatMessage, ImageTransfer, MessageStatus } from '../../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Avatar } from '@/components/common'
@@ -13,6 +15,10 @@ export interface ImageActions {
   transfers: Record<string, ImageTransfer>
   onOpen: (m: ChatMessage) => void
   onRetry: (id: string) => void
+  /** Start downloading a big file. */
+  onDownload: (id: string) => void
+  /** Save a copy of an image or file (asks where). */
+  onSave: (m: ChatMessage) => void
 }
 
 function StatusIcon({ status }: { status: MessageStatus }): ReactNode {
@@ -72,7 +78,7 @@ function MessageText({ text }: { text: string }): ReactNode {
 function ReplyQuote({ m, peerName, onJump }: { m: ChatMessage; peerName: string; onJump: (id: string) => void }): ReactNode {
   const q = m.replyTo!
   const who = q.missing ? '' : q.from === 'me' ? 'You' : peerName
-  const body = q.missing ? 'Original message isn’t available' : q.deleted ? 'Message deleted' : q.text || (q.hasImage ? 'Photo' : '')
+  const body = q.missing ? 'Original message isn’t available' : q.deleted ? 'Message deleted' : q.text || (q.hasImage ? 'Photo' : 'Attachment')
   return (
     <button
       type="button"
@@ -121,6 +127,9 @@ function Bubble({
       </div>
     )
   }
+
+  if (m.file?.voice) return <VoiceBubble m={m} mine={mine} shape={shape} quote={quote} showStatus={showStatus} transfer={images.transfers[m.id]} onRetry={images.onRetry} />
+  if (m.file) return <FileBubble m={m} mine={mine} shape={shape} quote={quote} showStatus={showStatus} images={images} />
 
   if (m.image) {
     const size = thumbSize(m.image.width, m.image.height)
@@ -263,6 +272,173 @@ function MessageRow({
       <MessageToolbar m={m} mine={mine} actions={actions} menuOpen={menuOpen} onMenuOpenChange={setMenuOpen} />
       <Bubble m={m} mine={mine} isLast={isLast} images={images} peerName={peerName} onJump={actions.onJump} />
       <ReactionChips m={m} mine={mine} actions={actions} peerName={peerName} />
+    </div>
+  )
+}
+
+/** A file: name, size, and Save (it's never opened by Hush). Big ones download on request. */
+function FileBubble({
+  m,
+  mine,
+  shape,
+  quote,
+  showStatus,
+  images
+}: {
+  m: ChatMessage
+  mine: boolean
+  shape: string
+  quote: ReactNode
+  showStatus: boolean
+  images: ImageActions
+}): ReactNode {
+  const f = m.file!
+  const t = images.transfers[m.id]
+  const pct = Math.round((t?.progress ?? 0) * 100)
+  const failed = !mine && !f.ready && t?.state === 'failed'
+  const receiving = !mine && !f.ready && !failed && (f.autoDownload || t?.state === 'active')
+  const waiting = !mine && !f.ready && !failed && !receiving
+  const sending = mine && t?.direction === 'up' && t.state === 'active'
+  return (
+    <div className={cn('cut animate-rise max-w-full p-1', shape)}>
+      {quote && <div className="px-1 pt-1">{quote}</div>}
+      <div className="flex w-[320px] max-w-full items-center gap-3 px-2 py-2">
+        <FileText aria-hidden="true" className="size-8 flex-none text-cyan" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-semibold" title={f.name}>
+            {f.name}
+          </div>
+          <div className="data text-text-muted">
+            {formatBytes(f.size)}
+            {receiving && ` · receiving ${pct}%`}
+            {sending && ` · sending ${pct}%`}
+            {failed && ' · couldn’t download'}
+          </div>
+        </div>
+        {f.ready ? (
+          <Button variant="secondary" size="sm" aria-label={`Save ${f.name}`} onClick={() => images.onSave(m)}>
+            <Download />
+            Save
+          </Button>
+        ) : failed ? (
+          <Button variant="secondary" size="sm" onClick={() => images.onRetry(m.id)}>
+            Retry
+          </Button>
+        ) : waiting ? (
+          <Button variant="secondary" size="sm" aria-label={`Download ${f.name} (${formatBytes(f.size)})`} onClick={() => images.onDownload(m.id)}>
+            <Download />
+            Download
+          </Button>
+        ) : receiving ? (
+          <LoaderCircle role="img" aria-label="Receiving" className="size-5 animate-spin text-text-muted" />
+        ) : null}
+      </div>
+      {(receiving || sending) && (
+        <span className="mx-2 block h-1 overflow-hidden bg-white/15" aria-hidden="true">
+          <span className="block h-full bg-cyan shadow-[0_0_8px_var(--cyan)]" style={{ width: `${pct}%` }} />
+        </span>
+      )}
+      {f.risky && (
+        <div className="mx-2 mt-1 flex items-center gap-1.5 text-xs text-queued">
+          <ShieldAlert aria-hidden="true" className="size-3.5 flex-none" />
+          A program — only run it if you expected it
+        </div>
+      )}
+      {m.text && (
+        <div className="max-w-[320px] px-2 pt-1.5 text-base leading-6 font-normal [overflow-wrap:anywhere] whitespace-pre-wrap">
+          <MessageText text={m.text} />
+        </div>
+      )}
+      <Meta m={m} showStatus={showStatus} block />
+    </div>
+  )
+}
+
+/** A voice note: play / pause, a waveform that fills as it plays (click to jump), and its length. */
+function VoiceBubble({
+  m,
+  mine,
+  shape,
+  quote,
+  showStatus,
+  transfer,
+  onRetry
+}: {
+  m: ChatMessage
+  mine: boolean
+  shape: string
+  quote: ReactNode
+  showStatus: boolean
+  transfer: ImageTransfer | undefined
+  onRetry: (id: string) => void
+}): ReactNode {
+  const v = m.file!.voice!
+  const ready = m.file!.ready
+  const audio = useRef<HTMLAudioElement>(null)
+  const [playing, setPlaying] = useState(false)
+  const [at, setAt] = useState(0)
+  const failed = !mine && !ready && transfer?.state === 'failed'
+  const bars = v.peaks.length > 0 ? v.peaks : Array.from({ length: 48 }, () => 60)
+  const shown = at / v.durationMs
+  const toggle = (): void => {
+    const el = audio.current
+    if (!el) return
+    if (el.paused) void el.play()
+    else el.pause()
+  }
+  return (
+    <div className={cn('cut animate-rise max-w-full p-1', shape)}>
+      {quote && <div className="px-1 pt-1">{quote}</div>}
+      <div className="flex w-[300px] max-w-full items-center gap-2.5 px-2 py-1.5">
+        {failed ? (
+          <Button variant="secondary" size="sm" onClick={() => onRetry(m.id)}>
+            Retry
+          </Button>
+        ) : (
+          <Button
+            size="icon"
+            className="size-9 flex-none"
+            disabled={!ready}
+            aria-label={!ready ? 'Voice note arriving' : playing ? 'Pause voice note' : `Play voice note, ${formatClock(v.durationMs)}`}
+            onClick={toggle}
+          >
+            {!ready ? <LoaderCircle className="animate-spin" /> : playing ? <Pause className="fill-current" /> : <Play className="fill-current" />}
+          </Button>
+        )}
+        <div
+          aria-hidden="true"
+          className={cn('flex h-8 min-w-0 flex-1 items-center gap-[2px]', ready && 'cursor-pointer')}
+          onClick={(e) => {
+            const el = audio.current
+            if (!el || !ready) return
+            const r = e.currentTarget.getBoundingClientRect()
+            el.currentTime = (((e.clientX - r.left) / r.width) * v.durationMs) / 1000
+            setAt(el.currentTime * 1000)
+          }}
+        >
+          {bars.map((p, i) => (
+            <span
+              key={i}
+              className={cn('w-full min-w-px', i / bars.length < shown ? 'bg-cyan' : 'bg-text-muted/45')}
+              style={{ height: `${Math.max(12, (p / 255) * 100)}%` }}
+            />
+          ))}
+        </div>
+        <span className="data flex-none text-text-muted">
+          <Mic aria-hidden="true" className="mr-0.5 inline size-3" />
+          {formatClock(playing || at > 0 ? at : v.durationMs)}
+        </span>
+        <audio
+          ref={audio}
+          src={ready ? v.url : undefined}
+          preload="none"
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onEnded={() => (setPlaying(false), setAt(0))}
+          onTimeUpdate={(e) => setAt(Math.min(v.durationMs, e.currentTarget.currentTime * 1000))}
+        />
+      </div>
+      <Meta m={m} showStatus={showStatus} block />
     </div>
   )
 }

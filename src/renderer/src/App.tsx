@@ -5,7 +5,8 @@ import { QuitDialog } from '@/components/QuitDialog'
 import { PairingScreen } from '@/components/PairingScreen'
 import { AvatarContext } from '@/components/common'
 import { ChatHeader } from '@/components/chat/ChatHeader'
-import { CircleCheck, ImagePlus } from 'lucide-react'
+import { CircleAlert, CircleCheck, ImagePlus, X } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { CallBar } from '@/components/chat/CallBar'
 import { IncomingCall } from '@/components/chat/IncomingCall'
 import { deliveredText, MessageList } from '@/components/chat/MessageList'
@@ -72,10 +73,18 @@ export default function App(): ReactNode {
     }
   }, [])
 
+  // Saving is the only way an attachment leaves Hush; a short notice offers "Show in folder".
+  const [saved, setSaved] = useState<{ path?: string; error?: string; n: number } | null>(null)
+  const saveAttachment = useCallback((m: ChatMessage) => {
+    void window.hush.saveAttachment(m.id).then((r) => {
+      if ('saved' in r) setSaved((p) => ({ path: r.saved, n: (p?.n ?? 0) + 1 }))
+      else if ('error' in r) setSaved((p) => ({ error: r.error, n: (p?.n ?? 0) + 1 }))
+    })
+  }, [])
   const { transfers, retryImage } = hush
   const imageActions: ImageActions = useMemo(
-    () => ({ transfers, onOpen: openViewer, onRetry: retryImage }),
-    [transfers, openViewer, retryImage]
+    () => ({ transfers, onOpen: openViewer, onRetry: retryImage, onDownload: retryImage, onSave: saveAttachment }),
+    [transfers, openViewer, retryImage, saveAttachment]
   )
 
   const peer: PeerView | null = useMemo(() => {
@@ -166,9 +175,10 @@ export default function App(): ReactNode {
       onEdit: (m) => setComposerMode({ kind: 'edit', message: m }),
       onDelete: (m) => setDeleting(m),
       onReact: (m, emoji, on) => void window.hush.react(m.id, emoji, on).catch(() => {}),
+      onSave: saveAttachment,
       canWrite
     }),
-    [canWrite]
+    [canWrite, saveAttachment]
   )
   const editLast = (): void => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -323,6 +333,15 @@ export default function App(): ReactNode {
               onCancelMode={() => setComposerMode(null)}
               onEdit={(id, text) => window.hush.editMessage(id, text)}
               onEditLast={editLast}
+              onSendFile={async (file, caption, replyTo) => {
+                setNewMarker(null)
+                await window.hush.sendFile(file, caption, replyTo)
+              }}
+              onSendVoice={async (note, replyTo) => {
+                setNewMarker(null)
+                await window.hush.sendVoice(note.bytes, note.durationMs, note.peaks, replyTo)
+              }}
+              micId={snapshot.settings.micId}
               onTyping={(on) => window.hush.setTyping(on)}
               inputRef={composer}
               handleRef={composerHandle}
@@ -344,7 +363,9 @@ export default function App(): ReactNode {
         peerName={peer?.name ?? 'Peer'}
         onClose={() => setViewing(null)}
         onClosed={restoreFocus}
+        onSave={saveAttachment}
       />
+      {saved && <SavedNotice key={saved.n} path={saved.path} error={saved.error} onDone={() => setSaved(null)} />}
       <LiveAnnouncer
         peerName={peer?.name ?? ''}
         typing={hush.peerTyping}
@@ -416,6 +437,32 @@ function FlushToast({ text, onDone }: { text: string; onDone: () => void }): Rea
   )
 }
 
+/** "Saved · Show in folder" after saving an attachment (or why it failed). */
+function SavedNotice({ path, error, onDone }: { path?: string; error?: string; onDone: () => void }): ReactNode {
+  useEffect(() => {
+    const t = setTimeout(onDone, 7000)
+    return () => clearTimeout(t)
+  }, [onDone])
+  const name = path?.split(/[\\/]/).pop()
+  return (
+    <div
+      role="status"
+      className="cut panel panel-sm animate-rise fixed bottom-24 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 px-4 py-2.5 [--edge-c:var(--online)] [--fill-c:var(--surface-elevated)]"
+    >
+      {error ? <CircleAlert aria-hidden="true" className="size-4 text-danger-text" /> : <CircleCheck aria-hidden="true" className="size-4 text-online" />}
+      <span className="max-w-[340px] truncate text-sm">{error ? `Couldn't save: ${error}` : `Saved “${name}”`}</span>
+      {path && (
+        <Button variant="secondary" size="sm" onClick={() => window.hush.showInFolder(path)}>
+          Show in folder
+        </Button>
+      )}
+      <Button variant="icon" size="icon" className="size-7" aria-label="Dismiss" onClick={onDone}>
+        <X className="size-4" />
+      </Button>
+    </div>
+  )
+}
+
 /** Overlay while files are dragged over the chat (MASTER.md states gallery). */
 function DropZone({ peerName }: { peerName: string }): ReactNode {
   return (
@@ -423,7 +470,7 @@ function DropZone({ peerName }: { peerName: string }): ReactNode {
       <div>
         <ImagePlus aria-hidden="true" className="mx-auto mb-1.5 size-7 text-cyan" />
         <div className="label text-cyan">Drop to send to {peerName}</div>
-        <div className="text-xs text-text-muted">PNG, JPEG, GIF or WebP · up to 25 MB · you can add a caption first</div>
+        <div className="text-xs text-text-muted">Pictures up to 25 MB get a preview · any file up to 1 GB · you can add a caption first</div>
       </div>
     </div>
   )

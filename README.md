@@ -131,8 +131,14 @@ can bring your history back.
 - **Search:** the 🔍 button or **Ctrl+F**. Finds messages containing all the words you type,
   ignoring capitals and accents (“seker” finds “Şeker”); click a result to jump there. Because
   your history is encrypted on disk, search works in memory only — nothing searchable is saved.
-- **Images:** drag them onto the chat, paste them (Ctrl+V), or use the 🖼 button. Click an image
-  to see it full size. PNG, JPEG, GIF and WebP up to 25 MB.
+- **Pictures and files:** drag them onto the chat, paste them (Ctrl+V), or use the 📎 button.
+  Pictures (PNG, JPEG, GIF, WebP up to 25 MB) show a preview — click to see full size, **Save
+  image** to keep a copy. Any other file can be up to **1 GB** (pasted ones up to 25 MB).
+  Files up to 100 MB arrive by themselves; bigger ones show **Download**. Hush never opens a file:
+  use **Save**, then *Show in folder*. Programs (.exe, .sh, .AppImage…) are marked, and saving one
+  asks first — only run what you expected.
+- **Voice notes:** with the message box empty, press the 🎙 button, talk (up to 5 minutes), then
+  press ■ to send or *Cancel* (Esc). They play right in the chat.
 - **Voice calls:** the phone button in the sidebar or header. Mute, switch microphone and hang up
   from the call bar. Missed calls appear in the chat with a **Call back** button.
 - **Closing the window keeps Hush running in the tray**, so messages and calls still reach you.

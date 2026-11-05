@@ -94,7 +94,7 @@ describe('backups', () => {
     db.close()
     const store = new ImageStore(join(target, 'images'), dataKey)
     expect(store.readThumbBase64(ids[1])).toBe(Buffer.from('THUMB').toString('base64'))
-    expect(readEncryptedFile(dataKey, store.fullPath(ids[1], 'image/png')).toString()).toBe('FULL')
+    expect(readEncryptedFile(dataKey, store.fullPath(ids[1], { mime: 'image/png', size: 4, sha256: 'x' })).toString()).toBe('FULL')
   })
 
   it('leaves full images out unless asked (previews stay)', async () => {

@@ -40,8 +40,8 @@ export function backupKeyFromPassword(password: string, kdf: KdfParams = newKdfP
   return { kdf, key: deriveKey(password, kdf) }
 }
 
-/** True for images that are previews/avatars (always included) rather than full attachments. */
-const isAlwaysIncluded = (name: string): boolean => name.endsWith('.thumb.webp')
+/** Previews and voice notes (small) are always included; full pictures and files only if asked. */
+const isAlwaysIncluded = (name: string): boolean => name.endsWith('.thumb.webp') || name.endsWith('.voice')
 
 export async function writeBackup(src: BackupSource, bk: BackupKey, includeAttachments: boolean, out: string): Promise<{ bytes: number; files: number }> {
   const tmpDb = out + '.db-tmp'

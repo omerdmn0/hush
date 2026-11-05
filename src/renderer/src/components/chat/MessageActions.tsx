@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { Copy, Ellipsis, Pencil, Reply, SmilePlus, Trash2 } from 'lucide-react'
+import { Copy, Download, Ellipsis, Pencil, Reply, SmilePlus, Trash2 } from 'lucide-react'
 import type { ChatMessage } from '../../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -14,6 +14,8 @@ export interface MessageActions {
   onEdit: (m: ChatMessage) => void
   onDelete: (m: ChatMessage) => void
   onReact: (m: ChatMessage, emoji: string, on: boolean) => void
+  /** Save a copy of the image or file. */
+  onSave: (m: ChatMessage) => void
   /** Scroll to a message (from a reply's quote). */
   onJump: (id: string) => void
   /** Briefly highlighted after a jump. */
@@ -106,6 +108,12 @@ export function MessageToolbar({
             >
               <Copy aria-hidden="true" className="size-4 text-text-muted" />
               Copy text
+            </button>
+          )}
+          {live && (m.image?.ready || m.file?.ready) && (
+            <button type="button" className={item} onClick={() => (onMenuOpenChange(false), actions.onSave(m))}>
+              <Download aria-hidden="true" className="size-4 text-text-muted" />
+              {m.image ? 'Save image…' : 'Save as…'}
             </button>
           )}
           {write && (

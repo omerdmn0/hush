@@ -1,10 +1,28 @@
 import { randomUUID } from 'node:crypto'
-import { IMAGE_MIME, isUuid, MAX_IMAGE_BYTES, MAX_TEXT_LENGTH, sniffImage, type Frame, type ImageMeta, type ImageMime } from '../shared/protocol'
+import { basename } from 'node:path'
+import { stat } from 'node:fs/promises'
+import {
+  IMAGE_MIME,
+  isUuid,
+  MAX_FILE_BYTES,
+  MAX_IMAGE_BYTES,
+  MAX_MEMORY_FILE_BYTES,
+  MAX_TEXT_LENGTH,
+  MAX_VOICE_MS,
+  parseFileMeta,
+  sniffImage,
+  VOICE_PEAKS,
+  type FileMeta,
+  type Frame,
+  type ImageMeta,
+  type ImageMime
+} from '../shared/protocol'
+import { cleanFileName, guessMime } from '../shared/files'
 import type { ChatMessage, HistoryCursor, HushEvent, OutgoingImage, PeerState, SearchResult } from '../shared/types'
 import { fold, matchesAll, queryTerms } from '../shared/search'
 import { toChatMessage, type HushDb, type StoredMessage } from './db'
 import { applyEvents, isReactionEmoji, reactionData } from './events'
-import { sha256, type ImageStore } from './images'
+import { blobOf, sha256, type ImageStore } from './images'
 import type { LinkPeer, PeerLink } from './link'
 import type { Avatars } from './avatars'
 import { Transfers } from './transfers'
@@ -127,7 +145,8 @@ export class ChatService {
     for (const m of messages) {
       const state = applyEvents(m.authorId, byRef.get(m.id) ?? [], this.selfId)
       if (state.deleted) continue
-      const entry = this.searchEntry(m.id, m.authorId === this.selfId ? 'me' : 'peer', m.sentAt, state.text ?? m.body, !!m.image)
+      const text = [state.text ?? m.body, m.file?.voice ? '' : (m.file?.name ?? '')].filter(Boolean).join(' · ')
+      const entry = this.searchEntry(m.id, m.authorId === this.selfId ? 'me' : 'peer', m.sentAt, text, !!m.image)
       if (entry) out.set(m.id, entry)
     }
     return out
@@ -141,7 +160,8 @@ export class ChatService {
   private searchUpdate(id: string): void {
     if (!this.searchText) return
     const m = this.getMessages([id])[0]
-    const entry = m && !m.deleted && !m.unsupported ? this.searchEntry(m.id, m.from, m.sentAt, m.text, !!m.image) : null
+    const text = m ? [m.text, m.file && !m.file.voice ? m.file.name : ''].filter(Boolean).join(' · ') : ''
+    const entry = m && !m.deleted && !m.unsupported ? this.searchEntry(m.id, m.from, m.sentAt, text, !!m.image) : null
     if (entry) this.searchText.set(id, entry)
     else this.searchText.delete(id)
   }
@@ -194,6 +214,70 @@ export class ChatService {
     const ok = await this.link.send(this.msgFrame(stored))
     if (ok) this.advanceMine([stored.id], 'sent')
     return this.toChat(this.db.getMessage(stored.id)!)
+  }
+
+  /**
+   * Sends a file from disk (any type, up to 1 GB). It's copied into the encrypted store first —
+   * streamed, never read whole — then sent like any message; the bytes follow in chunks.
+   */
+  async sendFile(path: string, caption: string, replyTo?: string): Promise<ChatMessage> {
+    this.assertCanWrite()
+    const body = caption.trim()
+    if (body.length > MAX_TEXT_LENGTH) throw new Error('Caption too long')
+    const reply = this.checkReply(replyTo)
+    const info = await stat(path)
+    if (!info.isFile() || info.size === 0 || info.size > MAX_FILE_BYTES) throw new Error('Files can be up to 1 GB')
+    const id = randomUUID()
+    const name = cleanFileName(basename(path))
+    const { size, sha256: hash } = await this.store.importFile(id, path, MAX_FILE_BYTES)
+    return this.sendFileMessage(id, { name, size, mime: guessMime(name), sha256: hash }, body, reply)
+  }
+
+  /** A small file from memory: pasted (≤ 25 MB) or a voice note (≤ 5 min). */
+  async sendFileBytes(
+    bytes: Uint8Array,
+    rawName: string,
+    caption: string,
+    replyTo?: string,
+    voice?: { durationMs: number; peaks: Uint8Array }
+  ): Promise<ChatMessage> {
+    this.assertCanWrite()
+    const body = caption.trim()
+    if (body.length > MAX_TEXT_LENGTH) throw new Error('Caption too long')
+    if (bytes.length === 0 || bytes.length > MAX_MEMORY_FILE_BYTES) throw new Error('Pasted files can be up to 25 MB')
+    const reply = this.checkReply(replyTo)
+    const name = cleanFileName(rawName)
+    const id = randomUUID()
+    const meta: FileMeta = { name, size: bytes.length, mime: guessMime(name), sha256: '' }
+    if (voice) {
+      const ok = Number.isSafeInteger(voice.durationMs) && voice.durationMs > 0 && voice.durationMs <= MAX_VOICE_MS + 1000 && voice.peaks.length <= VOICE_PEAKS
+      if (!ok) throw new Error('Invalid voice note')
+      meta.mime = 'audio/webm'
+      meta.voice = { durationMs: voice.durationMs, peaks: Buffer.from(voice.peaks).toString('base64') }
+    }
+    meta.sha256 = this.store.saveOwnBytes(id, voice ? 'voice' : 'file', bytes)
+    if (!parseFileMeta(meta)) throw new Error('Invalid file')
+    return this.sendFileMessage(id, meta, body, reply)
+  }
+
+  private async sendFileMessage(id: string, meta: FileMeta, body: string, reply: string | null): Promise<ChatMessage> {
+    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), null, id, null, reply, meta)
+    this.emit({ type: 'message', message: this.toChat(stored) })
+    if (await this.link.send(this.msgFrame(stored))) this.advanceMine([stored.id], 'sent')
+    return this.toChat(this.db.getMessage(stored.id)!)
+  }
+
+  /** Download a big file (they don't come by themselves), or retry a failed download. */
+  download(id: string): void {
+    this.transfers.retry(id)
+  }
+
+  /** Writes a decrypted copy of an image or file to `dest` (chosen by the user). */
+  async exportAttachment(id: string, dest: string): Promise<void> {
+    const m = isUuid(id) ? this.db.getMessage(id) : undefined
+    const meta = m ? blobOf(m) : null
+    if (!meta || !this.store.hasFull(id, meta)) throw new Error('Not downloaded yet')
+    await this.store.exportTo(id, meta, dest)
   }
 
   /** The user has seen these incoming messages. */
@@ -270,7 +354,8 @@ export class ChatService {
           kind: frame.kind ?? 'message',
           ref: frame.ref ?? null,
           data: frame.data ?? null,
-          replyTo: frame.reply ?? null
+          replyTo: frame.reply ?? null,
+          file: frame.file ?? null
         }
         // Events (edit/delete/react) are stored and acked like messages; the UI applies them.
         if (this.db.insertMessage(stored)) {
@@ -282,7 +367,7 @@ export class ChatService {
           } else {
             if (!own) this.emit({ type: 'typing', on: false })
             this.emit({ type: 'message', message: this.toChat(stored) })
-            if (image) this.transfers.want(stored.id)
+            if (image || stored.file) this.transfers.want(stored.id)
           }
         }
         // Always ack, even duplicates — the sender may have missed the first ack.
@@ -397,6 +482,7 @@ export class ChatService {
     if (m.ref) frame.ref = m.ref
     if (m.data != null) frame.data = m.data
     if (m.replyTo) frame.reply = m.replyTo
+    if (m.file) frame.file = m.file
     return frame
   }
 
@@ -425,7 +511,7 @@ export class ChatService {
   async edit(id: string, text: string): Promise<void> {
     const m = this.ownMessage(id)
     const body = text.trim()
-    if ((!body && !m.image) || body.length > MAX_TEXT_LENGTH) throw new Error('Message is empty or too long')
+    if ((!body && !m.image && !m.file) || body.length > MAX_TEXT_LENGTH) throw new Error('Message is empty or too long')
     if (body === this.decorate([m])[0].text) return
     await this.sendEvent('edit', m.id, body)
   }
@@ -482,7 +568,7 @@ export class ChatService {
       events.set(e.ref!, list)
     }
     const view = (m: StoredMessage): ChatMessage => {
-      const msg = toChatMessage(m, this.selfId, (id) => this.store.hasFull(id, m.image))
+      const msg = toChatMessage(m, this.selfId, (id) => this.store.hasFull(id, blobOf(m)))
       if (msg.unsupported) return msg
       const state = applyEvents(m.authorId, events.get(m.id) ?? [], this.selfId)
       if (state.deleted || msg.deleted) {

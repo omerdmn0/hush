@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHUNK_BYTES, chunkIds, decodeChunk, encodeChunk, MAX_TEXT_LENGTH, parseFrame, sniffImage } from './protocol'
+import { CHUNK_BYTES, chunkIds, decodeChunk, encodeChunk, MAX_TEXT_LENGTH, parseFileMeta, parseFrame, sniffImage } from './protocol'
 
 const A = '2f1c3a52-9d1e-4c4b-8a1f-0b6c2d3e4f50'
 const B = '8a7b6c5d-4e3f-4a1b-9c2d-1e0f2a3b4c5d'
@@ -123,5 +123,30 @@ describe('avatar frames', () => {
     expect(parseFrame(j({ t: 'avatar', data: 'A'.repeat(140_000) }))).toBeNull()
     expect(parseFrame(j({ t: 'avatar', data: '<svg>' }))).toBeNull()
     expect(parseFrame(j({ t: 'avatar' }))).toBeNull()
+  })
+})
+
+describe('file messages', () => {
+  const sha = 'a'.repeat(64)
+  const file = (over: Record<string, unknown> = {}): unknown => ({ name: 'notes.pdf', size: 1234, mime: 'application/pdf', sha256: sha, ...over })
+  const msg = (f: unknown, kind = 'file'): string => j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1, kind, file: f })
+
+  it('accepts a well-formed file or voice note', () => {
+    expect(parseFrame(msg(file()))).toMatchObject({ kind: 'file', file: { name: 'notes.pdf', size: 1234 } })
+    expect(parseFileMeta(file({ size: 1024 ** 3 }))).not.toBeNull()
+    expect(parseFileMeta(file({ voice: { durationMs: 3000, peaks: 'AAEC' } }))?.voice).toEqual({ durationMs: 3000, peaks: 'AAEC' })
+  })
+
+  it('rejects names that could be paths, oversize files and bad voice data', () => {
+    for (const name of ['../evil.sh', 'a/b', 'c:\\x\\y.exe', 'tab\there', '', '..', ' padded ', 'x'.repeat(256)]) {
+      expect(parseFileMeta(file({ name }))).toBeNull()
+    }
+    expect(parseFileMeta(file({ size: 1024 ** 3 + 1 }))).toBeNull()
+    expect(parseFileMeta(file({ size: 0 }))).toBeNull()
+    expect(parseFileMeta(file({ sha256: 'xyz' }))).toBeNull()
+    expect(parseFileMeta(file({ mime: 'not a mime' }))).toBeNull()
+    expect(parseFileMeta(file({ voice: { durationMs: 6 * 60_000, peaks: '' } }))).toBeNull()
+    expect(parseFileMeta(file({ size: 30 * 1024 * 1024, voice: { durationMs: 1000, peaks: '' } }))).toBeNull()
+    expect(parseFrame(msg(file(), 'message'))).toBeNull() // only file messages carry a file
   })
 })

@@ -67,6 +67,8 @@ export interface ChatMessage {
    */
   status: MessageStatus
   image?: ChatImage
+  /** A file or voice note. */
+  file?: ChatFile
   /** Sent by a newer Hush in a form this version can't show ("update Hush to see this"). */
   unsupported?: boolean
   /** When it was last edited (text is the edited version). */
@@ -76,6 +78,19 @@ export interface ChatMessage {
   reactions?: Reaction[]
   /** The message this one answers. */
   replyTo?: ReplyPreview
+}
+
+export interface ChatFile {
+  name: string
+  size: number
+  mime: string
+  /** The whole file is on this computer (can be saved / played). */
+  ready: boolean
+  /** Runs code when opened (.exe, .sh, .AppImage…): shown with a warning. */
+  risky: boolean
+  /** Big files from the other person download only when asked. */
+  autoDownload: boolean
+  voice?: { durationMs: number; peaks: number[]; url: string }
 }
 
 /** A search hit: the message's current text (edits applied). */
@@ -263,6 +278,19 @@ export interface HushApi {
   react(id: string, emoji: string, on: boolean): Promise<void>
   /** Opens an http(s) link in the default browser. */
   openLink(url: string): void
+  /**
+   * Sends a file the user picked, dropped or pasted. Files on disk can be up to 1 GB (Hush reads
+   * them itself); pasted ones up to 25 MB.
+   */
+  sendFile(file: File, caption: string, replyTo?: string): Promise<ChatMessage>
+  /** A recorded voice note (WebM/Opus, ≤ 5 min) with its waveform (≤ 48 bars, 0–255). */
+  sendVoice(bytes: Uint8Array, durationMs: number, peaks: Uint8Array, replyTo?: string): Promise<ChatMessage>
+  /** Starts downloading a big file (or retries a failed one). */
+  downloadFile(id: string): void
+  /** Asks where to save an image or file and writes a copy there (programs get a warning first). */
+  saveAttachment(id: string): Promise<{ saved: string } | { cancelled: true } | { error: string }>
+  /** Shows a file Hush just saved in the file manager. */
+  showInFolder(path: string): void
   /** Messages whose current text contains every word of the query, newest first (up to 50). */
   search(query: string): Promise<{ results: SearchResult[]; more: boolean }>
   /** Try downloading a failed image again. */
@@ -318,6 +346,11 @@ export const IPC = {
   react: 'hush:react',
   openLink: 'hush:open-link',
   search: 'hush:search',
+  sendFilePath: 'hush:send-file-path',
+  sendFileBytes: 'hush:send-file-bytes',
+  downloadFile: 'hush:download-file',
+  saveAttachment: 'hush:save-attachment',
+  showInFolder: 'hush:show-in-folder',
   sendImage: 'hush:send-image',
   retryImage: 'hush:retry-image',
   callSignal: 'hush:call-signal',

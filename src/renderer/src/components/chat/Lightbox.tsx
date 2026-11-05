@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { X } from 'lucide-react'
+import { Download, X } from 'lucide-react'
 import type { ChatMessage } from '../../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -12,11 +12,13 @@ export function Lightbox({
   message,
   peerName,
   onClose,
-  onClosed
+  onClosed,
+  onSave
 }: {
   message: ChatMessage | null
   peerName: string
   onClose: () => void
+  onSave: (m: ChatMessage) => void
   /** Puts focus back where it was (the dialog is opened by state, not by a Radix trigger). */
   onClosed: () => void
 }): ReactNode {
@@ -41,6 +43,12 @@ export function Lightbox({
                 {!image.ready && ' · full image still arriving, showing preview'}
               </DialogDescription>
             </div>
+            {image.ready && (
+              <Button variant="secondary" onClick={() => onSave(message)}>
+                <Download />
+                Save image
+              </Button>
+            )}
             <DialogClose asChild>
               <Button variant="secondary" size="icon" aria-label="Close image (Esc)">
                 <X className="size-5" />

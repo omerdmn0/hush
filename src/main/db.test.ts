@@ -141,7 +141,7 @@ describe('migration from stage b (v1)', () => {
     raw.close()
 
     const migrated = new HushDb(file)
-    expect(migrated.version).toBe(6)
+    expect(migrated.version).toBe(7)
     expect(migrated.getMessage(ids.mineEarly)?.seq).toBe(1)
     expect(migrated.getMessage(ids.mineLate)?.seq).toBe(2)
     expect(migrated.getMessage(ids.theirs)?.seq).toBeNull()
@@ -232,10 +232,22 @@ describe('migration from stage g (v4: calls, no events yet)', () => {
     raw.close()
 
     const db = new HushDb(file)
-    expect(db.version).toBe(6)
+    expect(db.version).toBe(7)
     expect(db.listCalls().map((c) => c.id)).toEqual([callId])
     expect(db.getMessage(msgId)?.body).toBe('from stage g')
     expect(db.createOwnMessage(ME, '', 300, null, undefined, { kind: 'edit', ref: msgId, data: 'edited' }).seq).toBe(2)
     db.close()
+  })
+})
+
+describe('file messages for the UI', () => {
+  it('lets small files come by themselves; big ones wait for a click; programs are flagged', () => {
+    const base = { id: randomUUID(), authorId: PEER, seq: 1, body: '', sentAt: 1, status: 'delivered' as const, image: null, kind: 'file' }
+    const file = (name: string, size: number) => toChatMessage({ ...base, file: { name, size, mime: 'application/octet-stream', sha256: 'a'.repeat(64) } }, ME)
+    expect(file('small.zip', 100 * 1024 * 1024).file).toMatchObject({ autoDownload: true, risky: false, ready: false })
+    expect(file('movie.mkv', 100 * 1024 * 1024 + 1).file?.autoDownload).toBe(false)
+    expect(file('setup.EXE', 10).file?.risky).toBe(true)
+    expect(file('notes.pdf', 10).deleted).toBeUndefined()
+    expect(toChatMessage({ ...base, file: null }, ME).deleted).toBe(true) // wiped by a delete
   })
 })

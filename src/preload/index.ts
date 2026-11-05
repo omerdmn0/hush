@@ -1,4 +1,5 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
+import { MAX_MEMORY_FILE_BYTES } from '../shared/protocol'
 import { IPC, type HushApi, type HushEvent } from '../shared/types'
 
 const api: HushApi = {
@@ -13,6 +14,19 @@ const api: HushApi = {
   react: (id, emoji, on) => ipcRenderer.invoke(IPC.react, id, emoji, on),
   openLink: (url) => ipcRenderer.send(IPC.openLink, url),
   search: (query) => ipcRenderer.invoke(IPC.search, query),
+  // The page never handles file paths: only a File the user picked or dropped can be sent, and
+  // its path is looked up here. Pasted data has no path and is sent from memory instead.
+  sendFile: async (file, caption, replyTo) => {
+    const path = webUtils.getPathForFile(file)
+    if (path) return ipcRenderer.invoke(IPC.sendFilePath, path, caption, replyTo)
+    if (file.size > MAX_MEMORY_FILE_BYTES) throw new Error('Pasted files can be up to 25 MB')
+    return ipcRenderer.invoke(IPC.sendFileBytes, new Uint8Array(await file.arrayBuffer()), file.name || 'pasted file', caption, replyTo)
+  },
+  sendVoice: (bytes, durationMs, peaks, replyTo) =>
+    ipcRenderer.invoke(IPC.sendFileBytes, bytes, 'Voice note.webm', '', replyTo, { durationMs, peaks }),
+  downloadFile: (id) => ipcRenderer.send(IPC.downloadFile, id),
+  saveAttachment: (id) => ipcRenderer.invoke(IPC.saveAttachment, id),
+  showInFolder: (path) => ipcRenderer.send(IPC.showInFolder, path),
   retryImage: (id) => ipcRenderer.send(IPC.retryImage, id),
   sendCallSignal: (signal) => ipcRenderer.invoke(IPC.callSignal, signal),
   listCalls: () => ipcRenderer.invoke(IPC.listCalls),

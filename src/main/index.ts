@@ -1,13 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import icon from '../../resources/icon.png?asset'
 import trayIcon from '../../resources/tray.png?asset'
 import trayUnreadIcon from '../../resources/tray-unread.png?asset'
 import badgeIcon from '../../resources/badge.png?asset'
 import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame, sniffImage } from '../shared/protocol'
+import { isRiskyFile } from '../shared/files'
 import { isTailscaleIp } from '../shared/ip'
 import { IPC, type AutoBackup, type BackupResult, type CallRecord, type HistoryCursor, type HushEvent, type LockInfo, type NetState, type OutgoingImage, type PrivacyState, type Settings } from '../shared/types'
 import { applyStartAtLogin, HIDDEN_FLAG } from './autostart'
@@ -29,7 +30,7 @@ import { HushDb } from './db'
 import { Identity } from './identity'
 import { Keyring, type OsProtector } from './keyring'
 import { PairingService } from './pairing'
-import { ImageStore } from './images'
+import { blobOf, ImageStore } from './images'
 import { PeerLink } from './link'
 import { Notifier } from './notifier'
 import { titleWithUnread } from './notifyLogic'
@@ -548,6 +549,60 @@ if (!app.requestSingleInstanceLock()) {
       return chat.react(id, emoji, on)
     })
 
+    ipcMain.handle(IPC.sendFilePath, (_e, path: unknown, caption: unknown, replyTo: unknown) => {
+      if (typeof path !== 'string' || !isAbsolute(path) || typeof caption !== 'string') throw new Error('Invalid file')
+      return chat.sendFile(path, caption, optionalId(replyTo))
+    })
+
+    ipcMain.handle(IPC.sendFileBytes, (_e, bytes: unknown, name: unknown, caption: unknown, replyTo: unknown, voice: unknown) => {
+      if (!(bytes instanceof Uint8Array) || typeof name !== 'string' || typeof caption !== 'string') throw new Error('Invalid file')
+      let v: { durationMs: number; peaks: Uint8Array } | undefined
+      if (voice !== undefined && voice !== null) {
+        const o = voice as { durationMs?: unknown; peaks?: unknown }
+        if (typeof o.durationMs !== 'number' || !(o.peaks instanceof Uint8Array)) throw new Error('Invalid voice note')
+        v = { durationMs: Math.round(o.durationMs), peaks: o.peaks }
+      }
+      return chat.sendFileBytes(bytes, name, caption, optionalId(replyTo), v)
+    })
+
+    ipcMain.on(IPC.downloadFile, (_e, id: unknown) => {
+      if (typeof id === 'string') chat.download(id)
+    })
+
+    // Saving is the only way an attachment leaves Hush — it's never opened automatically.
+    const savedPaths = new Set<string>()
+    ipcMain.handle(IPC.saveAttachment, async (_e, id: unknown) => {
+      const m = typeof id === 'string' ? db.getMessage(id) : undefined
+      if (!m || !blobOf(m) || !mainWindow) return { error: 'Not found' }
+      const stamp = new Date(m.sentAt).toISOString().slice(0, 16).replace('T', ' ').replace(':', '-')
+      const name = m.file?.name ?? `Hush image ${stamp}.${m.image?.mime.split('/')[1].replace('jpeg', 'jpg') ?? 'png'}`
+      if (isRiskyFile(name)) {
+        const r = await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: 'This file is a program',
+          message: `“${name}” is a program.`,
+          detail: `Programs can do anything on your computer. Only save and run it if you expected it from ${chat.peerState().name ?? 'the other person'} and trust it.`,
+          buttons: ['Cancel', 'Save anyway'],
+          defaultId: 0,
+          cancelId: 0
+        })
+        if (r.response !== 1) return { cancelled: true }
+      }
+      const r = await dialog.showSaveDialog(mainWindow, { title: 'Save', defaultPath: join(app.getPath('downloads'), name) })
+      if (r.canceled || !r.filePath) return { cancelled: true }
+      try {
+        await chat.exportAttachment(m.id, r.filePath)
+        savedPaths.add(r.filePath)
+        return { saved: r.filePath }
+      } catch (e) {
+        return { error: (e as Error).message }
+      }
+    })
+
+    ipcMain.on(IPC.showInFolder, (_e, path: unknown) => {
+      if (typeof path === 'string' && savedPaths.has(path)) shell.showItemInFolder(path)
+    })
+
     ipcMain.handle(IPC.search, (_e, query: unknown) => {
       if (typeof query !== 'string' || query.length > 200) return { results: [], more: false }
       return chat.search(query)
@@ -786,7 +841,8 @@ if (!app.requestSingleInstanceLock()) {
       const url = new URL(req.url)
       const host = url.hostname
       const kind = url.pathname.slice(1)
-      const meta = host === 'avatar' ? null : (db.getMessage(host)?.image ?? null)
+      const message = host === 'avatar' ? undefined : db.getMessage(host)
+      const meta = message ? blobOf(message) : null
       const bytes = host === 'avatar' ? avatars.readForDisplay(kind) : images.readForDisplay(host, kind, meta)
       if (!bytes) return new Response('Not found', { status: 404 })
       const type = kind === 'thumb' ? 'image/webp' : (meta?.mime ?? sniffImage(bytes) ?? 'application/octet-stream')

@@ -1,11 +1,13 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react'
-import { Check, CircleAlert, ImagePlus, LoaderCircle, Pencil, Reply, SendHorizontal, Smile, X } from 'lucide-react'
-import { IMAGE_MIME, MAX_TEXT_LENGTH } from '../../../../shared/protocol'
+import { Check, CircleAlert, FileText, LoaderCircle, Mic, Paperclip, Pencil, Reply, SendHorizontal, Smile, Square, Trash2, X } from 'lucide-react'
+import { IMAGE_MIME, MAX_FILE_BYTES, MAX_IMAGE_BYTES, MAX_TEXT_LENGTH, MAX_VOICE_MS } from '../../../../shared/protocol'
+import { formatBytes } from '../../../../shared/files'
 import type { ChatMessage, OutgoingImage } from '../../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { ImageError, imageErrorText, prepareImage, type PreparedImage } from '@/lib/images'
+import { prepareImage, type PreparedImage } from '@/lib/images'
+import { formatClock, recordVoice, type VoiceNote, type VoiceRecording } from '@/lib/voice'
 import { cn } from '@/lib/utils'
 import { EmojiPanel } from './EmojiPanel'
 
@@ -39,7 +41,10 @@ export function Composer({
   mode,
   onCancelMode,
   onEdit,
-  onEditLast
+  onEditLast,
+  onSendFile,
+  onSendVoice,
+  micId
 }: {
   peerName: string
   disabled: boolean
@@ -51,6 +56,10 @@ export function Composer({
   onEdit: (id: string, text: string) => Promise<void>
   /** ↑ in an empty message box: edit your last message. */
   onEditLast: () => void
+  onSendFile: (file: File, caption: string, replyTo?: string) => Promise<void>
+  onSendVoice: (note: VoiceNote, replyTo?: string) => Promise<void>
+  /** Microphone for voice notes (Settings → Audio). */
+  micId: string
   onTyping: (on: boolean) => void
   inputRef?: Ref<HTMLTextAreaElement>
   handleRef?: Ref<ComposerHandle>
@@ -58,6 +67,10 @@ export function Composer({
   const [text, setText] = useState('')
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [attachments, setAttachments] = useState<PreparedImage[]>([])
+  /** Non-image files (and images too big or odd to preview), sent as files. */
+  const [files, setFiles] = useState<{ key: string; file: File }[]>([])
+  const [recording, setRecording] = useState<VoiceRecording | null>(null)
+  const [recordedMs, setRecordedMs] = useState(0)
   const [preparing, setPreparing] = useState(0)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -124,17 +137,29 @@ export function Composer({
     noteTyping(value)
   }
 
-  const addFiles = (files: File[]): void => {
-    if (disabled || files.length === 0) return
+  const liveFiles = useRef(files)
+  liveFiles.current = files
+  const addFile = (file: File): void => setFiles((prev) => [...prev, { key: `${Date.now()}-${Math.random()}`, file }])
+  const addFiles = (picked: File[]): void => {
+    if (disabled || editing || picked.length === 0) return
     setError(null)
-    const room = MAX_ATTACHMENTS - live.current.length - preparing
-    if (files.length > room) setError(`You can attach up to ${MAX_ATTACHMENTS} images at a time.`)
-    for (const file of files.slice(0, Math.max(0, room))) {
-      setPreparing((n) => n + 1)
-      prepareImage(file)
-        .then((img) => setAttachments((prev) => [...prev, img]))
-        .catch((e: unknown) => setError(e instanceof ImageError ? imageErrorText(e) : `“${file.name}” couldn't be added.`))
-        .finally(() => setPreparing((n) => n - 1))
+    const room = MAX_ATTACHMENTS - live.current.length - liveFiles.current.length - preparing
+    if (picked.length > room) setError(`You can attach up to ${MAX_ATTACHMENTS} files at a time.`)
+    for (const file of picked.slice(0, Math.max(0, room))) {
+      if (file.size === 0) {
+        setError(`“${file.name}” is empty.`)
+      } else if (file.size > MAX_FILE_BYTES) {
+        setError(`“${file.name}” is ${formatBytes(file.size)} — files can be up to 1 GB.`)
+      } else if ((IMAGE_MIME as readonly string[]).includes(file.type) && file.size <= MAX_IMAGE_BYTES) {
+        // Pictures get a preview in the chat; one that can't be previewed goes as a plain file.
+        setPreparing((n) => n + 1)
+        prepareImage(file)
+          .then((img) => setAttachments((prev) => [...prev, img]))
+          .catch(() => addFile(file))
+          .finally(() => setPreparing((n) => n - 1))
+      } else {
+        addFile(file)
+      }
     }
     ta.current?.focus()
   }
@@ -150,8 +175,8 @@ export function Composer({
   }
 
   const canSend = editing
-    ? !disabled && !sending && (text.trim() !== '' || !!editing.image)
-    : !disabled && !sending && preparing === 0 && (text.trim() !== '' || attachments.length > 0)
+    ? !disabled && !sending && (text.trim() !== '' || !!editing.image || !!editing.file)
+    : !disabled && !sending && preparing === 0 && (text.trim() !== '' || attachments.length > 0 || files.length > 0)
 
   const send = async (): Promise<void> => {
     if (!canSend) return
@@ -175,23 +200,72 @@ export function Composer({
     }
     setText('')
     if (replyTo) onCancelMode()
-    if (queue.length === 0) {
+    const fileQueue = files
+    if (queue.length === 0 && fileQueue.length === 0) {
       void onSend(value, replyTo).catch(() => setText(value)) // keep the text if sending failed
       return
     }
     setSending(true)
+    const total = queue.length + fileQueue.length
+    let n = 0
     try {
-      // Each image is its own message; the text becomes the caption of the last one.
-      for (let i = 0; i < queue.length; i++) {
-        await onSendImage(queue[i].outgoing, i === queue.length - 1 ? value : '', i === 0 ? replyTo : undefined)
-        URL.revokeObjectURL(queue[i].previewUrl)
-        setAttachments((prev) => prev.filter((a) => a.key !== queue[i].key))
+      // Each attachment is its own message; the text becomes the caption of the last one,
+      // and a reply is attached to the first.
+      for (const img of queue) {
+        await onSendImage(img.outgoing, ++n === total ? value : '', n === 1 ? replyTo : undefined)
+        URL.revokeObjectURL(img.previewUrl)
+        setAttachments((prev) => prev.filter((a) => a.key !== img.key))
       }
-    } catch {
+      for (const f of fileQueue) {
+        await onSendFile(f.file, ++n === total ? value : '', n === 1 ? replyTo : undefined)
+        setFiles((prev) => prev.filter((x) => x.key !== f.key))
+      }
+    } catch (e) {
       setText(value)
-      setError("Some images couldn't be sent. They're still in the tray — try again.")
+      const why = (e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+      setError(`Some attachments couldn't be sent (${why}). They're still in the tray — try again.`)
     } finally {
       setSending(false)
+    }
+  }
+
+  // ----- voice notes -----
+  useEffect(() => {
+    if (!recording) return
+    const t = setInterval(() => setRecordedMs(performance.now() - recording.startedAt), 250)
+    return () => clearInterval(t)
+  }, [recording])
+  const recordingRef = useRef(recording)
+  recordingRef.current = recording
+  useEffect(() => () => recordingRef.current?.cancel(), [])
+
+  const startRecording = async (): Promise<void> => {
+    setError(null)
+    try {
+      setRecordedMs(0)
+      // At 5 minutes it stops and sends by itself.
+      setRecording(await recordVoice(micId, () => void finishRecording(true)))
+    } catch {
+      setError("Can't use your microphone. Check it's plugged in and allowed, then pick it in Settings → Audio.")
+    }
+  }
+  const finishRecording = async (send: boolean): Promise<void> => {
+    const rec = recordingRef.current
+    if (!rec) return
+    setRecording(null)
+    if (!send) return rec.cancel()
+    const note = await rec.stop()
+    if (!note) return
+    const replyTo = mode?.kind === 'reply' ? mode.message.id : undefined
+    if (replyTo) onCancelMode()
+    setSending(true)
+    try {
+      await onSendVoice(note, replyTo)
+    } catch {
+      setError("The voice note couldn't be sent.")
+    } finally {
+      setSending(false)
+      ta.current?.focus()
     }
   }
 
@@ -214,7 +288,8 @@ export function Composer({
     else if (inputRef) inputRef.current = el
   }
 
-  const trayVisible = attachments.length > 0 || preparing > 0
+  const trayVisible = attachments.length > 0 || files.length > 0 || preparing > 0
+  const canRecord = !disabled && !editing && !sending && text.trim() === '' && attachments.length === 0 && files.length === 0
 
   return (
     <div className="flex-none pb-3.5">
@@ -263,6 +338,27 @@ export function Composer({
                 </Button>
               </li>
             ))}
+            {files.map((f) => (
+              <li key={f.key} className="relative flex h-16 max-w-[220px] items-center gap-2 bg-pressed py-2 pr-4 pl-3">
+                <FileText aria-hidden="true" className="size-6 flex-none text-cyan" />
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate text-sm" title={f.file.name}>
+                    {f.file.name || 'Pasted file'}
+                  </span>
+                  <span className="data text-text-muted">{formatBytes(f.file.size)}</span>
+                </span>
+                <Button
+                  variant="secondary"
+                  size="icon"
+                  aria-label={`Remove ${f.file.name}`}
+                  disabled={sending}
+                  onClick={() => setFiles((prev) => prev.filter((x) => x.key !== f.key))}
+                  className="absolute -top-2 -right-2 size-6 bg-surface-elevated"
+                >
+                  <X className="size-3.5" />
+                </Button>
+              </li>
+            ))}
             {Array.from({ length: preparing }, (_, i) => (
               <li key={`p${i}`} aria-label="Preparing image" className="grid size-16 place-items-center bg-pressed">
                 <LoaderCircle aria-hidden="true" className="size-5 animate-spin text-text-muted" />
@@ -280,7 +376,6 @@ export function Composer({
           <input
             ref={filePicker}
             type="file"
-            accept={IMAGE_MIME.join(',')}
             multiple
             hidden
             onChange={(e) => {
@@ -290,82 +385,123 @@ export function Composer({
           />
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="icon" size="icon-lg" aria-label="Attach images" disabled={disabled || sending || !!editing} onClick={() => filePicker.current?.click()}>
-                <ImagePlus className="size-5" />
+              <Button variant="icon" size="icon-lg" aria-label="Attach files" disabled={disabled || sending || !!editing || !!recording} onClick={() => filePicker.current?.click()}>
+                <Paperclip className="size-5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Attach images (or drop / paste them)</TooltipContent>
+            <TooltipContent>Attach pictures or files (or drop / paste them)</TooltipContent>
           </Tooltip>
           <span aria-hidden="true" className="py-[9px] pl-1.5 font-mono text-base leading-6 font-bold text-magenta">
             &gt;
           </span>
-          <label htmlFor="composer" className="sr-only">
-            Message {peerName}
-          </label>
-          <textarea
-            id="composer"
-            ref={setRefs}
-            rows={1}
-            value={text}
-            maxLength={MAX_TEXT_LENGTH}
-            disabled={disabled}
-            aria-describedby={error ? 'composer-error' : undefined}
-            placeholder={
-              disabled
-                ? disabledHint
-                : editing
-                  ? 'Edit your message'
-                  : attachments.length
-                    ? 'Add a caption (optional)'
-                    : `Message ${peerName}`
-            }
-            onChange={(e) => update(e.target.value)}
-            onBlur={stopTyping}
-            onPaste={(e) => {
-              const files = [...e.clipboardData.files].filter((f) => f.type.startsWith('image/'))
-              if (files.length) {
-                e.preventDefault()
-                addFiles(files)
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault()
-                void send()
-              } else if (e.key === 'Escape' && mode) {
-                e.preventDefault()
-                cancelMode()
-              } else if (e.key === 'ArrowUp' && !mode && text === '' && attachments.length === 0) {
-                e.preventDefault()
-                onEditLast()
-              }
-            }}
-            className="max-h-[200px] min-h-[42px] flex-1 resize-none border-0 bg-transparent px-1.5 py-[9px] font-sans text-base leading-6 font-normal text-text caret-cyan outline-none placeholder:text-text-muted focus-visible:outline-none disabled:cursor-not-allowed"
-          />
-          <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
-            <PopoverTrigger asChild>
-              <Button variant="icon" size="icon-lg" aria-label="Emoji" disabled={disabled}>
-                <Smile className="size-5" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent
-              side="top"
-              align="end"
-              className="w-auto overflow-hidden p-0"
-              // Focus returns to the message box after picking, handled in insertEmoji.
-              onCloseAutoFocus={(e) => e.preventDefault()}
+          {recording ? (
+            <div
+              role="group"
+              aria-label="Recording a voice note"
+              className="flex min-h-[42px] flex-1 items-center gap-3 px-2"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  void finishRecording(false)
+                }
+              }}
             >
-              <EmojiPanel onPick={insertEmoji} />
-            </PopoverContent>
-          </Popover>
-          <Button
-            size="icon-lg"
-            aria-label={sending ? 'Sending…' : editing ? 'Save edit' : 'Send message'}
-            disabled={!canSend}
-            onClick={() => void send()}
-          >
-            {sending ? <LoaderCircle className="animate-spin" /> : editing ? <Check /> : <SendHorizontal />}
-          </Button>
+              <span aria-hidden="true" className="size-2.5 animate-[pulse-soft_1.2s_ease-in-out_infinite] rounded-full bg-danger-text" />
+              <span className="data text-text" role="timer" aria-live="off">
+                {formatClock(recordedMs)} <span className="text-text-muted">/ {formatClock(MAX_VOICE_MS)}</span>
+              </span>
+              <span className="flex-1 text-sm text-text-muted">Recording…</span>
+              <Button variant="ghost" size="sm" autoFocus onClick={() => void finishRecording(false)}>
+                <Trash2 />
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <>
+            <label htmlFor="composer" className="sr-only">
+              Message {peerName}
+            </label>
+            <textarea
+              id="composer"
+              ref={setRefs}
+              rows={1}
+              value={text}
+              maxLength={MAX_TEXT_LENGTH}
+              disabled={disabled}
+              aria-describedby={error ? 'composer-error' : undefined}
+              placeholder={
+                disabled
+                  ? disabledHint
+                  : editing
+                    ? 'Edit your message'
+                    : attachments.length
+                      ? 'Add a caption (optional)'
+                      : `Message ${peerName}`
+              }
+              onChange={(e) => update(e.target.value)}
+              onBlur={stopTyping}
+              onPaste={(e) => {
+                const pasted = [...e.clipboardData.files]
+                if (pasted.length) {
+                  e.preventDefault()
+                  addFiles(pasted)
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault()
+                  void send()
+                } else if (e.key === 'Escape' && mode) {
+                  e.preventDefault()
+                  cancelMode()
+                } else if (e.key === 'ArrowUp' && !mode && text === '' && attachments.length === 0) {
+                  e.preventDefault()
+                  onEditLast()
+                }
+              }}
+              className="max-h-[200px] min-h-[42px] flex-1 resize-none border-0 bg-transparent px-1.5 py-[9px] font-sans text-base leading-6 font-normal text-text caret-cyan outline-none placeholder:text-text-muted focus-visible:outline-none disabled:cursor-not-allowed"
+            />
+            <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
+              <PopoverTrigger asChild>
+                <Button variant="icon" size="icon-lg" aria-label="Emoji" disabled={disabled}>
+                  <Smile className="size-5" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                side="top"
+                align="end"
+                className="w-auto overflow-hidden p-0"
+                // Focus returns to the message box after picking, handled in insertEmoji.
+                onCloseAutoFocus={(e) => e.preventDefault()}
+              >
+                <EmojiPanel onPick={insertEmoji} />
+              </PopoverContent>
+            </Popover>
+            </>
+          )}
+          {recording ? (
+            <Button size="icon-lg" aria-label="Send voice note" onClick={() => void finishRecording(true)}>
+              <Square className="fill-current" />
+            </Button>
+          ) : canRecord ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="icon-lg" variant="secondary" aria-label="Record a voice note" onClick={() => void startRecording()}>
+                  <Mic />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Record a voice note (up to 5 minutes)</TooltipContent>
+            </Tooltip>
+          ) : (
+            <Button
+              size="icon-lg"
+              aria-label={sending ? 'Sending…' : editing ? 'Save edit' : 'Send message'}
+              disabled={!canSend}
+              onClick={() => void send()}
+            >
+              {sending ? <LoaderCircle className="animate-spin" /> : editing ? <Check /> : <SendHorizontal />}
+            </Button>
+          )}
         </div>
         {error ? (
           <div id="composer-error" role="alert" className="mx-1 mt-1.5 flex items-start gap-1.5 text-xs text-danger-text">
@@ -381,7 +517,7 @@ export function Composer({
               </>
             ) : (
               <>
-                <kbd className="font-[inherit] text-text">↑</kbd> edit last · drop or paste images
+                <kbd className="font-[inherit] text-text">↑</kbd> edit last · drop or paste files
               </>
             )}
           </div>

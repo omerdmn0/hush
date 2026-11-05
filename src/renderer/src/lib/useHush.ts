@@ -89,7 +89,11 @@ export function useHush(): HushState {
           const t = e.transfer
           setTransfers((prev) => ({ ...prev, [t.id]: t }))
           if (t.direction === 'down' && t.state === 'done') {
-            setMessages((prev) => prev.map((m) => (m.id === t.id && m.image ? { ...m, image: { ...m.image, ready: true } } : m)))
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id !== t.id ? m : m.image ? { ...m, image: { ...m.image, ready: true } } : m.file ? { ...m, file: { ...m.file, ready: true } } : m
+              )
+            )
           }
           break
         }

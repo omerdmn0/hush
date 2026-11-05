@@ -201,7 +201,7 @@ function BackupNow(): ReactNode {
         <NewPassword id="backup-pw" label="Backup password" submitLabel="Choose where to save…" busy={busy} onSubmit={(p) => void run(p)} onCancel={() => setOpen(false)}>
           <div className="flex items-center justify-between gap-4">
             <Label htmlFor="backup-att" className="text-xs font-normal text-text-muted">
-              Include full-size pictures (previews are always included)
+              Include full-size pictures and files (previews and voice notes are always included)
             </Label>
             <Switch id="backup-att" checked={attachments} onCheckedChange={setAttachments} />
           </div>
@@ -275,7 +275,7 @@ function AutoBackupSettings({ privacy }: { privacy: PrivacyState }): ReactNode {
           </div>
           <div className="flex items-center justify-between gap-4">
             <Label htmlFor="auto-att" className="text-xs font-normal text-text-muted">
-              Include full-size pictures
+              Include full-size pictures and files
             </Label>
             <Switch id="auto-att" checked={auto.attachments} disabled={busy} onCheckedChange={(attachments) => void set({ enabled: true, attachments })} />
           </div>

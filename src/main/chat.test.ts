@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -306,7 +306,7 @@ const outgoing = (bytes: Uint8Array): { bytes: Uint8Array; mime: string; width: 
   height: 120,
   thumb: png(16, 12)
 })
-const fullFile = (s: Side, id: string): string => s.store.fullPath(id, 'image/png')
+const fullFile = (s: Side, id: string): string => s.store.fullPath(id, { mime: 'image/png', size: 0, sha256: '' })
 const transfer = (s: Side, id: string, state: string): boolean =>
   s.events.some((e) => e.type === 'transfer' && e.transfer.id === id && e.transfer.state === state)
 
@@ -679,5 +679,63 @@ describe('ChatService — search', () => {
     await until(() => ids('istanbul').includes(late.id))
     expect(ids('istanbul')).toEqual([late.id, m1.id])
     expect(ids('   ')).toEqual([])
+  })
+})
+
+describe('ChatService — files and voice notes', () => {
+  const tmpFile = (bytes: Uint8Array, name: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'hush-src-'))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    const p = join(dir, name)
+    writeFileSync(p, bytes)
+    return p
+  }
+
+  it('sends a file of any type from disk; the peer can save an identical copy', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const bytes = randomBytes(3 * 1024 * 1024 + 123) // many chunks (1 KB in tests)
+    const src = tmpFile(bytes, 'report final.pdf')
+    const m = await a.chat.sendFile(src, 'the report')
+    expect(m.file).toMatchObject({ name: 'report final.pdf', size: bytes.length, mime: 'application/pdf', ready: true, risky: false })
+    await until(() => transfer(b, m.id, 'done'), 30_000)
+    const view = b.chat.getMessages([m.id])[0]
+    expect(view).toMatchObject({ text: 'the report', file: { name: 'report final.pdf', ready: true } })
+    const out = join(mkdtempSync(join(tmpdir(), 'hush-out-')), 'saved.pdf')
+    await b.chat.exportAttachment(m.id, out)
+    expect(readFileSync(out).equals(bytes)).toBe(true)
+    // Stored encrypted, like everything else.
+    expect(readFileSync(b.store.fullPath(m.id, { size: 0, sha256: '', mime: '', file: 'file' })).includes(bytes.subarray(1000, 1040))).toBe(false)
+    expect(b.chat.search('report final').results.map((r) => r.id)).toEqual([m.id])
+  }, 40_000)
+
+  it('flags programs, refuses folders and empty files', async () => {
+    const [a] = await sides()
+    a.start()
+    const m = await a.chat.sendFile(tmpFile(Buffer.from('MZ fake program'), 'setup.exe'), '')
+    expect(m.file?.risky).toBe(true)
+    await expect(a.chat.sendFile(tmpdir(), '')).rejects.toThrow()
+    await expect(a.chat.sendFile(tmpFile(new Uint8Array(0), 'empty.txt'), '')).rejects.toThrow()
+  })
+
+  it('voice notes arrive with their length and waveform; deleting erases them everywhere', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const peaks = Uint8Array.from({ length: 48 }, (_, i) => i * 5)
+    const m = await a.chat.sendFileBytes(randomBytes(20_000), 'voice.webm', '', undefined, { durationMs: 4200, peaks })
+    await until(() => transfer(b, m.id, 'done'))
+    const v = b.chat.getMessages([m.id])[0].file!
+    expect(v.voice).toMatchObject({ durationMs: 4200, peaks: [...peaks], url: `hush-img://${m.id}/voice` })
+    expect(v.mime).toBe('audio/webm')
+    const voiceFile = (s: Side): string => s.store.fullPath(m.id, { size: 0, sha256: '', mime: '', file: 'voice' })
+    expect(existsSync(voiceFile(b))).toBe(true)
+    await a.chat.deleteForEveryone(m.id)
+    await until(() => b.chat.getMessages([m.id])[0].deleted === true)
+    expect([existsSync(voiceFile(a)), existsSync(voiceFile(b))]).toEqual([false, false])
+    await expect(a.chat.sendFileBytes(randomBytes(10), 'v.webm', '', undefined, { durationMs: 6 * 60_000, peaks })).rejects.toThrow()
   })
 })

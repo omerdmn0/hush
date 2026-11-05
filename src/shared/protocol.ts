@@ -34,7 +34,7 @@ export const PROTOCOL_VERSION = 6
 /** Oldest protocol this app still talks to. */
 export const MIN_PROTOCOL = 6
 /** Features this app supports (announced in hello). */
-export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover', 'replies'] as const
+export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover', 'replies', 'files'] as const
 /** Message kinds that act on another message (they carry `ref`). */
 export const EVENT_KINDS = ['edit', 'delete', 'react'] as const
 /** Event payload: an edit carries a whole message's text. */
@@ -61,6 +61,14 @@ const MAX_CANDIDATE = 1_024
 export const CALL_END_REASONS = ['hangup', 'declined', 'busy', 'cancelled', 'timeout', 'failed'] as const
 export type CallEndReason = (typeof CALL_END_REASONS)[number]
 
+/** Files of any type: up to 1 GB, streamed from disk. */
+export const MAX_FILE_BYTES = 1024 * 1024 * 1024
+/** Files that come from memory (pasted, voice notes) stay small. */
+export const MAX_MEMORY_FILE_BYTES = 25 * 1024 * 1024
+export const MAX_VOICE_MS = 5 * 60 * 1000
+/** Waveform of a voice note: this many bars, 0–255 each, base64. */
+export const VOICE_PEAKS = 48
+
 /** Bytes of image data per binary chunk. */
 export const CHUNK_BYTES = 128 * 1024
 
@@ -71,6 +79,18 @@ export interface ImageMeta {
   size: number
   /** Hex SHA-256 of the full file. */
   sha256: string
+}
+
+/** A file attachment (message kind 'file'). The bytes travel like images, pulled in chunks. */
+export interface FileMeta {
+  /** Display name only — never used as a path on the receiving computer. */
+  name: string
+  size: number
+  mime: string
+  /** Hex SHA-256 of the whole file. */
+  sha256: string
+  /** Present for voice notes. */
+  voice?: { durationMs: number; peaks: string }
 }
 
 export type Frame =
@@ -98,6 +118,8 @@ export type Frame =
       body: string
       sentAt: number
       image?: ImageMeta & { thumb: string }
+      /** Message kind 'file': the attachment's description. */
+      file?: FileMeta
       kind?: string
       ref?: string
       data?: string
@@ -147,6 +169,43 @@ export function parseImageMeta(v: unknown): ImageMeta | null {
   if (!isInt(o.width, 1, MAX_IMAGE_SIDE) || !isInt(o.height, 1, MAX_IMAGE_SIDE) || !isInt(o.size, 1, MAX_IMAGE_BYTES)) return null
   if (typeof o.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(o.sha256)) return null
   return { mime: o.mime as ImageMime, width: o.width, height: o.height, size: o.size, sha256: o.sha256 }
+}
+
+/** A file name to show: no path separators or control characters, sensible length. */
+export const isFileName = (v: unknown): v is string =>
+  typeof v === 'string' && v.length > 0 && v.length <= 255 && !/[/\\\p{Cc}]/u.test(v) && v.trim() === v && v !== '.' && v !== '..'
+
+export function parseFileMeta(v: unknown): FileMeta | null {
+  if (typeof v !== 'object' || v === null) return null
+  const f = v as Record<string, unknown>
+  const ok =
+    isFileName(f.name) &&
+    Number.isSafeInteger(f.size) &&
+    (f.size as number) >= 1 &&
+    (f.size as number) <= MAX_FILE_BYTES &&
+    typeof f.mime === 'string' &&
+    f.mime.length <= 100 &&
+    /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/i.test(f.mime) &&
+    typeof f.sha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(f.sha256)
+  if (!ok) return null
+  const meta: FileMeta = { name: f.name as string, size: f.size as number, mime: (f.mime as string).toLowerCase(), sha256: f.sha256 as string }
+  if (f.voice !== undefined) {
+    const voice = f.voice as Record<string, unknown> | null
+    const good =
+      voice !== null &&
+      typeof voice === 'object' &&
+      Number.isSafeInteger(voice.durationMs) &&
+      (voice.durationMs as number) > 0 &&
+      (voice.durationMs as number) <= MAX_VOICE_MS + 5000 &&
+      typeof voice.peaks === 'string' &&
+      voice.peaks.length <= 100 &&
+      /^[A-Za-z0-9+/]*={0,2}$/.test(voice.peaks) &&
+      meta.size <= MAX_MEMORY_FILE_BYTES
+    if (!good) return null
+    meta.voice = { durationMs: voice.durationMs as number, peaks: voice.peaks as string }
+  }
+  return meta
 }
 
 function parseInlineImage(v: unknown): (ImageMeta & { thumb: string }) | null {
@@ -263,8 +322,11 @@ function parseRaw(raw: string): Frame | null {
       // Events act on another message; a chat message needs text or an image. Unknown kinds
       // from a newer Hush are accepted as long as they're well-formed (forward compatibility).
       if ((EVENT_KINDS as readonly string[]).includes(kind) && f.ref === undefined) return null
-      // A reply points at the message it answers (chat messages only).
-      if (f.reply !== undefined && (!isUuid(f.reply) || kind !== 'message' || f.ref !== undefined)) return null
+      // A reply points at the message it answers (chat messages and files).
+      if (f.reply !== undefined && (!isUuid(f.reply) || (kind !== 'message' && kind !== 'file') || f.ref !== undefined)) return null
+      // Files carry their description (except once deleted: then it was wiped); nothing else does.
+      const file = f.file === undefined ? undefined : parseFileMeta(f.file)
+      if (file === null || (file && kind !== 'file') || (file && image)) return null
       const ok =
         isUuid(f.id) &&
         isUuid(f.author) &&
@@ -281,6 +343,7 @@ function parseRaw(raw: string): Frame | null {
       if (f.ref !== undefined) msg.ref = f.ref as string
       if (f.data !== undefined) msg.data = f.data as string
       if (f.reply !== undefined) msg.reply = f.reply as string
+      if (file) msg.file = file
       return msg
     }
     case 'blob-req':
