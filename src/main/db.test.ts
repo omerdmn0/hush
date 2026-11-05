@@ -207,3 +207,35 @@ describe('encryption at rest', () => {
     wrong.close()
   })
 })
+
+describe('migration from stage g (v4: calls, no events yet)', () => {
+  it('adds the event columns and keeps call history', () => {
+    const file = join(dir, 'stage-g.db')
+    const raw = new Database(file)
+    // The schema exactly as stage g left it (migrations v1–v4).
+    raw.exec(`
+      CREATE TABLE messages (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, body TEXT NOT NULL, sent_at INTEGER NOT NULL,
+        received_at INTEGER NOT NULL, status TEXT NOT NULL CHECK (status IN ('queued','sent','delivered','read')));
+      CREATE INDEX messages_by_time ON messages (sent_at, id);
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      ALTER TABLE messages ADD COLUMN seq INTEGER;
+      CREATE UNIQUE INDEX messages_by_author_seq ON messages (author_id, seq) WHERE seq IS NOT NULL;
+      ALTER TABLE messages ADD COLUMN image TEXT;
+      CREATE TABLE calls (id TEXT PRIMARY KEY, direction TEXT NOT NULL CHECK (direction IN ('in','out')), started_at INTEGER NOT NULL,
+        connected_at INTEGER, ended_at INTEGER, outcome TEXT NOT NULL);
+      CREATE INDEX calls_by_time ON calls (started_at);
+      PRAGMA user_version = 4;`)
+    const callId = randomUUID()
+    const msgId = randomUUID()
+    raw.prepare(`INSERT INTO calls VALUES (?, 'out', 100, 110, 200, 'completed')`).run(callId)
+    raw.prepare(`INSERT INTO messages VALUES (?, ?, 'from stage g', 50, 50, 'read', 1, NULL)`).run(msgId, ME)
+    raw.close()
+
+    const db = new HushDb(file)
+    expect(db.version).toBe(5)
+    expect(db.listCalls().map((c) => c.id)).toEqual([callId])
+    expect(db.getMessage(msgId)?.body).toBe('from stage g')
+    expect(db.createOwnMessage(ME, '', 300, null, undefined, { kind: 'edit', ref: msgId, data: 'edited' }).seq).toBe(2)
+    db.close()
+  })
+})

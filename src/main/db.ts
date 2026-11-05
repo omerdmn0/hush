@@ -70,15 +70,6 @@ const MIGRATIONS: Migration[] = [
   // v3 — stage d: image metadata (JSON); the image files themselves are stored on disk.
   (db) => db.exec(`ALTER TABLE messages ADD COLUMN image TEXT;`),
 
-  // v5 — events (edit / delete / react) live in the same per-author sequence as messages, so the
-  // offline queue and sync carry them too. They point at a message via `ref`.
-  (db) =>
-    db.exec(`
-      ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
-      ALTER TABLE messages ADD COLUMN ref TEXT;
-      ALTER TABLE messages ADD COLUMN data TEXT;
-      CREATE INDEX messages_by_ref ON messages (ref) WHERE ref IS NOT NULL;`),
-
   // v4 — call history (each computer keeps its own view of each call).
   (db) =>
     db.exec(`
@@ -90,7 +81,16 @@ const MIGRATIONS: Migration[] = [
         ended_at     INTEGER,
         outcome      TEXT NOT NULL
       );
-      CREATE INDEX calls_by_time ON calls (started_at);`)
+      CREATE INDEX calls_by_time ON calls (started_at);`),
+
+  // v5 — events (edit / delete / react) live in the same per-author sequence as messages, so the
+  // offline queue and sync carry them too. They point at a message via `ref`.
+  (db) =>
+    db.exec(`
+      ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
+      ALTER TABLE messages ADD COLUMN ref TEXT;
+      ALTER TABLE messages ADD COLUMN data TEXT;
+      CREATE INDEX messages_by_ref ON messages (ref) WHERE ref IS NOT NULL;`)
 ]
 
 // Status only ever moves forward, so replayed or out-of-order receipts are harmless.
