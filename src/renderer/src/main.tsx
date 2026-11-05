@@ -7,11 +7,11 @@ import '@fontsource-variable/jetbrains-mono'
 import './styles/globals.css'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import App from './App'
+import { LockScreen } from './components/LockScreen'
 
+// The same page serves the small lock window (#lock) shown before Hush opens its data.
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <TooltipProvider>
-      <App />
-    </TooltipProvider>
+    <TooltipProvider>{location.hash === '#lock' ? <LockScreen /> : <App />}</TooltipProvider>
   </StrictMode>
 )

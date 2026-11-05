@@ -1,4 +1,3 @@
-import { createServer } from 'node:net'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import WebSocket from 'ws'
@@ -6,17 +5,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { PeerLink, type LinkConfig } from './link'
 import { Identity } from './identity'
 import type { Frame } from '../shared/protocol'
+import { freePort } from './testPorts'
 
 const HOST = '127.0.0.1'
 
-async function freePort(): Promise<number> {
-  const srv = createServer()
-  srv.listen(0, HOST)
-  await once(srv, 'listening')
-  const port = (srv.address() as { port: number }).port
-  await new Promise((r) => srv.close(r))
-  return port
-}
 
 const links: PeerLink[] = []
 afterEach(async () => {

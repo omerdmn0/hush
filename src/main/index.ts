@@ -1,21 +1,33 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, net as electronNet, protocol, session } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import icon from '../../resources/icon.png?asset'
 import trayIcon from '../../resources/tray.png?asset'
 import trayUnreadIcon from '../../resources/tray-unread.png?asset'
 import badgeIcon from '../../resources/badge.png?asset'
-import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame } from '../shared/protocol'
+import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame, sniffImage } from '../shared/protocol'
 import { isTailscaleIp } from '../shared/ip'
-import { IPC, type CallRecord, type HistoryCursor, type HushEvent, type NetState, type OutgoingImage, type Settings } from '../shared/types'
+import { IPC, type AutoBackup, type BackupResult, type CallRecord, type HistoryCursor, type HushEvent, type LockInfo, type NetState, type OutgoingImage, type PrivacyState, type Settings } from '../shared/types'
 import { applyStartAtLogin, HIDDEN_FLAG } from './autostart'
 import { Avatars } from './avatars'
+import {
+  applyStagedRestore,
+  backupFileName,
+  backupKeyFromPassword,
+  extractBackup,
+  markStagedRestoreReady,
+  pruneBackups,
+  STAGING,
+  writeBackup,
+  type BackupSource
+} from './backup'
 import { CallTracker } from './callTracker'
-import { ChatService } from './chat'
+import { AWAITING_SYNC, ChatService } from './chat'
 import { HushDb } from './db'
 import { Identity } from './identity'
+import { Keyring, type OsProtector } from './keyring'
 import { PairingService } from './pairing'
 import { ImageStore } from './images'
 import { PeerLink } from './link'
@@ -23,6 +35,7 @@ import { Notifier } from './notifier'
 import { titleWithUnread } from './notifyLogic'
 import { findTailscaleIp } from './tailscale'
 import { HushTray } from './tray'
+import { fieldCipher } from './vault'
 
 // ---------------------------------------------------------------------------
 // Development-only overrides (ignored in packaged builds). They let two copies run
@@ -48,6 +61,27 @@ if (env('HUSH_FAKE_MEDIA')) {
 }
 const devPairing = env('HUSH_PEER') !== undefined
 
+/**
+ * The OS keychain via Electron safeStorage: DPAPI on Windows; GNOME Keyring / KWallet on Linux.
+ * On Linux without either, Electron would fall back to a hard-coded key ("basic_text"), which
+ * protects nothing — so that counts as "no keychain" and an app password is required instead.
+ * Dev-only HUSH_NO_KEYCHAIN simulates that.
+ */
+const osProtector: OsProtector = {
+  available: async () =>
+    !env('HUSH_NO_KEYCHAIN') &&
+    (await safeStorage.isAsyncEncryptionAvailable()) &&
+    !(process.platform === 'linux' && ['basic_text', 'unknown'].includes(safeStorage.getSelectedStorageBackend())),
+  name: () => {
+    if (process.platform === 'win32') return 'Windows'
+    if (process.platform === 'darwin') return 'macOS Keychain'
+    const backend = safeStorage.getSelectedStorageBackend()
+    return backend === 'gnome_libsecret' ? 'GNOME Keyring' : backend.startsWith('kwallet') ? 'KWallet' : 'the system keychain'
+  },
+  encrypt: (plain) => safeStorage.encryptStringAsync(plain),
+  decrypt: async (sealed) => (await safeStorage.decryptStringAsync(sealed)).result
+}
+
 // Windows needs an app id for notifications to show.
 if (process.platform === 'win32') app.setAppUserModelId('app.hush.chat')
 
@@ -63,357 +97,634 @@ if (!app.requestSingleInstanceLock()) {
   let tray: HushTray | null = null
   /** True once a real quit has started (the close button otherwise only hides the window). */
   let quitting = false
-
-  const db = new HushDb(join(app.getPath('userData'), 'hush.db'))
-  let selfId = db.getSetting<string>('selfId')
-  if (!selfId) {
-    selfId = randomUUID()
-    db.setSetting('selfId', selfId)
+  const userData = app.getPath('userData')
+  const webPreferences = {
+    preload: join(__dirname, '../preload/index.js'),
+    contextIsolation: true,
+    sandbox: true,
+    nodeIntegration: false
   }
-  // Long-term identity (Ed25519) and the key of the person we paired with.
-  let identityKey = db.getSetting<string>('identityKey')
-  if (!identityKey) {
-    identityKey = Identity.generate()
-    db.setSetting('identityKey', identityKey)
+  const loadRenderer = (win: BrowserWindow, hash?: string): void => {
+    if (dev && process.env['ELECTRON_RENDERER_URL']) void win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (hash ? `#${hash}` : ''))
+    else void win.loadFile(join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined)
   }
-  const identity = new Identity(identityKey)
-  let pairedKey = db.getSetting<string | null>('pairedKey') ?? null
-  const pins = {
-    getPinned: () => pairedKey,
-    setPinned: (key: string | null) => {
-      pairedKey = key
-      db.setSetting('pairedKey', key)
-    }
-  }
-  const startHidden = process.argv.includes(HIDDEN_FLAG)
-
-  let settings: Settings = {
-    displayName: userInfo().username,
-    peerIp: '',
-    notifications: true,
-    notificationPreview: false,
-    startAtLogin: true,
-    micId: '',
-    speakerId: '',
-    ...db.getSetting<Partial<Settings>>('settings')
-  }
-
-  const peerHostFor = (s: Settings): string | null => env('HUSH_PEER') ?? (s.peerIp || null)
-  // What the UI sees: in dev pairing mode the override shows up as the configured peer.
-  const visible = (s: Settings): Settings => (env('HUSH_PEER') ? { ...s, peerIp: env('HUSH_PEER')! } : s)
-  const detectOwnIp = (): string | null => env('HUSH_BIND') ?? findTailscaleIp()
-
-  // ---------- window helpers ----------
-
-  const showWindow = (): void => {
-    if (!mainWindow) return createWindow()
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.show()
-    mainWindow.focus()
-  }
-  const userIsLooking = (): boolean => !!mainWindow && mainWindow.isVisible() && mainWindow.isFocused()
-
-  // ---------- core services ----------
-
-  const notifier = new Notifier({
-    enabled: () => settings.notifications,
-    preview: () => settings.notificationPreview,
-    focused: userIsLooking,
-    peerName: () => chat.peerState().name ?? 'Peer',
-    icon,
-    onClick: showWindow,
-    log: devPairing ? (line) => console.log(line) : undefined
-  })
-
-  let unread = 0
-  let unreadTimer: ReturnType<typeof setTimeout> | undefined
-  const updateTray = (): void => {
-    const p = chat.peerState()
-    tray?.update({ peerName: settings.peerIp || devPairing ? p.name : null, online: p.presence === 'online', unread, notifications: settings.notifications })
-  }
-  const refreshUnread = (): void => {
-    const n = db.unreadCount(selfId)
-    if (n === unread) return
-    unread = n
-    mainWindow?.setTitle(titleWithUnread(n) + (profile ? ` · ${profile}` : ''))
-    app.setBadgeCount(n) // Linux (Unity/KDE launchers) and macOS; ignored elsewhere
-    if (process.platform === 'win32') mainWindow?.setOverlayIcon(n > 0 ? nativeImage.createFromPath(badgeIcon) : null, n > 0 ? `${n} unread` : '')
-    updateTray()
-  }
-  const scheduleUnread = (): void => {
-    clearTimeout(unreadTimer)
-    unreadTimer = setTimeout(refreshUnread, 100)
-  }
-
-  /** Every event for the UI also drives notifications, the unread count and the tray. */
-  const send = (e: HushEvent): void => {
-    mainWindow?.webContents.send(IPC.event, e)
-    if (e.type === 'message' && e.message.from === 'peer') {
-      notifier.message({ text: e.message.text, hasImage: !!e.message.image })
-      scheduleUnread()
-    } else if (e.type === 'status') {
-      scheduleUnread()
-    } else if (e.type === 'peer') {
-      updateTray()
-    }
-  }
-
-  const net: NetState = { ownIp: detectOwnIp(), port, listening: false, error: null }
-  const link = new PeerLink({
-    selfId,
-    name: settings.displayName,
-    appVersion: app.getVersion(),
-    identity,
-    pinned: pins.getPinned,
-    bindHost: net.ownIp,
-    port,
-    peerHost: peerHostFor(settings),
-    peerPort
-  })
-  const images = new ImageStore(join(app.getPath('userData'), 'images'))
-  const avatars = new Avatars(app.getPath('userData'))
-  const chat = new ChatService(db, link, selfId, send, images, { avatars })
-  const calls = new CallTracker()
-  const pairing = new PairingService(link, identity.publicKey, pins)
-  pairing.on('change', (state) => send({ type: 'pairing', pairing: state }))
-
-  const applyAutostart = (): void => {
-    applyStartAtLogin(settings.startAtLogin, {
-      platform: process.platform,
-      packaged: app.isPackaged,
-      execPath: process.execPath,
-      appImage: process.env.APPIMAGE,
-      configHome: process.env.XDG_CONFIG_HOME || join(app.getPath('home'), '.config'),
-      setLoginItem: (s) => app.setLoginItemSettings(s)
-    })
-  }
-
-  link.on('listening', (listening, error) => {
-    Object.assign(net, { listening, error })
-    send({ type: 'net', net: { ...net } })
-  })
-  link.on('problem', (message) => {
-    net.error = message
-    send({ type: 'net', net: { ...net } })
-  })
-  // Call signaling is relayed to the UI untouched (it holds the WebRTC connection).
-  link.on('frame', (frame) => {
-    if (!isCallSignal(frame)) return
-    const what = calls.fromPeer(frame)
-    send({ type: 'call', signal: frame })
-    if (what === 'incoming') {
-      // Bring a hidden window back so the call can be answered, without stealing focus.
-      if (mainWindow && !mainWindow.isVisible()) mainWindow.showInactive()
-      mainWindow?.flashFrame(true)
-      notifier.incomingCall()
-    } else if (what === 'missed') {
-      notifier.missedCall()
-    }
-  })
-  link.on('up', () => {
-    if (net.error && net.listening) {
-      net.error = null
-      send({ type: 'net', net: { ...net } })
-    }
-  })
-
-  // Tailscale may start (or change address) after Hush does.
-  const refreshOwnIp = (): void => {
-    const ip = detectOwnIp()
-    if (ip === net.ownIp) return
-    net.ownIp = ip
-    link.update({ bindHost: ip })
-    send({ type: 'net', net: { ...net } })
-  }
-  const ipPoll = setInterval(refreshOwnIp, 10_000)
-
-  const applySettings = (next: Settings): Settings => {
-    settings = next
-    db.setSetting('settings', settings)
-    link.update({ name: settings.displayName, peerHost: peerHostFor(settings) })
-    send({ type: 'settings', settings: visible(settings) })
-    updateTray()
-    return visible(settings)
-  }
-
-  function createWindow(): void {
-    mainWindow = new BrowserWindow({
-      width: 1200,
-      height: 780,
-      minWidth: 880,
-      minHeight: 560,
-      show: false,
-      title: titleWithUnread(unread) + (profile ? ` · ${profile}` : ''),
-      backgroundColor: '#0D0B14',
-      autoHideMenuBar: true,
-      icon,
-      webPreferences: {
-        preload: join(__dirname, '../preload/index.js'),
-        contextIsolation: true,
-        sandbox: true,
-        nodeIntegration: false
-      }
-    })
-
-    // Started at login with --hidden: stay in the tray until opened.
-    mainWindow.once('ready-to-show', () => !startHidden && mainWindow?.show())
-    // The window title shows the unread count; don't let the page's <title> replace it.
-    mainWindow.on('page-title-updated', (e) => e.preventDefault())
-    mainWindow.on('focus', () => mainWindow?.flashFrame(false))
-    // The page can't reliably tell whether it's hidden in the tray, so tell it.
-    const reportActive = (): void => {
-      setImmediate(() => mainWindow?.webContents.send(IPC.event, { type: 'window', active: userIsLooking() } satisfies HushEvent))
-    }
-    for (const ev of ['focus', 'blur', 'show', 'hide', 'minimize', 'restore'] as const) mainWindow.on(ev as 'focus', reportActive)
-    // Closing the window keeps Hush running in the tray, so messages and calls still arrive.
-    mainWindow.on('close', (e) => {
-      if (quitting) return
-      e.preventDefault()
-      mainWindow?.hide()
-      if (!db.getSetting<boolean>('trayHintShown')) {
-        db.setSetting('trayHintShown', true)
-        notifier.info('Hush is still running', 'It stays in the tray so messages and calls reach you. Use Quit to close it completely.')
-      }
-    })
-    // Gather WebRTC candidates on every interface, so the Tailscale address is among them.
-    mainWindow.webContents.setWebRTCIPHandlingPolicy('default')
-    mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
-
-    if (dev && process.env['ELECTRON_RENDERER_URL']) {
-      mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
-    } else {
-      mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
-    }
-    mainWindow.on('closed', () => (mainWindow = null))
-  }
-
   const quitApp = (): void => {
     quitting = true
     app.quit()
   }
 
-  // ---------- IPC (inputs from the renderer are validated here) ----------
+  /** Set once the data is unlocked and Hush is running. */
+  let core: { showWindow: () => void; shutdown: () => Promise<void>; close: () => void } | null = null
 
-  ipcMain.handle(IPC.snapshot, () => ({
-    settings: visible(settings),
-    peer: chat.peerState(),
-    net: { ...net },
-    avatars: avatars.urls(),
-    windowActive: userIsLooking(),
-    pairing: pairing.state(),
-    appVersion: app.getVersion(),
-    packaged: app.isPackaged,
-    devPairing
-  }))
+  // ---------- unlocking (before anything is opened) ----------
 
-  ipcMain.handle(IPC.callSignal, (_e, signal: unknown) => {
-    // Same validation as frames from the network.
-    const frame = parseFrame(JSON.stringify(signal ?? null))
-    if (!frame || !isCallSignal(frame)) return false
-    calls.fromUs(frame)
-    return link.send(frame)
-  })
+  let lockWindow: BrowserWindow | null = null
+  let lockInfo: LockInfo | null = null
+  let lockKeyring: Keyring | null = null
+  let lockDone: ((key: Buffer) => void) | null = null
 
-  ipcMain.handle(IPC.listMessages, (_e, before?: HistoryCursor, limit?: number) => {
-    const cursor =
-      before && Number.isFinite(before.sentAt) && typeof before.id === 'string' ? { sentAt: before.sentAt, id: before.id } : undefined
-    return chat.listMessages(cursor, Number.isInteger(limit) ? (limit as number) : 100)
-  })
-
-  ipcMain.handle(IPC.sendMessage, (_e, text: unknown) => {
-    if (typeof text !== 'string' || text.length > MAX_TEXT_LENGTH) throw new Error('Invalid message')
-    return chat.send(text)
-  })
-
-  ipcMain.handle(IPC.sendImage, (_e, img: OutgoingImage, caption: unknown) => {
-    if (!(img?.bytes instanceof Uint8Array) || !(img.thumb instanceof Uint8Array) || typeof caption !== 'string') {
-      throw new Error('Invalid image')
+  /** The data key: from the keychain when possible, otherwise via the lock window. */
+  async function obtainKey(keyring: Keyring): Promise<Buffer> {
+    const mode = keyring.mode()
+    const osName = keyring.osName()
+    if (mode === 'os') {
+      try {
+        return await keyring.unlockWithKeychain()
+      } catch (e) {
+        lockInfo = { mode: 'keychain-error', osName, error: (e as Error).message }
+      }
+    } else if (mode === 'new' && (await keyring.osAvailable())) {
+      return keyring.create()
+    } else {
+      lockInfo = { mode: mode === 'password' ? 'unlock' : 'create', osName }
     }
-    return chat.sendImage(img, caption) // validates type, signature, size and preview
-  })
+    lockKeyring = keyring
+    return new Promise((resolve) => {
+      lockDone = resolve
+      openLockWindow()
+    })
+  }
 
-  ipcMain.handle(IPC.setAvatar, (_e, bytes: unknown) => {
-    if (bytes !== null && !(bytes instanceof Uint8Array)) return false
-    return chat.setAvatar(bytes) // validates signature and size
-  })
+  function openLockWindow(): void {
+    lockWindow = new BrowserWindow({
+      width: 480,
+      height: 620,
+      resizable: false,
+      show: false,
+      title: 'Hush' + (profile ? ` · ${profile}` : ''),
+      backgroundColor: '#0D0B14',
+      autoHideMenuBar: true,
+      icon,
+      webPreferences
+    })
+    lockWindow.once('ready-to-show', () => lockWindow?.show())
+    lockWindow.on('closed', () => {
+      lockWindow = null
+      if (!core) quitApp()
+    })
+    lockWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    lockWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+    loadRenderer(lockWindow, 'lock')
+  }
 
-  ipcMain.handle(IPC.listCalls, () => db.listCalls())
+  ipcMain.handle(IPC.lockInfo, () => lockInfo)
 
-  ipcMain.on(IPC.logCall, (_e, record: CallRecord) => {
+  ipcMain.handle(IPC.lockSubmit, async (_e, password: unknown): Promise<string | null> => {
+    const info = lockInfo
+    const keyring = lockKeyring
+    if (!info || !keyring || !lockDone || typeof password !== 'string' || password.length > 1024) return 'Something went wrong. Restart Hush.'
+    let key: Buffer
     try {
-      db.logCall(record)
-      send({ type: 'call-log', record: db.listCalls().find((c) => c.id === record.id.toLowerCase())! })
+      if (info.mode === 'create') {
+        if (password.length < 8) return 'Use at least 8 characters.'
+        key = await keyring.create(password)
+      } else if (info.mode === 'unlock') {
+        key = keyring.unlockWithPassword(password)
+      } else {
+        key = await keyring.unlockWithKeychain()
+      }
     } catch {
-      // ignore malformed records
+      return info.mode === 'unlock' ? 'Wrong password.' : `${info.osName} still refused. Unlock it (log out and back in), then try again.`
     }
+    const done = lockDone
+    lockDone = null
+    lockInfo = null
+    done(key)
+    return null
   })
 
-  ipcMain.on(IPC.retryImage, (_e, id: unknown) => {
-    if (typeof id === 'string') chat.transfers.retry(id)
-  })
-
-  ipcMain.on(IPC.markRead, (_e, ids: unknown) => {
-    if (Array.isArray(ids) && ids.every((id) => typeof id === 'string')) {
-      chat.markRead(ids as string[])
-      scheduleUnread()
+  /**
+   * The key doesn't open this data (e.g. the keychain was reset). Offer to set the data aside
+   * and start fresh — then a backup can be restored or the history recovered from the peer.
+   */
+  function unreadableData(): void {
+    const choice = dialog.showMessageBoxSync({
+      type: 'error',
+      title: 'Hush can’t open its data',
+      message: 'The key that encrypts your Hush history on this computer is missing or has changed.',
+      detail:
+        'This happens if the system keychain was reset. You can start fresh: your old data is kept in a folder, and you can then restore a backup or recover your history from the other computer.',
+      buttons: ['Quit', 'Start fresh'],
+      defaultId: 0,
+      cancelId: 0
+    })
+    if (choice === 1) {
+      const aside = join(userData, `unreadable-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`)
+      mkdirSync(aside)
+      for (const name of readdirSync(userData)) {
+        if (['hush.db', 'hush.db-wal', 'hush.db-shm', 'vault.json', 'images', 'avatar-self.img', 'avatar-peer.img'].includes(name)) {
+          renameSync(join(userData, name), join(aside, name))
+        }
+      }
+      app.relaunch()
     }
-  })
+    app.exit(0)
+  }
 
-  ipcMain.on(IPC.setTyping, (_e, on: unknown) => {
-    if (typeof on === 'boolean') chat.setTyping(on)
-  })
+  /** Opens the data with the unlocked key and starts everything. */
+  function startCore(dataKey: Buffer, keyring: Keyring, restored: boolean): void {
+    const cipher = fieldCipher(dataKey)
+    const db = new HushDb(join(userData, 'hush.db'), cipher)
+    // Make sure this key really opens this data before touching anything.
+    const keyCheck = db.getSetting<string>('keyCheck')
+    if (keyCheck) {
+      try {
+        cipher.open(keyCheck)
+      } catch {
+        db.close()
+        return unreadableData()
+      }
+    }
+    let selfId = db.getSetting<string>('selfId')
+    if (!selfId) {
+      selfId = randomUUID()
+      db.setSetting('selfId', selfId)
+    }
+    // Long-term identity (Ed25519) and the key of the person we paired with.
+    const images = new ImageStore(join(userData, 'images'), dataKey)
+    const avatars = new Avatars(userData, dataKey)
+    // One-time upgrade of data stored before encryption existed (no-op for new installs).
+    if (!keyCheck) {
+      db.encryptExisting(['identityKey'])
+      images.encryptExisting()
+      avatars.encryptExisting()
+      db.setSetting('keyCheck', cipher.seal('hush'))
+    }
+    if (restored) db.setSetting(AWAITING_SYNC, true) // see ChatService.assertCanWrite
+    let identityKey = db.getSecret<string>('identityKey')
+    if (!identityKey) {
+      identityKey = Identity.generate()
+      db.setSecret('identityKey', identityKey)
+    }
+    const identity = new Identity(identityKey)
+    let pairedKey = db.getSetting<string | null>('pairedKey') ?? null
+    const pins = {
+      getPinned: () => pairedKey,
+      setPinned: (key: string | null) => {
+        pairedKey = key
+        db.setSetting('pairedKey', key)
+      }
+    }
+    const startHidden = process.argv.includes(HIDDEN_FLAG)
 
-  ipcMain.handle(IPC.updateSettings, (_e, patch: Partial<Settings>) => {
-    const next = { ...settings }
-    if (typeof patch.displayName === 'string') next.displayName = patch.displayName.trim().slice(0, 40)
-    if (typeof patch.notifications === 'boolean') next.notifications = patch.notifications
-    if (typeof patch.notificationPreview === 'boolean') next.notificationPreview = patch.notificationPreview
-    if (typeof patch.startAtLogin === 'boolean' && patch.startAtLogin !== settings.startAtLogin) {
-      next.startAtLogin = patch.startAtLogin
+    let settings: Settings = {
+      displayName: userInfo().username,
+      peerIp: '',
+      notifications: true,
+      notificationPreview: false,
+      startAtLogin: true,
+      micId: '',
+      speakerId: '',
+      ...db.getSetting<Partial<Settings>>('settings')
+    }
+
+    const peerHostFor = (s: Settings): string | null => env('HUSH_PEER') ?? (s.peerIp || null)
+    // What the UI sees: in dev pairing mode the override shows up as the configured peer.
+    const visible = (s: Settings): Settings => (env('HUSH_PEER') ? { ...s, peerIp: env('HUSH_PEER')! } : s)
+    const detectOwnIp = (): string | null => env('HUSH_BIND') ?? findTailscaleIp()
+
+    // ---------- window helpers ----------
+
+    const showWindow = (): void => {
+      if (!mainWindow) return createWindow()
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+    const userIsLooking = (): boolean => !!mainWindow && mainWindow.isVisible() && mainWindow.isFocused()
+
+    // ---------- core services ----------
+
+    const notifier = new Notifier({
+      enabled: () => settings.notifications,
+      preview: () => settings.notificationPreview,
+      focused: userIsLooking,
+      peerName: () => chat.peerState().name ?? 'Peer',
+      icon,
+      onClick: showWindow,
+      log: devPairing ? (line) => console.log(line) : undefined
+    })
+
+    let unread = 0
+    let unreadTimer: ReturnType<typeof setTimeout> | undefined
+    const updateTray = (): void => {
+      const p = chat.peerState()
+      tray?.update({ peerName: settings.peerIp || devPairing ? p.name : null, online: p.presence === 'online', unread, notifications: settings.notifications })
+    }
+    const refreshUnread = (): void => {
+      const n = db.unreadCount(selfId)
+      if (n === unread) return
+      unread = n
+      mainWindow?.setTitle(titleWithUnread(n) + (profile ? ` · ${profile}` : ''))
+      app.setBadgeCount(n) // Linux (Unity/KDE launchers) and macOS; ignored elsewhere
+      if (process.platform === 'win32') mainWindow?.setOverlayIcon(n > 0 ? nativeImage.createFromPath(badgeIcon) : null, n > 0 ? `${n} unread` : '')
+      updateTray()
+    }
+    const scheduleUnread = (): void => {
+      clearTimeout(unreadTimer)
+      unreadTimer = setTimeout(refreshUnread, 100)
+    }
+
+    /** Until we write something, history can still be recovered from the other computer. */
+    let recoverable = true
+    /** Every event for the UI also drives notifications, the unread count and the tray. */
+    const send = (e: HushEvent): void => {
+      mainWindow?.webContents.send(IPC.event, e)
+      if (recoverable && e.type === 'message' && e.message.from === 'me') {
+        recoverable = false
+        void pushPrivacy()
+      }
+      if (e.type === 'message' && e.message.from === 'peer') {
+        notifier.message({ text: e.message.text, hasImage: !!e.message.image })
+        scheduleUnread()
+      } else if (e.type === 'status') {
+        scheduleUnread()
+      } else if (e.type === 'peer') {
+        updateTray()
+      }
+    }
+
+    const net: NetState = { ownIp: detectOwnIp(), port, listening: false, error: null }
+    const link = new PeerLink({
+      selfId,
+      name: settings.displayName,
+      appVersion: app.getVersion(),
+      identity,
+      pinned: pins.getPinned,
+      bindHost: net.ownIp,
+      port,
+      peerHost: peerHostFor(settings),
+      peerPort
+    })
+    const chat = new ChatService(db, link, selfId, send, images, { avatars })
+    recoverable = !chat.hasOwnMessages()
+    const calls = new CallTracker()
+    const pairing = new PairingService(link, identity.publicKey, pins)
+    pairing.on('change', (state) => send({ type: 'pairing', pairing: state }))
+
+    const applyAutostart = (): void => {
+      applyStartAtLogin(settings.startAtLogin, {
+        platform: process.platform,
+        packaged: app.isPackaged,
+        execPath: process.execPath,
+        appImage: process.env.APPIMAGE,
+        configHome: process.env.XDG_CONFIG_HOME || join(app.getPath('home'), '.config'),
+        setLoginItem: (s) => app.setLoginItemSettings(s)
+      })
+    }
+
+    link.on('listening', (listening, error) => {
+      Object.assign(net, { listening, error })
+      send({ type: 'net', net: { ...net } })
+    })
+    link.on('problem', (message) => {
+      net.error = message
+      send({ type: 'net', net: { ...net } })
+    })
+    // Call signaling is relayed to the UI untouched (it holds the WebRTC connection).
+    link.on('frame', (frame) => {
+      if (!isCallSignal(frame)) return
+      const what = calls.fromPeer(frame)
+      send({ type: 'call', signal: frame })
+      if (what === 'incoming') {
+        // Bring a hidden window back so the call can be answered, without stealing focus.
+        if (mainWindow && !mainWindow.isVisible()) mainWindow.showInactive()
+        mainWindow?.flashFrame(true)
+        notifier.incomingCall()
+      } else if (what === 'missed') {
+        notifier.missedCall()
+      }
+    })
+    link.on('up', () => {
+      if (net.error && net.listening) {
+        net.error = null
+        send({ type: 'net', net: { ...net } })
+      }
+    })
+
+    // Tailscale may start (or change address) after Hush does.
+    const refreshOwnIp = (): void => {
+      const ip = detectOwnIp()
+      if (ip === net.ownIp) return
+      net.ownIp = ip
+      link.update({ bindHost: ip })
+      send({ type: 'net', net: { ...net } })
+    }
+    const ipPoll = setInterval(refreshOwnIp, 10_000)
+
+    const applySettings = (next: Settings): Settings => {
       settings = next
-      applyAutostart()
+      db.setSetting('settings', settings)
+      link.update({ name: settings.displayName, peerHost: peerHostFor(settings) })
+      send({ type: 'settings', settings: visible(settings) })
+      updateTray()
+      return visible(settings)
     }
-    if (typeof patch.micId === 'string' && patch.micId.length <= 256) next.micId = patch.micId
-    if (typeof patch.speakerId === 'string' && patch.speakerId.length <= 256) next.speakerId = patch.speakerId
-    if (typeof patch.peerIp === 'string') {
-      const ip = patch.peerIp.trim()
-      if (ip !== '' && !isTailscaleIp(ip)) throw new Error('Not a Tailscale IP')
-      next.peerIp = ip
+
+    function createWindow(): void {
+      mainWindow = new BrowserWindow({
+        width: 1200,
+        height: 780,
+        minWidth: 880,
+        minHeight: 560,
+        show: false,
+        title: titleWithUnread(unread) + (profile ? ` · ${profile}` : ''),
+        backgroundColor: '#0D0B14',
+        autoHideMenuBar: true,
+        icon,
+        webPreferences
+      })
+
+      // Started at login with --hidden: stay in the tray until opened.
+      mainWindow.once('ready-to-show', () => !startHidden && mainWindow?.show())
+      // The window title shows the unread count; don't let the page's <title> replace it.
+      mainWindow.on('page-title-updated', (e) => e.preventDefault())
+      mainWindow.on('focus', () => mainWindow?.flashFrame(false))
+      // The page can't reliably tell whether it's hidden in the tray, so tell it.
+      const reportActive = (): void => {
+        setImmediate(() => mainWindow?.webContents.send(IPC.event, { type: 'window', active: userIsLooking() } satisfies HushEvent))
+      }
+      for (const ev of ['focus', 'blur', 'show', 'hide', 'minimize', 'restore'] as const) mainWindow.on(ev as 'focus', reportActive)
+      // Closing the window keeps Hush running in the tray, so messages and calls still arrive.
+      mainWindow.on('close', (e) => {
+        if (quitting) return
+        e.preventDefault()
+        mainWindow?.hide()
+        if (!db.getSetting<boolean>('trayHintShown')) {
+          db.setSetting('trayHintShown', true)
+          notifier.info('Hush is still running', 'It stays in the tray so messages and calls reach you. Use Quit to close it completely.')
+        }
+      })
+      // Gather WebRTC candidates on every interface, so the Tailscale address is among them.
+      mainWindow.webContents.setWebRTCIPHandlingPolicy('default')
+      mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+
+      loadRenderer(mainWindow)
+      mainWindow.on('closed', () => (mainWindow = null))
     }
-    return applySettings(next)
-  })
 
-  ipcMain.on(IPC.reconnect, () => {
-    refreshOwnIp()
-    link.reconnectNow()
-  })
+    // ---------- IPC (inputs from the renderer are validated here) ----------
 
-  ipcMain.on(IPC.quit, quitApp)
+    ipcMain.handle(IPC.snapshot, async () => ({
+      settings: visible(settings),
+      privacy: await privacyState(),
+      peer: chat.peerState(),
+      net: { ...net },
+      avatars: avatars.urls(),
+      windowActive: userIsLooking(),
+      pairing: pairing.state(),
+      appVersion: app.getVersion(),
+      packaged: app.isPackaged,
+      devPairing
+    }))
 
-  ipcMain.handle(IPC.pairSubmit, (_e, code: unknown) => {
-    if (typeof code === 'string' && code.length <= 32) return pairing.submitCode(code)
-  })
+    ipcMain.handle(IPC.callSignal, (_e, signal: unknown) => {
+      // Same validation as frames from the network.
+      const frame = parseFrame(JSON.stringify(signal ?? null))
+      if (!frame || !isCallSignal(frame)) return false
+      calls.fromUs(frame)
+      return link.send(frame)
+    })
 
-  ipcMain.on(IPC.pairForget, () => pairing.forget())
+    ipcMain.handle(IPC.listMessages, (_e, before?: HistoryCursor, limit?: number) => {
+      const cursor =
+        before && Number.isFinite(before.sentAt) && typeof before.id === 'string' ? { sentAt: before.sentAt, id: before.id } : undefined
+      return chat.listMessages(cursor, Number.isInteger(limit) ? (limit as number) : 100)
+    })
 
-  // ---------- lifecycle ----------
+    ipcMain.handle(IPC.sendMessage, (_e, text: unknown) => {
+      if (typeof text !== 'string' || text.length > MAX_TEXT_LENGTH) throw new Error('Invalid message')
+      return chat.send(text)
+    })
 
-  app.on('second-instance', showWindow)
+    ipcMain.handle(IPC.sendImage, (_e, img: OutgoingImage, caption: unknown) => {
+      if (!(img?.bytes instanceof Uint8Array) || !(img.thumb instanceof Uint8Array) || typeof caption !== 'string') {
+        throw new Error('Invalid image')
+      }
+      return chat.sendImage(img, caption) // validates type, signature, size and preview
+    })
 
-  app.whenReady().then(() => {
-    if (app.isPackaged) Menu.setApplicationMenu(null)
+    ipcMain.handle(IPC.setAvatar, (_e, bytes: unknown) => {
+      if (bytes !== null && !(bytes instanceof Uint8Array)) return false
+      return chat.setAvatar(bytes) // validates signature and size
+    })
 
-    // Microphone (calls), notifications and clipboard writes are the only permissions Hush needs.
-    const allowed = new Set(['media', 'notifications', 'clipboard-sanitized-write'])
-    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(allowed.has(permission)))
+    ipcMain.handle(IPC.listCalls, () => db.listCalls())
+
+    ipcMain.on(IPC.logCall, (_e, record: CallRecord) => {
+      try {
+        db.logCall(record)
+        send({ type: 'call-log', record: db.listCalls().find((c) => c.id === record.id.toLowerCase())! })
+      } catch {
+        // ignore malformed records
+      }
+    })
+
+    ipcMain.on(IPC.retryImage, (_e, id: unknown) => {
+      if (typeof id === 'string') chat.transfers.retry(id)
+    })
+
+    ipcMain.on(IPC.markRead, (_e, ids: unknown) => {
+      if (Array.isArray(ids) && ids.every((id) => typeof id === 'string')) {
+        chat.markRead(ids as string[])
+        scheduleUnread()
+      }
+    })
+
+    ipcMain.on(IPC.setTyping, (_e, on: unknown) => {
+      if (typeof on === 'boolean') chat.setTyping(on)
+    })
+
+    ipcMain.handle(IPC.updateSettings, (_e, patch: Partial<Settings>) => {
+      const next = { ...settings }
+      if (typeof patch.displayName === 'string') next.displayName = patch.displayName.trim().slice(0, 40)
+      if (typeof patch.notifications === 'boolean') next.notifications = patch.notifications
+      if (typeof patch.notificationPreview === 'boolean') next.notificationPreview = patch.notificationPreview
+      if (typeof patch.startAtLogin === 'boolean' && patch.startAtLogin !== settings.startAtLogin) {
+        next.startAtLogin = patch.startAtLogin
+        settings = next
+        applyAutostart()
+      }
+      if (typeof patch.micId === 'string' && patch.micId.length <= 256) next.micId = patch.micId
+      if (typeof patch.speakerId === 'string' && patch.speakerId.length <= 256) next.speakerId = patch.speakerId
+      if (typeof patch.peerIp === 'string') {
+        const ip = patch.peerIp.trim()
+        if (ip !== '' && !isTailscaleIp(ip)) throw new Error('Not a Tailscale IP')
+        next.peerIp = ip
+      }
+      return applySettings(next)
+    })
+
+    ipcMain.on(IPC.reconnect, () => {
+      refreshOwnIp()
+      link.reconnectNow()
+    })
+
+    ipcMain.on(IPC.quit, quitApp)
+
+    ipcMain.handle(IPC.pairSubmit, (_e, code: unknown) => {
+      if (typeof code === 'string' && code.length <= 32) return pairing.submitCode(code)
+    })
+
+    ipcMain.on(IPC.pairForget, () => pairing.forget())
+
+    // ---------- privacy & data: app password, backups, recovery ----------
+
+    const privacyState = async (): Promise<PrivacyState> => ({
+      protection: keyring.mode() === 'password' ? 'password' : 'keychain',
+      osName: keyring.osName(),
+      osAvailable: await keyring.osAvailable(),
+      autoBackup: { ...autoBackup },
+      canRecover: recoverable
+    })
+    async function pushPrivacy(): Promise<void> {
+      send({ type: 'privacy', privacy: await privacyState() })
+    }
+    const okPassword = (p: unknown): p is string => typeof p === 'string' && p.length >= 8 && p.length <= 1024
+
+    ipcMain.handle(IPC.setAppPassword, async (_e, password: unknown) => {
+      if (password === null) await keyring.protect(dataKey)
+      else if (okPassword(password)) await keyring.protect(dataKey, password)
+      else throw new Error('Use at least 8 characters.')
+      void pushPrivacy()
+      return privacyState()
+    })
+
+    const backupSource: BackupSource = { snapshotDb: (path) => db.snapshot(path), dataKey, dir: userData, app: app.getVersion() }
+    const backupFilters = [{ name: 'Hush backup', extensions: ['hushbackup'] }]
+
+    ipcMain.handle(IPC.backupNow, async (_e, password: unknown, attachments: unknown): Promise<BackupResult> => {
+      if (!okPassword(password) || typeof attachments !== 'boolean') return { ok: false, error: 'Use a password of at least 8 characters.' }
+      const docs = app.getPath('documents')
+      const r = await dialog.showSaveDialog(mainWindow!, {
+        title: 'Save Hush backup',
+        defaultPath: join(docs, backupFileName(new Date(), docs)),
+        filters: backupFilters
+      })
+      if (r.canceled || !r.filePath) return { ok: false, cancelled: true }
+      try {
+        const { bytes } = await writeBackup(backupSource, backupKeyFromPassword(password), attachments, r.filePath)
+        return { ok: true, path: r.filePath, bytes }
+      } catch (e) {
+        return { ok: false, error: (e as Error).message }
+      }
+    })
+
+    ipcMain.handle(IPC.restoreBackup, async (_e, password: unknown): Promise<string | null> => {
+      if (typeof password !== 'string' || password === '' || password.length > 1024) return 'Enter the backup password.'
+      const r = await dialog.showOpenDialog(mainWindow!, { title: 'Restore Hush backup', properties: ['openFile'], filters: backupFilters })
+      if (r.canceled || !r.filePaths[0]) return null
+      const staging = join(userData, STAGING)
+      rmSync(staging, { recursive: true, force: true })
+      try {
+        const { dataKey: restoredKey } = extractBackup(r.filePaths[0], password, staging)
+        // Keep this computer's way of protecting the key; with an app password (or no keychain),
+        // the backup password becomes the app password.
+        const usePassword = keyring.mode() === 'password' || !(await keyring.osAvailable())
+        await new Keyring(staging, osProtector).protect(restoredKey, usePassword ? password : undefined)
+        markStagedRestoreReady(userData)
+      } catch (e) {
+        rmSync(staging, { recursive: true, force: true })
+        return (e as Error).message
+      }
+      app.relaunch()
+      quitApp()
+      return null
+    })
+
+    // Weekly automatic backups into a folder, keeping the newest three.
+    const AUTO_KEY = 'autoBackupKey'
+    const WEEK_MS = 7 * 24 * 3600_000
+    let autoBackup: AutoBackup = {
+      enabled: false,
+      folder: join(app.getPath('documents'), 'Hush backups'),
+      attachments: false,
+      last: null,
+      error: null,
+      ...db.getSetting<Partial<AutoBackup>>('autoBackup')
+    }
+    const saveAutoBackup = (patch: Partial<AutoBackup>): void => {
+      autoBackup = { ...autoBackup, ...patch }
+      db.setSetting('autoBackup', autoBackup)
+    }
+    let autoRunning = false
+    const runAutoBackupIfDue = async (): Promise<void> => {
+      if (!autoBackup.enabled || autoRunning || (autoBackup.last && Date.now() - autoBackup.last < WEEK_MS)) return
+      const stored = db.getSecret<{ kdf: Parameters<typeof backupKeyFromPassword>[1]; key: string }>(AUTO_KEY)
+      if (!stored?.kdf) return
+      autoRunning = true
+      try {
+        mkdirSync(autoBackup.folder, { recursive: true })
+        const out = join(autoBackup.folder, backupFileName(new Date(), autoBackup.folder))
+        await writeBackup(backupSource, { kdf: stored.kdf, key: Buffer.from(stored.key, 'base64') }, autoBackup.attachments, out)
+        pruneBackups(autoBackup.folder, 3)
+        saveAutoBackup({ last: Date.now(), error: null })
+      } catch (e) {
+        saveAutoBackup({ error: (e as Error).message }) // retried within the hour
+      } finally {
+        autoRunning = false
+      }
+      void pushPrivacy()
+    }
+    const firstBackupCheck = setTimeout(() => void runAutoBackupIfDue(), 60_000)
+    const backupTimer = setInterval(() => void runAutoBackupIfDue(), 3600_000)
+
+    ipcMain.handle(IPC.setAutoBackup, async (_e, patch: { enabled?: unknown; attachments?: unknown; password?: unknown }) => {
+      if (typeof patch?.enabled !== 'boolean') throw new Error('Invalid')
+      if (patch.password !== undefined) {
+        if (!okPassword(patch.password)) throw new Error('Use a password of at least 8 characters.')
+        const bk = backupKeyFromPassword(patch.password)
+        db.setSecret(AUTO_KEY, { kdf: bk.kdf, key: bk.key.toString('base64') })
+      }
+      if (patch.enabled && !db.getSecret(AUTO_KEY)) throw new Error('Choose a backup password first.')
+      if (!patch.enabled) db.setSetting(AUTO_KEY, null)
+      saveAutoBackup({
+        enabled: patch.enabled,
+        attachments: typeof patch.attachments === 'boolean' ? patch.attachments : autoBackup.attachments,
+        error: null,
+        ...(patch.password !== undefined ? { last: null } : {}) // new password: make a fresh backup soon
+      })
+      void runAutoBackupIfDue()
+      return privacyState()
+    })
+
+    ipcMain.handle(IPC.chooseBackupFolder, async () => {
+      const r = await dialog.showOpenDialog(mainWindow!, {
+        title: 'Folder for automatic backups',
+        defaultPath: autoBackup.folder,
+        properties: ['openDirectory', 'createDirectory']
+      })
+      if (!r.canceled && r.filePaths[0]) saveAutoBackup({ folder: r.filePaths[0], last: null, error: null })
+      void runAutoBackupIfDue()
+      return privacyState()
+    })
+
+    ipcMain.handle(IPC.recoverHistory, async (): Promise<string | null> => {
+      const name = chat.peerState().name ?? 'The other person'
+      if (chat.hasOwnMessages()) return 'You already wrote on this computer, so history can’t be recovered here any more.'
+      if (!link.peer) return `${name} needs to be online.`
+      const previous = await chat.askPreviousId()
+      if (!previous) return `${name}’s Hush has no earlier history of yours (or needs an update).`
+      // Become the old device again: restart so every part of Hush uses the old id.
+      db.setSetting('selfId', previous.id)
+      db.setSetting(`seqFloor:${previous.id}`, previous.seq)
+      app.relaunch()
+      quitApp()
+      return null
+    })
+
+    // ---------- start ----------
 
     protocol.handle('hush-img', (req) => {
       const url = new URL(req.url)
       const host = url.hostname
       const kind = url.pathname.slice(1)
-      const file = host === 'avatar' ? avatars.resolve(kind) : images.resolve(host, kind, db.getMessage(host)?.image ?? null)
-      return file ? electronNet.fetch(pathToFileURL(file).toString()) : new Response('Not found', { status: 404 })
+      const meta = host === 'avatar' ? null : (db.getMessage(host)?.image ?? null)
+      const bytes = host === 'avatar' ? avatars.readForDisplay(kind) : images.readForDisplay(host, kind, meta)
+      if (!bytes) return new Response('Not found', { status: 404 })
+      const type = kind === 'thumb' ? 'image/webp' : (meta?.mime ?? sniffImage(bytes) ?? 'application/octet-stream')
+      return new Response(new Uint8Array(bytes), { headers: { 'content-type': type } })
     })
 
     tray = new HushTray(
@@ -430,6 +741,40 @@ if (!app.requestSingleInstanceLock()) {
     refreshUnread()
     updateTray()
     app.on('activate', showWindow)
+
+    core = {
+      showWindow,
+      async shutdown() {
+        clearInterval(ipPoll)
+        clearInterval(backupTimer)
+        clearTimeout(firstBackupCheck)
+        for (const id of calls.openCalls()) await link.send({ t: 'call-end', id, reason: 'hangup' })
+        await link.stop()
+      },
+      close() {
+        tray?.destroy()
+        db.close()
+      }
+    }
+
+  }
+
+  // ---------- lifecycle ----------
+
+  app.on('second-instance', () => (core ? core.showWindow() : lockWindow?.focus()))
+
+  app.whenReady().then(async () => {
+    if (app.isPackaged) Menu.setApplicationMenu(null)
+
+    // Microphone (calls), notifications and clipboard writes are the only permissions Hush needs.
+    const allowed = new Set(['media', 'notifications', 'clipboard-sanitized-write'])
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(allowed.has(permission)))
+
+    const restored = applyStagedRestore(userData) // a restore chosen last time is swapped in before anything opens
+    const keyring = new Keyring(userData, osProtector)
+    const key = await obtainKey(keyring)
+    startCore(key, keyring, restored)
+    lockWindow?.destroy()
   })
 
   // Real quit (power button, tray "Quit Hush", Ctrl+Q, or the OS shutting down):
@@ -437,17 +782,12 @@ if (!app.requestSingleInstanceLock()) {
   let shuttingDown = false
   app.on('before-quit', (e) => {
     quitting = true
-    if (shuttingDown) return
+    if (shuttingDown || !core) return // still locked: nothing to close
     shuttingDown = true
     e.preventDefault()
-    clearInterval(ipPoll)
-    const cleanup = (async () => {
-      for (const id of calls.openCalls()) await link.send({ t: 'call-end', id, reason: 'hangup' })
-      await link.stop()
-    })().catch(() => {})
-    void Promise.race([cleanup, new Promise((r) => setTimeout(r, 1000))]).finally(() => {
-      tray?.destroy()
-      db.close()
+    const c = core
+    void Promise.race([c.shutdown().catch(() => {}), new Promise((r) => setTimeout(r, 1000))]).finally(() => {
+      c.close()
       app.exit(0)
     })
   })

@@ -147,6 +147,7 @@ export default function App(): ReactNode {
           net={snapshot.net}
           peer={peer}
           pairing={snapshot.pairing}
+          privacy={snapshot.privacy}
           packaged={snapshot.packaged}
           onChange={hush.updateSettings}
           onReconnect={() => window.hush.reconnect()}
@@ -228,8 +229,14 @@ export default function App(): ReactNode {
             )}
             <Composer
               peerName={peer?.name ?? ''}
-              disabled={!peer || snapshot.pairing.status !== 'paired'}
-              disabledHint={!peer ? 'Link someone in settings to start chatting' : 'Pair first — exchange the codes above'}
+              disabled={!peer || snapshot.pairing.status !== 'paired' || snapshot.peer.catchingUp}
+              disabledHint={
+                !peer
+                  ? 'Link someone in settings to start chatting'
+                  : snapshot.pairing.status !== 'paired'
+                    ? 'Pair first — exchange the codes above'
+                    : `Backup restored — you can write once ${peer.name} is online and Hush has caught up`
+              }
               onSend={hush.send}
               onSendImage={hush.sendImage}
               onTyping={(on) => window.hush.setTyping(on)}

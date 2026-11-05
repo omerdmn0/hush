@@ -1,10 +1,9 @@
-import { createServer } from 'node:net'
 import { randomUUID } from 'node:crypto'
-import { once } from 'node:events'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Identity } from './identity'
 import { PeerLink } from './link'
 import { CODE_TTL_MS, MAX_ATTEMPTS, PairingService } from './pairing'
+import { freePort } from './testPorts'
 
 const HOST = '127.0.0.1'
 const cleanups: (() => Promise<void> | void)[] = []
@@ -12,14 +11,6 @@ afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c()
 })
 
-async function freePort(): Promise<number> {
-  const srv = createServer()
-  srv.listen(0, HOST)
-  await once(srv, 'listening')
-  const port = (srv.address() as { port: number }).port
-  await new Promise((r) => srv.close(r))
-  return port
-}
 
 const until = async (cond: () => boolean, ms = 5000): Promise<void> => {
   const end = Date.now() + ms

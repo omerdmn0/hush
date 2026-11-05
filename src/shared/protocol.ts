@@ -34,7 +34,7 @@ export const PROTOCOL_VERSION = 6
 /** Oldest protocol this app still talks to. */
 export const MIN_PROTOCOL = 6
 /** Features this app supports (announced in hello). */
-export const FEATURES = ['images', 'calls', 'avatars', 'events'] as const
+export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover'] as const
 /** Message kinds that act on another message (they carry `ref`). */
 export const EVENT_KINDS = ['edit', 'delete', 'react'] as const
 const MAX_EVENT_DATA = 2_000
@@ -121,6 +121,10 @@ export type Frame =
   /** "I have read `author`'s messages up to seq `upTo`" → sender marks them read. */
   | { t: 'read'; author: string; upTo: number }
   | { t: 'typing'; on: boolean }
+  /** A fresh install asks for its previous device id, to take over its old history. */
+  | { t: 'recover-req' }
+  /** The answer: the id we knew before (null if none) and its highest sequence number. */
+  | { t: 'recover'; id: string | null; seq: number }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -313,6 +317,10 @@ function parseRaw(raw: string): Frame | null {
       return isUuid(f.author) && isSeq(f.upTo, 0) ? { t: 'read', author: f.author, upTo: f.upTo } : null
     case 'typing':
       return typeof f.on === 'boolean' ? { t: 'typing', on: f.on } : null
+    case 'recover-req':
+      return { t: 'recover-req' }
+    case 'recover':
+      return (f.id === null || isUuid(f.id)) && isSeq(f.seq, 0) ? { t: 'recover', id: f.id, seq: f.seq } : null
     default:
       return null
   }

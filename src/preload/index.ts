@@ -19,6 +19,14 @@ const api: HushApi = {
   setTyping: (on) => ipcRenderer.send(IPC.setTyping, on),
   updateSettings: (patch) => ipcRenderer.invoke(IPC.updateSettings, patch),
   reconnect: () => ipcRenderer.send(IPC.reconnect),
+  lockInfo: () => ipcRenderer.invoke(IPC.lockInfo),
+  lockSubmit: (password) => ipcRenderer.invoke(IPC.lockSubmit, password),
+  setAppPassword: (password) => ipcRenderer.invoke(IPC.setAppPassword, password),
+  backupNow: (password, attachments) => ipcRenderer.invoke(IPC.backupNow, password, attachments),
+  restoreBackup: (password) => ipcRenderer.invoke(IPC.restoreBackup, password),
+  setAutoBackup: (patch) => ipcRenderer.invoke(IPC.setAutoBackup, patch),
+  chooseBackupFolder: () => ipcRenderer.invoke(IPC.chooseBackupFolder),
+  recoverHistory: () => ipcRenderer.invoke(IPC.recoverHistory),
   onEvent: (listener) => {
     const handler = (_e: IpcRendererEvent, event: HushEvent): void => listener(event)
     ipcRenderer.on(IPC.event, handler)

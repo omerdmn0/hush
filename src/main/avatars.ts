@@ -1,16 +1,20 @@
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { MAX_AVATAR_BYTES, sniffImage } from '../shared/protocol'
 import type { AvatarUrls } from '../shared/types'
+import { isEncryptedFile, readEncryptedFile, writeEncryptedFile } from './vault'
 
 const PICTURE = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
-/** Profile pictures: ours (sent to the peer) and theirs (received). Fixed file names. */
+/** Profile pictures: ours (sent to the peer) and theirs (received). Fixed file names, encrypted. */
 export class Avatars {
   private readonly self: string
   private readonly peer: string
 
-  constructor(dir: string) {
+  constructor(
+    dir: string,
+    private readonly key: Buffer
+  ) {
     this.self = join(dir, 'avatar-self.img')
     this.peer = join(dir, 'avatar-peer.img')
   }
@@ -22,7 +26,7 @@ export class Avatars {
       return true
     }
     if (bytes.length === 0 || bytes.length > MAX_AVATAR_BYTES || !PICTURE.has(sniffImage(bytes) ?? '')) return false
-    writeFileSync(file, bytes)
+    writeEncryptedFile(this.key, file, bytes)
     return true
   }
 
@@ -35,7 +39,7 @@ export class Avatars {
   }
 
   selfBase64(): string | null {
-    return existsSync(this.self) ? readFileSync(this.self).toString('base64') : null
+    return existsSync(this.self) ? readEncryptedFile(this.key, this.self).toString('base64') : null
   }
 
   /** hush-img:// URLs with a version, so the UI reloads a changed picture. */
@@ -45,9 +49,28 @@ export class Avatars {
     return { self: url(this.self, 'self'), peer: url(this.peer, 'peer') }
   }
 
-  /** For the hush-img:// handler. */
-  resolve(kind: string): string | null {
+  /** For the hush-img:// handler: the decrypted picture, or null. */
+  readForDisplay(kind: string): Buffer | null {
     const file = kind === 'self' ? this.self : kind === 'peer' ? this.peer : null
-    return file && existsSync(file) ? file : null
+    if (!file || !existsSync(file)) return null
+    try {
+      return readEncryptedFile(this.key, file)
+    } catch {
+      return null
+    }
+  }
+
+  /** Whether a picture is stored (for tests). */
+  has(kind: 'self' | 'peer'): boolean {
+    return existsSync(kind === 'self' ? this.self : this.peer)
+  }
+
+  /** One-time upgrade of pictures stored before encryption existed. */
+  encryptExisting(): void {
+    for (const file of [this.self, this.peer]) {
+      if (!existsSync(file) || isEncryptedFile(readFileSync(file).subarray(0, 8))) continue
+      writeEncryptedFile(this.key, file + '.tmp', readFileSync(file))
+      renameSync(file + '.tmp', file)
+    }
   }
 }

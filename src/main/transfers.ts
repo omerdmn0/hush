@@ -32,7 +32,6 @@ export class Transfers {
     private readonly db: HushDb,
     private readonly store: ImageStore,
     private readonly link: PeerLink,
-    private readonly selfId: string,
     private readonly emit: (e: HushEvent) => void,
     private readonly chunkBytes: number = CHUNK_BYTES
   ) {
@@ -41,10 +40,13 @@ export class Transfers {
 
   // ---------- receiving ----------
 
-  /** Queue an image for download (no-op if we have it or it's already queued). */
+  /**
+   * Queue an image for download (no-op if we have it or it's already queued). Normally these
+   * are the peer's images; after recovering history from the peer, our own ones too.
+   */
   want(id: string): void {
     const m = this.db.getMessage(id)
-    if (!m?.image || m.authorId === this.selfId || this.store.hasFull(id, m.image)) return
+    if (!m?.image || this.store.hasFull(id, m.image)) return
     if (this.current === id || this.queue.includes(id)) return
     this.queue.push(id)
     this.pump()
@@ -63,7 +65,7 @@ export class Transfers {
    */
   onUp(): void {
     if (this.current) this.request(this.current)
-    for (const { id } of this.db.imageMessagesFromOthers(this.selfId)) {
+    for (const { id } of this.db.imageMessages()) {
       if ((this.attempts.get(id) ?? 0) < MAX_ATTEMPTS) this.want(id)
     }
     this.pump()
@@ -153,7 +155,8 @@ export class Transfers {
 
   private async serve(id: string, offset: number): Promise<void> {
     const m = this.db.getMessage(id)
-    if (!m?.image || m.authorId !== this.selfId || !this.store.hasFull(id, m.image) || offset > m.image.size) {
+    // Any image we hold in full: ours, or theirs when they recover their history from us.
+    if (!m?.image || !this.store.hasFull(id, m.image) || offset > m.image.size) {
       await this.link.send({ t: 'blob-err', id })
       return
     }

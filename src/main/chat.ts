@@ -25,6 +25,9 @@ const PREVIEW_TYPES = new Set<string>(['image/webp', 'image/jpeg', 'image/png'])
  * connection the peer's `sync` frame says which of our messages it already holds; everything
  * after that is re-sent, acked, and moves to `delivered`.
  */
+/** Setting: a backup was restored and the peer hasn't synced with us since. */
+export const AWAITING_SYNC = 'awaitingSync'
+
 export class ChatService {
   private ackQueue: string[] = []
   private ackTimer: ReturnType<typeof setTimeout> | undefined
@@ -44,7 +47,7 @@ export class ChatService {
     opts: { chunkBytes?: number; avatars?: Avatars } = {}
   ) {
     this.avatars = opts.avatars ?? null
-    this.transfers = new Transfers(db, store, link, selfId, emit, opts.chunkBytes)
+    this.transfers = new Transfers(db, store, link, emit, opts.chunkBytes)
     link.on('up', (peer) => this.onUp(peer))
     link.on('down', () => this.onDown())
     link.on('frame', (frame, peer) => void this.onFrame(frame, peer))
@@ -55,8 +58,14 @@ export class ChatService {
       name: this.db.getSetting<string>('peerName') ?? null,
       presence: this.link.peer ? 'online' : 'offline',
       lastSeen: this.db.getSetting<number>('peerLastSeen') ?? null,
-      appVersion: this.db.getSetting<string>('peerApp') ?? null
+      appVersion: this.db.getSetting<string>('peerApp') ?? null,
+      catchingUp: !!this.db.getSetting<boolean>(AWAITING_SYNC)
     }
+  }
+
+  /** After a restore, nothing new is written until the peer has told us what it holds. */
+  private assertCanWrite(): void {
+    if (this.db.getSetting<boolean>(AWAITING_SYNC)) throw new Error('Catching up with the other computer first')
   }
 
   listMessages(before: HistoryCursor | undefined, limit: number): { messages: ChatMessage[]; hasMore: boolean } {
@@ -66,6 +75,7 @@ export class ChatService {
 
   /** Validates an image prepared by the UI, stores it, and sends it like a message. */
   async sendImage(img: OutgoingImage, caption: string): Promise<ChatMessage> {
+    this.assertCanWrite()
     const body = caption.trim()
     const mime = img.mime as ImageMime
     const valid =
@@ -91,6 +101,7 @@ export class ChatService {
   }
 
   async send(text: string): Promise<ChatMessage> {
+    this.assertCanWrite()
     const body = text.trim()
     if (!body || body.length > MAX_TEXT_LENGTH) throw new Error('Message is empty or too long')
     const stored = this.db.createOwnMessage(this.selfId, body, Date.now())
@@ -150,8 +161,10 @@ export class ChatService {
   private async onFrame(frame: Frame, peer: LinkPeer): Promise<void> {
     switch (frame.t) {
       case 'msg': {
-        // On a direct link the author must be the connected peer.
-        if (frame.author !== peer.id) return
+        // On a direct link the author must be the connected peer — or us, when the peer sends
+        // back our own messages after we recovered our history from it.
+        const own = frame.author === this.selfId
+        if (frame.author !== peer.id && !own) return
         let image: ImageMeta | null = null
         if (frame.image) {
           const { thumb, ...meta } = frame.image
@@ -180,17 +193,25 @@ export class ChatService {
           if (stored.ref) {
             this.emit({ type: 'event', target: stored.ref })
           } else {
-            this.emit({ type: 'typing', on: false })
+            if (!own) this.emit({ type: 'typing', on: false })
             this.emit({ type: 'message', message: this.toChat(stored) })
             if (image) this.transfers.want(stored.id)
           }
         }
         // Always ack, even duplicates — the sender may have missed the first ack.
-        this.queueAck(frame.id)
+        if (!own) this.queueAck(frame.id)
         break
       }
       case 'sync':
-        await this.onSync(frame)
+        await this.onSync(frame, peer)
+        break
+      case 'recover-req': {
+        const id = this.db.getSetting<string>('previousPeerId') ?? null
+        void this.link.send({ t: 'recover', id, seq: id ? this.db.maxSeq(id) : 0 })
+        break
+      }
+      case 'recover':
+        this.recoverWaiter?.(frame)
         break
       case 'blob-req':
       case 'blob-err':
@@ -219,28 +240,71 @@ export class ChatService {
     }
   }
 
-  /** The peer told us what it holds and has read; catch up statuses and send what it lacks. */
-  private async onSync(frame: Extract<Frame, { t: 'sync' }>): Promise<void> {
+  /**
+   * The peer told us what it holds and has read; catch up statuses and send what it lacks —
+   * our messages, and its own ones it no longer has (after it recovered its history from us).
+   */
+  private async onSync(frame: Extract<Frame, { t: 'sync' }>, peer: LinkPeer): Promise<void> {
     const theyHave = frame.have[this.selfId] ?? 0
+    // They hold more of our messages than we do (we restored an older backup): number new ones
+    // after theirs — the missing ones come back below, through their own sync.
+    const floorKey = `seqFloor:${this.selfId}`
+    if (theyHave > Math.max(this.db.maxSeq(this.selfId), this.db.getSetting<number>(floorKey) ?? 0)) this.db.setSetting(floorKey, theyHave)
+    if (this.db.getSetting<boolean>(AWAITING_SYNC)) {
+      this.db.setSetting(AWAITING_SYNC, null)
+      this.emit({ type: 'peer', peer: this.peerState() })
+    }
     this.applyChanges(this.db.advanceUpTo(this.selfId, theyHave, 'delivered'), 'delivered')
     this.applyChanges(this.db.advanceUpTo(this.selfId, frame.read[this.selfId] ?? 0, 'read'), 'read')
 
-    let after = theyHave
+    if (!(await this.sendAfter(this.selfId, theyHave, true))) return
+    const theirOwn = frame.have[peer.id] ?? 0
+    if (this.db.contiguousSeq(peer.id) > theirOwn) await this.sendAfter(peer.id, theirOwn, false)
+  }
+
+  /** Sends `author`'s messages after a sequence number, in pages. False if the link dropped. */
+  private async sendAfter(author: string, after: number, mine: boolean): Promise<boolean> {
     for (;;) {
-      const page = this.db.messagesAfter(this.selfId, after, SYNC_PAGE)
-      if (page.length === 0) break
+      const page = this.db.messagesAfter(author, after, SYNC_PAGE)
+      if (page.length === 0) return true
       for (const m of page) {
-        if (!(await this.link.send(this.msgFrame(m)))) return // connection dropped; next sync resumes
-        this.advanceMine([m.id], 'sent')
+        if (!(await this.link.send(this.msgFrame(m)))) return false // next sync resumes
+        if (mine) this.advanceMine([m.id], 'sent')
         after = m.seq!
       }
     }
   }
 
+  private recoverWaiter: ((f: Extract<Frame, { t: 'recover' }>) => void) | null = null
+
+  /** Whether this install has written anything yet (recovery is only offered before that). */
+  hasOwnMessages(): boolean {
+    return this.db.maxSeq(this.selfId) > 0
+  }
+
+  /**
+   * Asks the paired app for the device id it knew us by before a reinstall. Resolves with that
+   * id and its last sequence number, or null if it has none (or doesn't answer in 10 s).
+   */
+  async askPreviousId(): Promise<{ id: string; seq: number } | null> {
+    if (!this.link.peer?.features.includes('recover')) return null
+    const answer = new Promise<Extract<Frame, { t: 'recover' }> | null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), 10_000)
+      this.recoverWaiter = (f) => {
+        clearTimeout(timer)
+        resolve(f)
+      }
+    })
+    if (!(await this.link.send({ t: 'recover-req' }))) return null
+    const f = await answer
+    this.recoverWaiter = null
+    return f?.id && f.id !== this.selfId ? { id: f.id, seq: f.seq } : null
+  }
+
   // ---------- helpers ----------
 
   private msgFrame(m: StoredMessage): Frame {
-    const frame: Extract<Frame, { t: 'msg' }> = { t: 'msg', id: m.id, author: this.selfId, seq: m.seq!, body: m.body, sentAt: m.sentAt }
+    const frame: Extract<Frame, { t: 'msg' }> = { t: 'msg', id: m.id, author: m.authorId, seq: m.seq!, body: m.body, sentAt: m.sentAt }
     if (m.image) frame.image = { ...m.image, thumb: this.store.readThumbBase64(m.id) }
     if (m.kind && m.kind !== 'message') frame.kind = m.kind
     if (m.ref) frame.ref = m.ref
@@ -253,6 +317,7 @@ export class ChatService {
    * waits in the queue while the other app is offline and goes out with the next sync.
    */
   async sendEvent(kind: 'edit' | 'delete' | 'react', ref: string, data: string | null): Promise<StoredMessage> {
+    this.assertCanWrite()
     const stored = this.db.createOwnMessage(this.selfId, '', Date.now(), null, undefined, { kind, ref, data })
     this.emit({ type: 'event', target: ref })
     if (await this.link.send(this.msgFrame(stored))) this.advanceMine([stored.id], 'sent')
@@ -295,6 +360,11 @@ export class ChatService {
   }
 
   private rememberPeer(peer: LinkPeer): void {
+    // The other app came back with a new device id (reinstalled): remember the old one, so it
+    // can take its history back (askPreviousId on its side).
+    const before = this.db.getSetting<string>('peerId')
+    if (before && before !== peer.id && this.db.maxSeq(before) > 0) this.db.setSetting('previousPeerId', before)
+    if (this.db.getSetting<string>('previousPeerId') === peer.id) this.db.setSetting('previousPeerId', null)
     this.db.setSetting('peerId', peer.id)
     this.db.setSetting('peerName', peer.name)
     this.db.setSetting('peerApp', peer.app)

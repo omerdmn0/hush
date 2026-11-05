@@ -1,20 +1,20 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:net'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
-import { once } from 'node:events'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Frame } from '../shared/protocol'
 import type { HushEvent } from '../shared/types'
-import { ChatService } from './chat'
+import { AWAITING_SYNC, ChatService } from './chat'
 import { HushDb } from './db'
 import { ImageStore } from './images'
 import { Avatars } from './avatars'
 import { Identity } from './identity'
+import { fieldCipher, newDataKey, readEncryptedFile, writeEncryptedFile } from './vault'
 import { PeerLink } from './link'
+import { freePort } from './testPorts'
 
 const HOST = '127.0.0.1'
 const cleanups: (() => Promise<void> | void)[] = []
@@ -22,14 +22,6 @@ afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c()
 })
 
-async function freePort(): Promise<number> {
-  const srv = createServer()
-  srv.listen(0, HOST)
-  await once(srv, 'listening')
-  const port = (srv.address() as { port: number }).port
-  await new Promise((r) => srv.close(r))
-  return port
-}
 
 /** One "computer": a database that survives while the app (link + chat service) restarts. */
 class Side {
@@ -40,20 +32,23 @@ class Side {
   link!: PeerLink
   chat!: ChatService
   readonly identity = new Identity(Identity.generate())
+  /** Everything at rest is encrypted, as in the real app. */
+  readonly key = newDataKey()
   /** Paired peer key (set by `sides()`). */
   peerKey: string | null = null
 
   constructor(
     readonly name: string,
-    readonly id: string,
+    /** Changes only when a reinstalled app takes over its old id (history recovery). */
+    public id: string,
     private readonly port: number,
     private readonly peerPort: number,
     file?: string
   ) {
     const dir = mkdtempSync(join(tmpdir(), `hush-chat-${name}-`))
-    this.db = new HushDb(file ?? join(dir, 'hush.db'))
-    this.store = new ImageStore(join(dir, 'images'))
-    this.avatars = new Avatars(dir)
+    this.db = new HushDb(file ?? join(dir, 'hush.db'), fieldCipher(this.key))
+    this.store = new ImageStore(join(dir, 'images'), this.key)
+    this.avatars = new Avatars(dir, this.key)
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
     cleanups.push(() => this.db.close())
   }
@@ -329,7 +324,8 @@ describe('ChatService — images', () => {
     expect(existsSync(b.store.thumbPath(m.id))).toBe(true)
     expect(b.db.getMessage(m.id)?.body).toBe('look at this')
     await until(() => transfer(b, m.id, 'done'), 10_000)
-    expect(Buffer.compare(readFileSync(fullFile(b, m.id)), Buffer.from(bytes))).toBe(0)
+    expect(Buffer.compare(readEncryptedFile(b.key, fullFile(b, m.id)), Buffer.from(bytes))).toBe(0)
+    expect(readFileSync(fullFile(b, m.id)).includes(Buffer.from(bytes).subarray(100, 140))).toBe(false) // encrypted on disk
     expect(transfer(a, m.id, 'done')).toBe(true) // sender saw its upload finish
   })
 
@@ -359,7 +355,7 @@ describe('ChatService — images', () => {
 
     b.start()
     await until(() => transfer(b, m.id, 'done') && existsSync(fullFile(b, m.id)), 15_000)
-    expect(Buffer.compare(readFileSync(fullFile(b, m.id)), Buffer.from(bytes))).toBe(0)
+    expect(Buffer.compare(readEncryptedFile(b.key, fullFile(b, m.id)), Buffer.from(bytes))).toBe(0)
   })
 
   it('rejects a corrupted transfer after a few attempts and reports it as failed', async () => {
@@ -370,24 +366,23 @@ describe('ChatService — images', () => {
     // The sender's file changes after sending, so its SHA-256 no longer matches.
     const tampered = Buffer.from(bytes)
     tampered[tampered.length - 20] ^= 0xff
-    writeFileSync(fullFile(a, m.id), tampered)
+    writeEncryptedFile(a.key, fullFile(a, m.id), tampered)
     b.start()
     await until(() => transfer(b, m.id, 'failed'), 10_000)
     expect(existsSync(fullFile(b, m.id))).toBe(false)
     expect(b.store.partSize(m.id)).toBe(0)
   })
 
-  it('only serves images it wrote itself', async () => {
+  it('only serves images it holds in full', async () => {
     const [a, b] = await sides()
     a.start()
     b.start()
     await online(a, b)
-    const m = await a.chat.sendImage(outgoing(png(32, 24)), '')
-    await until(() => transfer(b, m.id, 'done'))
     const replies: Frame[] = []
     a.link.on('frame', (f) => replies.push(f))
-    await a.link.send({ t: 'blob-req', id: m.id, offset: 0 }) // B holds it, but it's A's image
-    await until(() => replies.some((f) => f.t === 'blob-err' && f.id === m.id))
+    const unknown = randomUUID()
+    await a.link.send({ t: 'blob-req', id: unknown, offset: 0 })
+    await until(() => replies.some((f) => f.t === 'blob-err' && f.id === unknown))
   })
 
   it('refuses files that are not really images', async () => {
@@ -407,12 +402,12 @@ describe('ChatService — avatars', () => {
     expect(a.chat.setAvatar(pic)).toBe(true) // set while offline: goes out on connect
     expect(a.chat.setAvatar(new TextEncoder().encode('<svg/>'))).toBe(false)
     b.start()
-    await until(() => b.avatars.resolve('peer') !== null)
-    expect(Buffer.compare(readFileSync(b.avatars.resolve('peer')!), Buffer.from(pic))).toBe(0)
+    await until(() => b.avatars.has('peer'))
+    expect(Buffer.compare(b.avatars.readForDisplay('peer')!, Buffer.from(pic))).toBe(0)
     expect(b.avatars.urls().peer).toMatch(/^hush-img:\/\/avatar\/peer\?v=\d+$/)
 
     a.chat.setAvatar(null)
-    await until(() => b.avatars.resolve('peer') === null)
+    await until(() => !b.avatars.has('peer'))
     expect(b.events.filter((e) => e.type === 'avatars').length).toBeGreaterThanOrEqual(2)
   })
 })
@@ -448,5 +443,91 @@ describe('ChatService — events', () => {
     await until(() => a.db.getMessage(id) !== undefined)
     const shown = a.events.find((e) => e.type === 'message' && e.message.id === id)
     expect(shown?.type === 'message' && shown.message.unsupported).toBe(true)
+  })
+})
+
+describe('ChatService — recovering history after a reinstall', () => {
+  it('gives a fresh install its old id, then sends back its own messages and images', async () => {
+    const [pa, pb] = [await freePort(), await freePort()]
+    const bobId = randomUUID()
+    const [a, b] = pairUp(new Side('Alice', randomUUID(), pa, pb), new Side('Bob', bobId, pb, pa))
+    a.start()
+    b.start()
+    await online(a, b)
+    await b.chat.send('bob one')
+    await a.chat.send('alice one')
+    const img = await b.chat.sendImage(outgoing(png(40, 30, true)), 'bob picture')
+    await b.chat.send('bob two')
+    await until(() => a.count() === 4 && transfer(a, img.id, 'done'), 10_000)
+    await b.stop()
+
+    // Bob reinstalls: new device id, new identity, empty database. They pair again.
+    const fresh = new Side('Bob', randomUUID(), pb, pa)
+    pairUp(a, fresh)
+    fresh.start()
+    await online(a, fresh)
+    await until(() => fresh.count() === 1) // Alice's own message comes over by itself
+    expect(fresh.chat.hasOwnMessages()).toBe(false)
+
+    const prev = await fresh.chat.askPreviousId()
+    expect(prev).toEqual({ id: bobId, seq: 3 })
+
+    // Take over the old id (the app restarts to do this).
+    await fresh.stop()
+    fresh.id = prev!.id
+    fresh.db.setSetting(`seqFloor:${prev!.id}`, prev!.seq)
+    fresh.start()
+    await online(a, fresh)
+    await until(() => fresh.count() === 4 && existsSync(fullFile(fresh, img.id)), 10_000)
+    const mine = fresh.chat
+      .listMessages(undefined, 50)
+      .messages.filter((m) => m.from === 'me')
+      .map((m) => m.text)
+      .sort() // sent within the same millisecond, so their display order isn't fixed
+    expect(mine).toEqual(['bob one', 'bob picture', 'bob two'])
+    expect(readEncryptedFile(fresh.key, fullFile(fresh, img.id)).equals(readEncryptedFile(a.key, fullFile(a, img.id)))).toBe(true)
+
+    // New messages continue the old numbering, so nothing collides at Alice's end.
+    const next = await fresh.chat.send('bob three')
+    expect(fresh.db.getMessage(next.id)?.seq).toBe(4)
+    await until(() => a.db.getMessage(next.id) !== undefined)
+    expect(a.db.getSetting('previousPeerId')).toBeNull()
+  })
+
+  it('has nothing to recover when the peer never saw another id', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    expect(await b.chat.askPreviousId()).toBeNull()
+  })
+})
+
+describe('ChatService — after restoring an older backup', () => {
+  it('waits for the peer, gets the lost messages back and numbers new ones after them', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const lost = []
+    for (const t of ['one', 'two', 'three']) lost.push(await a.chat.send(t))
+    await until(() => b.count() === 3)
+    await a.stop()
+    await until(() => b.link.peer === null)
+
+    // A restores a backup made after "one": "two" and "three" are gone locally.
+    a.sql('DELETE FROM messages WHERE id IN (?, ?)', lost[1].id, lost[2].id)
+    a.db.setSetting(AWAITING_SYNC, true)
+    a.start()
+    expect(a.chat.peerState().catchingUp).toBe(true)
+    await expect(a.chat.send('too early')).rejects.toThrow(/Catching up/)
+
+    await online(a, b)
+    await until(() => a.count() === 3 && !a.chat.peerState().catchingUp)
+    expect(a.db.getMessage(lost[2].id)?.body).toBe('three')
+    const next = await a.chat.send('four')
+    expect(a.db.getMessage(next.id)?.seq).toBe(4)
+    await until(() => b.db.getMessage(next.id) !== undefined)
+    expect(b.count()).toBe(4)
   })
 })

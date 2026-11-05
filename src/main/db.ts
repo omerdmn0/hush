@@ -3,6 +3,7 @@ import Database from 'better-sqlite3'
 import type { ImageMeta } from '../shared/protocol'
 import { CALL_OUTCOMES, type CallRecord, type ChatImage, type ChatMessage, type HistoryCursor, type MessageStatus } from '../shared/types'
 import { isUuid } from '../shared/protocol'
+import { isSealedField, plainFields, type FieldCipher } from './vault'
 
 /**
  * A message as stored. `authorId` is a stable install id, not "me"/"peer".
@@ -113,13 +114,24 @@ interface Row {
 export class HushDb {
   private db: Database.Database
 
-  constructor(file: string) {
+  /** `cipher` encrypts message text and event data at rest (plain only in tests). */
+  constructor(
+    file: string,
+    private readonly cipher: FieldCipher = plainFields
+  ) {
     this.db = new Database(file)
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
+    // Deleted rows are overwritten, so removed text doesn't linger in free pages.
+    this.db.pragma('secure_delete = ON')
     this.migrate()
     // A call still "ongoing" means Hush quit mid-call; close it off.
     this.db.exec(`UPDATE calls SET outcome = CASE WHEN connected_at IS NOT NULL THEN 'completed' ELSE 'failed' END WHERE outcome = 'ongoing'`)
+  }
+
+  /** A consistent copy of the database (for backups), safe while Hush keeps running. */
+  async snapshot(path: string): Promise<void> {
+    await this.db.backup(path)
   }
 
   close(): void {
@@ -147,6 +159,45 @@ export class HushDb {
     return row ? (JSON.parse(row.value) as T) : undefined
   }
 
+  /** A setting that is encrypted at rest (e.g. the identity private key). */
+  getSecret<T>(key: string): T | undefined {
+    const sealed = this.getSetting<string | null>(key)
+    return sealed == null ? undefined : (JSON.parse(this.cipher.open(sealed)) as T)
+  }
+
+  setSecret(key: string, value: unknown): void {
+    this.setSetting(key, this.cipher.seal(JSON.stringify(value)))
+  }
+
+  /**
+   * One-time upgrade after encryption was turned on: seals message text / event data and the
+   * listed secret settings that are still stored in plain text. Returns how many rows changed.
+   */
+  encryptExisting(secretKeys: string[]): number {
+    let n = 0
+    this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT id, body, data FROM messages`).all() as { id: string; body: string; data: string | null }[]
+      const upd = this.db.prepare('UPDATE messages SET body = ?, data = ? WHERE id = ?')
+      for (const r of rows) {
+        const needBody = r.body !== '' && !isSealedField(r.body)
+        const needData = r.data !== null && r.data !== '' && !isSealedField(r.data)
+        if (!needBody && !needData) continue
+        upd.run(needBody ? this.cipher.seal(r.body) : r.body, needData ? this.cipher.seal(r.data!) : r.data, r.id)
+        n++
+      }
+      for (const key of secretKeys) {
+        const v = this.getSetting<unknown>(key)
+        if (v === undefined) continue
+        if (typeof v === 'string' && isSealedField(v)) continue
+        this.setSecret(key, v)
+      }
+    })()
+    // Don't leave the old plain text behind in the write-ahead log or free pages.
+    this.db.pragma('wal_checkpoint(TRUNCATE)')
+    this.db.exec('VACUUM')
+    return n
+  }
+
   setSetting(key: string, value: unknown): void {
     this.db
       .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
@@ -165,9 +216,10 @@ export class HushDb {
     event: { kind: string; ref: string; data: string | null } | null = null
   ): StoredMessage {
     return this.db.transaction(() => {
-      const { next } = this.db
-        .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE author_id = ?')
-        .get(authorId) as { next: number }
+      const { top } = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ?').get(authorId) as { top: number }
+      // After recovering history from the peer, numbering continues after the old messages
+      // even before they have all arrived.
+      const next = Math.max(top, this.getSetting<number>(`seqFloor:${authorId}`) ?? 0) + 1
       const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image, ...(event ?? {}) }
       this.insertMessage(m)
       return m
@@ -189,14 +241,14 @@ export class HushDb {
         m.id,
         m.authorId,
         m.seq,
-        m.body,
+        this.cipher.seal(m.body),
         m.sentAt,
         receivedAt,
         m.status,
         m.image ? JSON.stringify(m.image) : null,
         m.kind ?? 'message',
         m.ref ?? null,
-        m.data ?? null
+        m.data == null ? null : this.cipher.seal(m.data)
       )
     if (r.changes === 1) return true
     if (m.seq !== null) {
@@ -207,7 +259,7 @@ export class HushDb {
 
   getMessage(id: string): StoredMessage | undefined {
     const row = this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE id = ?`).get(id) as Row | undefined
-    return row && toStored(row)
+    return row && this.toStored(row)
   }
 
   /**
@@ -279,11 +331,16 @@ export class HushDb {
   }
 
   /** This author's messages with seq > afterSeq, oldest first. */
+  /** Highest sequence number stored for an author (0 if none). */
+  maxSeq(authorId: string): number {
+    return (this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ?').get(authorId) as { top: number }).top
+  }
+
   messagesAfter(authorId: string, afterSeq: number, limit: number): StoredMessage[] {
     const rows = this.db
       .prepare(`SELECT ${COLUMNS} FROM messages WHERE author_id = ? AND seq > ? ORDER BY seq LIMIT ?`)
       .all(authorId, afterSeq, limit) as Row[]
-    return rows.map(toStored)
+    return rows.map((r) => this.toStored(r))
   }
 
   /** Ids of this author's messages currently in one of the given statuses. */
@@ -339,11 +396,15 @@ export class HushDb {
   }
 
   /** Image messages written by anyone but `selfId` (candidates for downloading). */
-  imageMessagesFromOthers(selfId: string): { id: string; image: ImageMeta }[] {
+  imageMessages(): { id: string; image: ImageMeta }[] {
     const rows = this.db
-      .prepare(`SELECT id, image FROM messages WHERE image IS NOT NULL AND author_id <> ? ORDER BY sent_at`)
-      .all(selfId) as { id: string; image: string }[]
+      .prepare(`SELECT id, image FROM messages WHERE image IS NOT NULL ORDER BY sent_at`)
+      .all() as { id: string; image: string }[]
     return rows.map((r) => ({ id: r.id, image: JSON.parse(r.image) as ImageMeta }))
+  }
+
+  private toStored(r: Row): StoredMessage {
+    return toStored(r, (v) => this.cipher.open(v))
   }
 
   /** Newest-last page of history, older than `before` when given. */
@@ -360,22 +421,22 @@ export class HushDb {
         : this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IS NULL ORDER BY sent_at DESC, id DESC LIMIT ?`).all(limit + 1)
     ) as Row[]
     const hasMore = rows.length > limit
-    return { rows: rows.slice(0, limit).reverse().map(toStored), hasMore }
+    return { rows: rows.slice(0, limit).reverse().map((r) => this.toStored(r)), hasMore }
   }
 }
 
-function toStored(r: Row): StoredMessage {
+function toStored(r: Row, open: (s: string) => string): StoredMessage {
   return {
     id: r.id,
     authorId: r.author_id,
     seq: r.seq,
-    body: r.body,
+    body: open(r.body),
     sentAt: r.sent_at,
     status: r.status,
     image: r.image ? (JSON.parse(r.image) as ImageMeta) : null,
     kind: r.kind,
     ref: r.ref,
-    data: r.data
+    data: r.data === null ? null : open(r.data)
   }
 }
 

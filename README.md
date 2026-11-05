@@ -103,6 +103,12 @@ the computer you paired with, and refuses anything else at that address — even
 your Tailscale network. If one of you reinstalls Hush, you'll see *Identity changed*: confirm
 with each other, then **Pair again**.
 
+**App password (Linux without a keyring):** Hush stores everything encrypted and keeps the key in
+your system keychain (Windows does this automatically; on Linux that's GNOME Keyring or KWallet).
+If your Linux desktop has neither, Hush asks you to choose an **app password** at first start and
+asks for it every time it starts. Don't lose it — without it, only a backup or the other computer
+can bring your history back.
+
 ---
 
 ## Using Hush
@@ -123,7 +129,21 @@ with each other, then **Pair again**.
   say *“New message from …”*; Settings → Notifications can show the text, or turn them off.
 - **Settings → Audio** picks your microphone and speaker, with a microphone test.
 - **Starts with your computer:** the installed app starts quietly in the tray when you log in, so
-  messages and calls reach you after a restart (Settings → Startup to turn it off).
+  messages and calls reach you after a restart (Settings → Startup to turn it off). With an app
+  password, the password window appears instead.
+
+### Privacy & data (Settings)
+
+- **App password:** optional on any computer with a keychain — Hush then asks for it at every start.
+- **Back up now:** saves one `.hushbackup` file, protected by a password you choose. Full-size
+  pictures are optional (previews are always included). Keep it somewhere safe, like a USB stick.
+- **Weekly automatic backup:** into a folder you pick; the newest three are kept.
+- **Restore:** replaces everything on this computer with a backup and restarts. You stay paired.
+  Anything newer than the backup comes back from the other computer the next time you're both
+  online — until then, writing waits (*“Backup restored — you can write once … is online”*).
+- **Recover history from …:** reinstalled without a backup? After pairing again, the other
+  computer still has your whole conversation. *Recover* takes it back — including your own
+  messages and pictures — and restarts. Only offered before you write anything on the new install.
 
 ---
 
@@ -134,7 +154,10 @@ with each other, then **Pair again**.
 | **“Tailscale isn't running”** | Start Tailscale and make sure you're logged in, then press *Retry*. |
 | **“Waiting for …” / OFFLINE** | Both computers need Hush running and Tailscale connected. Check each person entered the *other's* IP (not their own). Test the network with `tailscale ping 100.x.y.z`. Settings → Connection → **Retry now** reconnects immediately. |
 | **Pair with … / codes** | See *Connect and pair* above. Wrong code? Check you're typing the code from the *other* screen. |
-| **“Identity changed”** | The computer at that address isn't the one you paired with. Ask the other person if they reinstalled; only then press *Pair again*. |
+| **“Identity changed”** | The computer at that address isn't the one you paired with. Ask the other person if they reinstalled; only then press *Pair again*. If they did, they can then use *Recover history* (Settings → Privacy & data). |
+| **Forgot the app password** | It can't be reset — that's what keeps the data safe. Delete the data folder (see *Privacy*), start Hush, pair again, then restore a backup or use *Recover history*. |
+| **“Keychain locked”** | Hush keeps its key in your system keychain, which refused. Log out and back in (that unlocks it), then *Try again*. |
+| **“Hush can’t open its data”** | The keychain was reset, so the key is gone. *Start fresh* sets the old files aside; then restore a backup or recover your history from the other computer. |
 | **“The other Hush is too old”** | One of you runs a version from before protocol 6. Install the latest release. |
 | **“Port 47821 is already in use”** | Another copy of Hush (or another program) uses the port. Quit it and press Retry. |
 | **Call says “Couldn't connect audio”** | Both need Tailscale connected (calls only use Tailscale addresses). Check Windows Firewall allowed Hush. Try again after `tailscale ping` works. |
@@ -155,7 +178,12 @@ with each other, then **Pair again**.
   them find each other; it cannot read your traffic.
 - **Where things are stored** (only on your computer):
   - Windows: `%APPDATA%\Hush` — Linux: `~/.config/Hush`
-  - `hush.db` (messages, call history, settings), `images/` (pictures), `avatar-*.img`
+  - `hush.db` (messages, call history, settings), `images/` (pictures), `avatar-*.img`,
+    `vault.json` (the encryption key, itself locked by the keychain or your app password)
+- **Encrypted on disk (AES-256-GCM):** message text, edits and reactions, every picture and
+  preview, profile pictures, and Hush's identity key. *Not* encrypted: when messages were sent,
+  names, settings and call history (times and durations) — the "who and when", not the "what".
+- **Backups** are encrypted with their own password (scrypt + AES-256-GCM).
 - **Uninstalling** keeps that folder; delete it to remove your history.
 
 ---
@@ -220,6 +248,14 @@ These development overrides are ignored in installed builds.
 - Images carry an inline preview; the receiver pulls the full file in resumable chunks and checks
   its SHA-256. Files live under `images/`, shown to the UI only via the private `hush-img://` scheme.
 - Calls use WebRTC audio with signaling over the same link, restricted to Tailscale addresses.
+- At rest: one random data key encrypts database fields (`enc1:` prefix) and files (128 KB
+  chunks, each AES-256-GCM with its index and a "last chunk" flag authenticated, so images can be
+  read in ranges). Partial downloads are stored as sealed records. The data key is wrapped by
+  Electron `safeStorage` (DPAPI / libsecret / KWallet) or by an scrypt-derived app-password key;
+  Linux's `basic_text` fallback is treated as no keychain.
+- Recovery: an app that sees its peer return under a new device id remembers the old one. The new
+  install asks for it (`recover-req`), adopts it, and the normal sync sends back the peer's own
+  messages too (whenever a `sync` shows the peer holds fewer of its own messages than we do).
 
 ### Project layout
 

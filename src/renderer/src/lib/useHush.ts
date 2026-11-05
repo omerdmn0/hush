@@ -57,6 +57,9 @@ export function useHush(): HushState {
         case 'pairing':
           setSnapshot((s) => s && { ...s, pairing: e.pairing })
           break
+        case 'privacy':
+          setSnapshot((s) => s && { ...s, privacy: e.privacy })
+          break
         case 'window':
           setSnapshot((s) => s && { ...s, windowActive: e.active })
           break

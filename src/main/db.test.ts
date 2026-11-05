@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { HushDb, toChatMessage, type StoredMessage } from './db'
+import { fieldCipher, newDataKey } from './vault'
 
 const ME = randomUUID()
 const PEER = randomUUID()
@@ -172,5 +173,37 @@ describe('call history', () => {
     db.close()
     db = new HushDb(join(dir, 'hush.db'))
     expect(db.listCalls().map((c) => c.outcome)).toEqual(['completed', 'failed'])
+  })
+})
+
+describe('encryption at rest', () => {
+  it('stores message text and event data sealed, reads them back, and upgrades old rows', () => {
+    const file = join(dir, 'enc.db')
+    const plain = new HushDb(file) // an older, unencrypted database
+    const old = make(PEER, 1, 10, 'read')
+    plain.insertMessage({ ...old, body: 'from before encryption' })
+    plain.setSetting('identityKey', 'PRIVATE-KEY')
+    plain.close()
+
+    const key = newDataKey()
+    const enc = new HushDb(file, fieldCipher(key))
+    expect(enc.encryptExisting(['identityKey'])).toBe(1)
+    const fresh = make(ME, 1, 20)
+    enc.insertMessage({ ...fresh, body: 'gizli 🌙', kind: 'message', data: null })
+    enc.insertMessage({ ...make(ME, 2, 30), body: '', kind: 'edit', ref: fresh.id, data: 'new secret text' })
+    expect(enc.getMessage(old.id)?.body).toBe('from before encryption')
+    expect(enc.getMessage(fresh.id)?.body).toBe('gizli 🌙')
+    expect(enc.getSecret('identityKey')).toBe('PRIVATE-KEY')
+    enc.close()
+
+    const raw = new Database(file)
+    const dump = JSON.stringify(raw.prepare('SELECT body, data FROM messages').all()) + JSON.stringify(raw.prepare('SELECT * FROM settings').all())
+    raw.close()
+    for (const secret of ['from before encryption', 'gizli', 'new secret text', 'PRIVATE-KEY']) expect(dump).not.toContain(secret)
+
+    // The wrong key can't read it.
+    const wrong = new HushDb(file, fieldCipher(newDataKey()))
+    expect(() => wrong.getMessage(fresh.id)).toThrow()
+    wrong.close()
   })
 })

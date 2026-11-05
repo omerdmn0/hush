@@ -6,7 +6,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import type { NetState, PairingState, Settings } from '../../../../shared/types'
+import type { NetState, PairingState, PrivacyState, Settings } from '../../../../shared/types'
+import { PrivacySettings } from './PrivacySettings'
 import { Avatar, AvatarContext, StatusTag } from '@/components/common'
 import { getMic } from '@/lib/call'
 import { ImageError, imageErrorText, makeAvatar } from '@/lib/images'
@@ -21,7 +22,8 @@ const SECTIONS = [
   { id: 'connection', title: 'Connection' },
   { id: 'audio', title: 'Audio' },
   { id: 'notifications', title: 'Notifications' },
-  { id: 'startup', title: 'Startup' }
+  { id: 'startup', title: 'Startup' },
+  { id: 'privacy', title: 'Privacy & data' }
 ] as const
 export type SectionId = (typeof SECTIONS)[number]['id']
 
@@ -36,6 +38,7 @@ export function SettingsScreen({
   net,
   peer,
   pairing,
+  privacy,
   packaged,
   onChange,
   onReconnect,
@@ -46,6 +49,7 @@ export function SettingsScreen({
   net: NetState
   peer: PeerView | null
   pairing: PairingState
+  privacy: PrivacyState
   packaged: boolean
   onChange: (patch: Partial<Settings>) => Promise<void>
   onReconnect: () => void
@@ -176,6 +180,14 @@ export function SettingsScreen({
                 onCheckedChange={(startAtLogin) => void onChange({ startAtLogin })}
               />
             </div>
+          </Module>
+
+          <Module index={6} id="privacy" title="Privacy & data">
+            <PrivacySettings
+              privacy={privacy}
+              peerName={peer?.name ?? 'the other person'}
+              canAskPeer={pairing.status === 'paired' && peer?.presence === 'online'}
+            />
           </Module>
         </div>
       </div>

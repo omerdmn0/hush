@@ -120,6 +120,11 @@ export interface PeerState {
   lastSeen: number | null
   /** Their Hush version (last seen), for the "update available" hint. */
   appVersion: string | null
+  /**
+   * A backup was just restored: writing waits until the other app has synced with us, so new
+   * messages can't collide with ones it already has from before the backup.
+   */
+  catchingUp: boolean
 }
 
 export interface NetState {
@@ -138,8 +143,41 @@ export interface AvatarUrls {
   peer: string | null
 }
 
+/** What the lock window asks for before Hush can open its data. */
+export interface LockInfo {
+  /** create: no keychain, choose an app password · unlock: enter it · keychain-error: the keychain refused */
+  mode: 'create' | 'unlock' | 'keychain-error'
+  /** e.g. "GNOME Keyring", "Windows" */
+  osName: string
+  error?: string
+}
+
+export interface AutoBackup {
+  enabled: boolean
+  folder: string
+  attachments: boolean
+  /** Time of the last successful automatic backup. */
+  last: number | null
+  error: string | null
+}
+
+/** Settings → Privacy & data. */
+export interface PrivacyState {
+  /** What protects the encryption key on this computer. */
+  protection: 'keychain' | 'password'
+  osName: string
+  /** A keychain exists, so the app password can be removed. */
+  osAvailable: boolean
+  autoBackup: AutoBackup
+  /** Nothing written on this install yet, so history can be recovered from the other computer. */
+  canRecover: boolean
+}
+
+export type BackupResult = { ok: true; path: string; bytes: number } | { ok: false; error: string } | { ok: false; cancelled: true }
+
 export interface Snapshot {
   settings: Settings
+  privacy: PrivacyState
   avatars: AvatarUrls
   /** The window is visible and focused (from the main process, which knows reliably). */
   windowActive: boolean
@@ -177,6 +215,7 @@ export type HushEvent =
   | { type: 'call'; signal: CallSignal }
   /** Messages that were queued while offline have now been delivered. */
   | { type: 'flushed'; count: number; at: number }
+  | { type: 'privacy'; privacy: PrivacyState }
 
 /** API the preload script exposes to the renderer as `window.hush`. */
 export interface HushApi {
@@ -208,6 +247,25 @@ export interface HushApi {
   reconnect(): void
   /** Subscribe to main-process events; returns an unsubscribe function. */
   onEvent(listener: (event: HushEvent) => void): () => void
+
+  // ----- lock window (before Hush has opened its data) -----
+  lockInfo(): Promise<LockInfo>
+  /** Unlocks (or, in "create" mode, sets) the app password. Resolves with an error message, or null on success. */
+  lockSubmit(password: string): Promise<string | null>
+
+  // ----- privacy & data -----
+  /** Sets or changes the app password, or removes it (null) to use the system keychain again. */
+  setAppPassword(password: string | null): Promise<PrivacyState>
+  /** Asks where to save, then writes a password-protected backup. */
+  backupNow(password: string, attachments: boolean): Promise<BackupResult>
+  /** Asks for a backup file and restores it (Hush restarts). Resolves with an error message, or null if cancelled. */
+  restoreBackup(password: string): Promise<string | null>
+  /** Turns weekly backups on (password needed when turning on or changing it) or off. */
+  setAutoBackup(patch: { enabled: boolean; attachments?: boolean; password?: string }): Promise<PrivacyState>
+  /** Folder picker for automatic backups. */
+  chooseBackupFolder(): Promise<PrivacyState>
+  /** Takes back this person's history from the other computer after a reinstall (Hush restarts). */
+  recoverHistory(): Promise<string | null>
 }
 
 export const IPC = {
@@ -227,5 +285,13 @@ export const IPC = {
   setTyping: 'hush:set-typing',
   updateSettings: 'hush:update-settings',
   reconnect: 'hush:reconnect',
-  event: 'hush:event'
+  event: 'hush:event',
+  lockInfo: 'hush:lock-info',
+  lockSubmit: 'hush:lock-submit',
+  setAppPassword: 'hush:set-app-password',
+  backupNow: 'hush:backup-now',
+  restoreBackup: 'hush:restore-backup',
+  setAutoBackup: 'hush:set-auto-backup',
+  chooseBackupFolder: 'hush:choose-backup-folder',
+  recoverHistory: 'hush:recover-history'
 } as const
