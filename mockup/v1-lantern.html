@@ -1,0 +1,1138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hush mockup</title>
+<style>
+/* Plus Jakarta Sans (OFL), bundled locally via @fontsource-variable */
+@font-face {
+  font-family: 'Plus Jakarta Sans Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url(fonts/plus-jakarta-sans-latin-ext-wght-normal.woff2) format('woff2-variations');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url(fonts/plus-jakarta-sans-latin-wght-normal.woff2) format('woff2-variations');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+/* ============ Design tokens (design-system/hush/MASTER.md) ============ */
+.app {
+  --bg-sidebar:#13110F; --bg-app:#1A1714; --surface:#24201C; --surface-elevated:#2C2723;
+  --hover:#221E1A; --pressed:#2A2521; --border:#3A342E; --border-strong:#7D7369;
+  --scrim:rgba(10,8,6,.72);
+  --text:#F3EDE6; --text-muted:#A89E93;
+  --accent:#F2B45A; --on-accent:#1A1714; --accent-hover:#F5C27A; --accent-subtle:#33291B;
+  --accent-text:#F2B45A; --ring:#F2B45A;
+  --bubble-mine:#3A2E1F; --bubble-theirs:#26221E; --bubble-theirs-border:transparent;
+  --online:#4CC38A; --offline:#7A7068; --success:#4CC38A;
+  --danger:#C7372F; --on-danger:#FFFFFF; --danger-hover:#A82D26; --danger-text:#F47067;
+  --callbar:#15231B;
+  --shadow-sm:none; --shadow-lg:0 12px 32px rgba(0,0,0,.45);
+  --dur-micro:150ms; --dur-enter:200ms; --dur-exit:140ms; --ease:cubic-bezier(.2,.8,.2,1);
+  --r-control:8px; --r-bubble:14px; --r-panel:12px;
+  color-scheme: dark;
+}
+.app.light {
+  --bg-sidebar:#F0EAE2; --bg-app:#FAF7F2; --surface:#FFFFFF; --surface-elevated:#FFFFFF;
+  --hover:#E7E0D6; --pressed:#DED6CB; --border:#E3DCD3; --border-strong:#8F8478;
+  --scrim:rgba(31,27,23,.45);
+  --text:#1F1B17; --text-muted:#6B6158;
+  --accent:#A35F0B; --on-accent:#FFFFFF; --accent-hover:#8C510A; --accent-subtle:#F6E7D0;
+  --accent-text:#A35F0B; --ring:#A35F0B;
+  --bubble-mine:#F8E4C6; --bubble-theirs:#FFFFFF; --bubble-theirs-border:#E3DCD3;
+  --online:#16804D; --offline:#8F8478; --success:#16704A;
+  --danger:#C7372F; --on-danger:#FFFFFF; --danger-hover:#A82D26; --danger-text:#B42D25;
+  --callbar:#E2F2E8;
+  --shadow-sm:0 1px 2px rgba(31,27,23,.06); --shadow-lg:0 12px 32px rgba(31,27,23,.14);
+  color-scheme: light;
+}
+
+/* ============ Review chrome (not part of the app) ============ */
+* { box-sizing: border-box; }
+html, body { margin:0; height:100%; }
+body { background:#3B3B3D; font-family:"Plus Jakarta Sans Variable","Segoe UI","Noto Sans",system-ui,sans-serif; }
+.review {
+  height:52px; display:flex; align-items:center; gap:20px; padding:0 16px; flex-wrap:wrap;
+  background:#1E1E20; color:#E6E6E6; font-size:13px; border-bottom:1px solid #000;
+}
+.review b { font-weight:600; color:#fff; margin-right:4px; }
+.review .grp { display:flex; align-items:center; gap:6px; }
+.review .lbl { color:#A0A0A6; }
+.review button {
+  font:inherit; font-size:13px; color:#E6E6E6; background:#2E2E32; border:1px solid #48484E;
+  border-radius:6px; padding:5px 10px; cursor:pointer;
+}
+.review button:hover { background:#3A3A40; }
+.review button[aria-pressed="true"] { background:#E6E6E6; color:#111; border-color:#E6E6E6; }
+.review button:focus-visible { outline:2px solid #8AB4F8; outline-offset:2px; }
+.stage { height:calc(100% - 52px); display:grid; place-items:center; padding:16px; overflow:auto; }
+
+/* ============ App base ============ */
+.app {
+  width:min(1200px, 100%); height:min(780px, 100%); min-height:560px; min-width:880px;
+  display:flex; overflow:hidden; border-radius:10px; position:relative;
+  background:var(--bg-app); color:var(--text);
+  font-size:14px; line-height:20px; font-weight:500;
+  box-shadow:0 20px 60px rgba(0,0,0,.5); border:1px solid rgba(0,0,0,.4);
+}
+:where(.app button, .app input, .app textarea, .app select) { font:inherit; color:inherit; }
+.app :focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
+.app :focus:not(:focus-visible) { outline:none; }
+.i { width:20px; height:20px; flex:none; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+.i.sm { width:16px; height:16px; }
+.i.xs { width:14px; height:14px; }
+.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+.muted { color:var(--text-muted); }
+.small { font-size:12px; line-height:16px; }
+.screen { display:none; flex:1; min-width:0; }
+.screen.active { display:flex; }
+
+/* ============ Buttons ============ */
+.btn {
+  display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  height:36px; padding:0 14px; border-radius:var(--r-control); border:1px solid transparent;
+  font-weight:600; cursor:pointer; white-space:nowrap;
+  transition: background var(--dur-micro) var(--ease), border-color var(--dur-micro) var(--ease), transform var(--dur-micro) var(--ease);
+}
+.btn:active, .btn.is-active { transform:scale(.97); }
+.btn-primary { background:var(--accent); color:var(--on-accent); }
+.btn-primary:hover, .btn-primary.is-hover { background:var(--accent-hover); }
+.btn-secondary { background:var(--surface); border-color:var(--border-strong); color:var(--text); }
+.btn-secondary:hover, .btn-secondary.is-hover { background:var(--hover); }
+.btn-secondary:active, .btn-secondary.is-active { background:var(--pressed); }
+.btn-ghost { background:transparent; color:var(--text); }
+.btn-ghost:hover, .btn-ghost.is-hover { background:var(--hover); }
+.btn-ghost:active, .btn-ghost.is-active { background:var(--pressed); }
+.btn-danger { background:var(--danger); color:var(--on-danger); }
+.btn-danger:hover, .btn-danger.is-hover { background:var(--danger-hover); }
+.btn-success { background:var(--success); color:var(--on-accent); }
+.app.light .btn-success { color:#fff; }
+.btn:disabled, .btn.is-disabled { opacity:.45; cursor:not-allowed; transform:none; }
+.btn.is-focus { outline:2px solid var(--ring); outline-offset:2px; }
+.btn-lg { height:44px; padding:0 18px; }
+.icon-btn {
+  width:36px; height:36px; display:inline-grid; place-items:center; border-radius:var(--r-control);
+  border:0; background:transparent; color:var(--text-muted); cursor:pointer;
+  transition: background var(--dur-micro) var(--ease), color var(--dur-micro) var(--ease);
+}
+.icon-btn:hover, .icon-btn.is-hover { background:var(--hover); color:var(--text); }
+.icon-btn:active { background:var(--pressed); }
+.icon-btn[aria-pressed="true"] { background:var(--accent-subtle); color:var(--accent-text); }
+.icon-btn:disabled { opacity:.45; cursor:not-allowed; }
+.spin { animation:spin 0.9s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* ============ Avatars & status ============ */
+.avatar {
+  --size:36px; width:var(--size); height:var(--size); border-radius:50%; flex:none; position:relative;
+  display:grid; place-items:center; font-weight:700; font-size:calc(var(--size) * .4); color:#F3EDE6;
+  background:linear-gradient(135deg,#3E6B5C,#2B4A40);
+}
+.avatar.sam { background:linear-gradient(135deg,#8A5A2B,#5E3D1E); }
+.avatar.lg { --size:64px; }
+.avatar.xl { --size:80px; }
+.avatar.sm { --size:32px; }
+.badge {
+  position:absolute; right:-2px; bottom:-2px; width:16px; height:16px; border-radius:50%;
+  border:3px solid var(--bg-sidebar); background:var(--bg-sidebar); box-sizing:content-box;
+}
+.avatar.lg .badge { width:16px; height:16px; }
+.badge::after { content:""; position:absolute; inset:0; border-radius:50%; }
+.badge.online::after { background:var(--online); }
+.badge.offline::after { border:3px solid var(--offline); }
+.status-line { display:flex; align-items:center; gap:6px; }
+.dot { width:10px; height:10px; border-radius:50%; flex:none; }
+.dot.online { background:var(--online); }
+.dot.offline { border:2px solid var(--offline); }
+
+/* ============ Sidebar ============ */
+.sidebar {
+  width:240px; flex:none; background:var(--bg-sidebar); display:flex; flex-direction:column;
+  border-right:1px solid var(--border);
+}
+.brand { display:flex; align-items:center; gap:10px; padding:16px; font-weight:700; font-size:16px; }
+.brand svg { width:28px; height:28px; }
+.peer-card {
+  margin:4px 12px 0; padding:20px 16px 16px; border-radius:var(--r-panel);
+  display:flex; flex-direction:column; align-items:center; text-align:center; gap:4px;
+  background:var(--surface); border:1px solid var(--border); box-shadow:var(--shadow-sm);
+}
+.peer-card .avatar { margin-bottom:8px; }
+.peer-card .badge { border-color:var(--surface); background:var(--surface); }
+.peer-name { font-size:18px; line-height:26px; font-weight:600; }
+.peer-card .btn { margin-top:12px; width:100%; }
+.side-spacer { flex:1; }
+.self {
+  display:flex; align-items:center; gap:10px; padding:10px 12px; margin:8px;
+  border-radius:var(--r-panel);
+}
+.self .who { flex:1; min-width:0; }
+.self .name { font-weight:600; }
+
+/* ============ Chat pane ============ */
+.main { flex:1; min-width:0; display:flex; flex-direction:column; position:relative; }
+.chat-header {
+  height:60px; flex:none; display:flex; align-items:center; gap:12px; padding:0 16px 0 24px;
+  border-bottom:1px solid var(--border);
+}
+.chat-header .title { font-size:18px; line-height:26px; font-weight:600; }
+.chat-header .grow { flex:1; }
+
+.callbar {
+  height:56px; flex:none; display:none; align-items:center; gap:12px; padding:0 16px 0 24px;
+  background:var(--callbar); border-bottom:1px solid var(--border);
+  animation:slideDown var(--dur-enter) var(--ease);
+}
+.callbar.show { display:flex; }
+@keyframes slideDown { from { opacity:0; transform:translateY(-6px); } }
+.live { width:10px; height:10px; border-radius:50%; background:var(--success); position:relative; }
+.live::after { content:""; position:absolute; inset:-4px; border-radius:50%; border:2px solid var(--success); opacity:.6; animation:pulse 1.8s var(--ease) infinite; }
+@keyframes pulse { from { transform:scale(.6); opacity:.7; } to { transform:scale(1.4); opacity:0; } }
+.callbar .who { font-weight:600; }
+.callbar .timer { font-variant-numeric:tabular-nums; color:var(--text-muted); }
+.callbar .grow { flex:1; }
+.mic-select {
+  display:inline-flex; align-items:center; gap:6px; height:36px; padding:0 10px; border-radius:var(--r-control);
+  background:transparent; border:1px solid var(--border-strong); cursor:pointer; max-width:220px;
+}
+.mic-select:hover { background:var(--hover); }
+.mic-select span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+.log { flex:1; overflow-y:auto; scroll-behavior:smooth; padding:8px 0 16px; }
+.col { max-width:760px; margin:0 auto; padding:0 24px; }
+.sep { display:flex; justify-content:center; margin:20px 0 8px; }
+.sep span {
+  font-size:12px; line-height:16px; font-weight:600; color:var(--text-muted);
+  padding:4px 10px; border-radius:999px; background:var(--surface); border:1px solid var(--border);
+}
+.group { display:flex; gap:10px; margin-top:16px; }
+.group.mine { justify-content:flex-end; }
+.group .stack { display:flex; flex-direction:column; align-items:flex-start; gap:2px; max-width:68%; min-width:0; }
+.group .stack > .bubble { max-width:100%; }
+.group.mine .stack { align-items:flex-end; }
+.group .who { font-size:12px; line-height:16px; font-weight:600; color:var(--text-muted); margin:0 0 4px 4px; }
+.group .avatar { align-self:flex-start; }
+.bubble {
+  padding:8px 12px 6px; border-radius:var(--r-bubble); font-size:16px; line-height:24px; font-weight:400;
+  overflow-wrap:anywhere; position:relative; animation:rise var(--dur-enter) var(--ease);
+}
+@keyframes rise { from { opacity:0; transform:translateY(4px); } }
+.theirs .bubble { background:var(--bubble-theirs); border:1px solid var(--bubble-theirs-border); }
+.mine .bubble { background:var(--bubble-mine); }
+.theirs .bubble:is(:last-child, :has(+ :not(.bubble))) { border-bottom-left-radius:4px; }
+.mine .bubble:is(:last-child, :has(+ :not(.bubble))) { border-bottom-right-radius:4px; }
+.meta-in {
+  float:right; display:inline-flex; align-items:center; gap:4px; margin:6px 0 -2px 12px;
+  font-size:12px; line-height:16px; font-weight:500; color:var(--text-muted);
+}
+.meta-in .read { color:var(--accent-text); }
+.bubble.img { padding:4px; }
+.bubble.img .meta-in { float:none; margin:4px 6px 2px; display:flex; justify-content:flex-end; }
+.bubble.img .caption { padding:4px 8px 0; }
+.thumb {
+  display:block; padding:0; border:0; border-radius:10px; overflow:hidden; cursor:zoom-in; background:var(--pressed);
+  width:300px; aspect-ratio:4/3; max-width:100%;
+}
+.thumb.tall { width:220px; aspect-ratio:3/4; }
+.thumb svg { width:100%; height:100%; display:block; transition:transform var(--dur-enter) var(--ease); }
+.thumb:hover svg { transform:scale(1.02); }
+.pending-note {
+  display:flex; align-items:center; gap:6px; margin-top:6px; font-size:12px; line-height:16px; color:var(--text-muted);
+}
+.sys {
+  display:flex; justify-content:center; align-items:center; gap:6px; margin:16px 0 0;
+  font-size:12px; line-height:16px; font-weight:600; color:var(--success);
+  animation:rise var(--dur-enter) var(--ease);
+}
+.typing { display:inline-flex; gap:4px; padding:14px 14px; }
+.typing i { width:7px; height:7px; border-radius:50%; background:var(--text-muted); animation:blink 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay:.2s; } .typing i:nth-child(3) { animation-delay:.4s; }
+@keyframes blink { 0%,60%,100% { opacity:.3; transform:translateY(0); } 30% { opacity:1; transform:translateY(-3px); } }
+.typing-label { font-size:12px; line-height:16px; color:var(--text-muted); margin:4px 0 0 4px; }
+
+/* composer */
+.composer-wrap { flex:none; padding:0 0 16px; position:relative; }
+.composer {
+  display:flex; align-items:flex-end; gap:4px; padding:6px; min-height:56px;
+  background:var(--surface); border:1px solid var(--border-strong); border-radius:var(--r-panel);
+  transition:border-color var(--dur-micro) var(--ease);
+}
+.composer:focus-within { border-color:var(--ring); box-shadow:0 0 0 1px var(--ring); }
+.composer textarea {
+  flex:1; resize:none; border:0; background:transparent; outline:none; padding:9px 6px;
+  font-size:16px; line-height:24px; font-weight:400; max-height:200px; min-height:42px;
+}
+.composer textarea::placeholder { color:var(--text-muted); }
+.composer .icon-btn { width:42px; height:42px; }
+.send { width:42px; height:42px; padding:0; }
+.composer-hint { font-size:12px; line-height:16px; color:var(--text-muted); margin:6px 4px 0; }
+.composer-hint kbd { font:inherit; font-weight:600; }
+
+/* emoji popover */
+.popover {
+  position:absolute; bottom:calc(100% + 8px); right:24px; width:300px; padding:12px; z-index:20;
+  background:var(--surface-elevated); border:1px solid var(--border); border-radius:var(--r-panel);
+  box-shadow:var(--shadow-lg); display:none; animation:rise var(--dur-enter) var(--ease);
+}
+.popover.show { display:block; }
+.popover .grid { display:grid; grid-template-columns:repeat(8,1fr); gap:2px; margin-top:8px; }
+.composer-wrap .col { position:relative; }
+.popover .grid button { font-size:20px; height:32px; padding:0; min-width:0; border:0; background:transparent; border-radius:6px; cursor:pointer; }
+.popover .grid button:hover { background:var(--hover); }
+.popover input { width:100%; }
+
+/* toast */
+.toast {
+  position:absolute; top:72px; left:50%; transform:translateX(-50%); z-index:30;
+  display:none; align-items:center; gap:8px; padding:10px 14px; border-radius:var(--r-control);
+  background:var(--surface-elevated); border:1px solid var(--border); box-shadow:var(--shadow-lg);
+  animation:rise var(--dur-enter) var(--ease);
+}
+.toast.show { display:flex; }
+.toast .i { color:var(--success); }
+
+/* dialogs */
+.overlay {
+  position:absolute; inset:0; background:var(--scrim); display:none; place-items:center; z-index:40;
+  animation:fade var(--dur-enter) var(--ease);
+}
+.overlay.show { display:grid; }
+@keyframes fade { from { opacity:0; } }
+.dialog {
+  width:340px; padding:28px 24px 24px; border-radius:var(--r-panel); text-align:center;
+  background:var(--surface-elevated); border:1px solid var(--border); box-shadow:var(--shadow-lg);
+  display:flex; flex-direction:column; align-items:center; gap:4px;
+  animation:pop var(--dur-enter) var(--ease);
+}
+@keyframes pop { from { opacity:0; transform:scale(.97); } }
+.dialog h2 { margin:12px 0 0; font-size:18px; line-height:26px; font-weight:600; }
+.dialog .actions { display:flex; gap:12px; margin-top:20px; width:100%; }
+.dialog .actions .btn { flex:1; }
+.ring-wrap { position:relative; }
+.ring-wrap::before { content:""; position:absolute; inset:-8px; border-radius:50%; border:2px solid var(--success); opacity:.5; animation:pulse 1.6s var(--ease) infinite; }
+.lightbox { padding:40px; }
+.lightbox figure { margin:0; max-width:min(900px,90%); display:flex; flex-direction:column; align-items:center; gap:10px; }
+.lightbox figure svg { width:100%; max-height:70vh; border-radius:var(--r-panel); }
+.lightbox .close { position:absolute; top:16px; right:16px; background:var(--surface-elevated); color:var(--text); }
+.lightbox figcaption { color:#F3EDE6; font-size:14px; }
+
+/* ============ Forms ============ */
+.field { display:flex; flex-direction:column; gap:6px; max-width:420px; }
+.field label, .field .label { font-weight:600; }
+.input {
+  height:40px; padding:0 12px; border-radius:var(--r-control); background:var(--surface);
+  border:1px solid var(--border-strong); font-size:14px; font-weight:500;
+  transition:border-color var(--dur-micro) var(--ease);
+}
+.input:hover, .input.is-hover { border-color:var(--text-muted); }
+.input:focus, .input.is-focus { outline:none; border-color:var(--ring); box-shadow:0 0 0 1px var(--ring); }
+.input[aria-invalid="true"] { border-color:var(--danger-text); }
+.input[aria-invalid="true"]:focus { box-shadow:0 0 0 1px var(--danger-text); }
+.input:disabled { opacity:.5; cursor:not-allowed; }
+.input::placeholder { color:var(--text-muted); }
+.helper { font-size:12px; line-height:16px; color:var(--text-muted); }
+.error { font-size:12px; line-height:16px; color:var(--danger-text); display:flex; gap:6px; align-items:flex-start; }
+.saved { font-size:12px; line-height:16px; color:var(--success); display:inline-flex; gap:4px; align-items:center; }
+select.input { appearance:none; padding-right:36px; cursor:pointer;
+  background-image:none; }
+.select-wrap { position:relative; }
+.select-wrap .i { position:absolute; right:10px; top:10px; pointer-events:none; color:var(--text-muted); }
+.select-wrap select { width:100%; }
+.toggle-row { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; max-width:560px; }
+.switch {
+  width:44px; height:24px; border-radius:999px; flex:none; position:relative; cursor:pointer;
+  background:var(--pressed); border:1px solid var(--border-strong); padding:0;
+  transition:background var(--dur-micro) var(--ease);
+}
+.switch::after {
+  content:""; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%;
+  background:var(--text-muted); transition:transform var(--dur-micro) var(--ease), background var(--dur-micro) var(--ease);
+}
+.switch[aria-checked="true"] { background:var(--accent); border-color:var(--accent); }
+.switch[aria-checked="true"]::after { transform:translateX(20px); background:var(--on-accent); }
+.switch:disabled { opacity:.45; cursor:not-allowed; }
+.switch.is-focus { outline:2px solid var(--ring); outline-offset:2px; }
+.segmented { display:inline-flex; padding:3px; gap:2px; border-radius:10px; background:var(--pressed); }
+.segmented button {
+  height:32px; padding:0 14px; border:0; border-radius:7px; background:transparent; cursor:pointer;
+  display:inline-flex; align-items:center; gap:6px; font-weight:600; color:var(--text-muted);
+}
+.segmented button:hover { color:var(--text); }
+.segmented button[aria-checked="true"] { background:var(--surface); color:var(--text); box-shadow:var(--shadow-sm); }
+.app:not(.light) .segmented button[aria-checked="true"] { background:var(--surface-elevated); }
+.meter { height:8px; border-radius:999px; background:var(--pressed); overflow:hidden; max-width:420px; }
+.meter > div { height:100%; width:40%; background:var(--success); border-radius:999px; transition:width 120ms linear; }
+.copy-row { display:flex; gap:8px; align-items:center; }
+.mono { font-variant-numeric:tabular-nums; letter-spacing:.2px; }
+
+/* ============ Settings ============ */
+.settings { flex:1; display:flex; min-width:0; }
+.settings-nav { width:240px; flex:none; background:var(--bg-sidebar); padding:16px 12px; border-right:1px solid var(--border); display:flex; flex-direction:column; gap:2px; }
+.settings-nav h2 { font-size:12px; line-height:16px; text-transform:uppercase; letter-spacing:.6px; color:var(--text-muted); margin:8px 12px 8px; font-weight:700; }
+.nav-item {
+  display:flex; align-items:center; gap:10px; height:36px; padding:0 12px; border-radius:var(--r-control);
+  border:0; background:transparent; cursor:pointer; color:var(--text-muted); font-weight:600; text-align:left;
+}
+.nav-item:hover { background:var(--hover); color:var(--text); }
+.nav-item[aria-current="true"] { background:var(--accent-subtle); color:var(--text); }
+.nav-item[aria-current="true"] .i { color:var(--accent-text); }
+.settings-body { flex:1; overflow-y:auto; position:relative; }
+.settings-body .inner { max-width:680px; padding:32px 40px 64px; }
+.settings-body .close-settings { position:sticky; top:16px; float:right; margin:16px 16px 0 0; display:flex; flex-direction:column; align-items:center; gap:4px; z-index:2; }
+.close-settings .icon-btn { border:1px solid var(--border-strong); border-radius:50%; }
+.settings-body section { padding:8px 0 28px; border-bottom:1px solid var(--border); margin-bottom:28px; display:flex; flex-direction:column; gap:20px; scroll-margin-top:24px; }
+.settings-body section:last-child { border-bottom:0; }
+.settings-body h1 { font-size:20px; line-height:28px; font-weight:600; margin:0; }
+.settings-body h3 { font-size:14px; margin:0 0 2px; font-weight:600; }
+.avatar-row { display:flex; align-items:center; gap:16px; }
+.conn-card { display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:var(--r-control); background:var(--surface); border:1px solid var(--border); max-width:560px; }
+.conn-card .grow { flex:1; }
+
+/* ============ States gallery ============ */
+.states { flex:1; overflow-y:auto; padding:28px 32px 64px; }
+.states h1 { font-size:20px; line-height:28px; margin:0 0 4px; font-weight:600; }
+.states > p { margin:0 0 24px; color:var(--text-muted); }
+.gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:16px; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:var(--r-panel); padding:16px; display:flex; flex-direction:column; gap:12px; box-shadow:var(--shadow-sm); min-width:0; }
+.card h2 { font-size:14px; margin:0; font-weight:600; }
+.card .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+.card .cap { font-size:12px; color:var(--text-muted); display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
+.wide { grid-column:1 / -1; }
+.inset { background:var(--bg-app); border:1px solid var(--border); border-radius:var(--r-control); padding:16px; position:relative; overflow:hidden; }
+.skel { background:var(--pressed); border-radius:var(--r-bubble); position:relative; overflow:hidden; }
+.skel::after { content:""; position:absolute; inset:0; transform:translateX(-100%); background:linear-gradient(90deg,transparent,rgba(255,255,255,.06),transparent); animation:shimmer 1.4s infinite; }
+.app.light .skel::after { background:linear-gradient(90deg,transparent,rgba(255,255,255,.7),transparent); }
+@keyframes shimmer { to { transform:translateX(100%); } }
+.empty { display:flex; flex-direction:column; align-items:center; text-align:center; gap:8px; padding:24px 8px; }
+.empty .art { width:56px; height:56px; border-radius:50%; display:grid; place-items:center; background:var(--accent-subtle); color:var(--accent-text); margin-bottom:4px; }
+.empty .art .i { width:26px; height:26px; }
+.empty h3 { margin:0; font-size:16px; font-weight:600; }
+.empty p { margin:0 0 8px; color:var(--text-muted); max-width:280px; }
+.banner { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:var(--r-control); background:var(--surface); border:1px solid var(--danger-text); }
+.banner .i { color:var(--danger-text); }
+.banner .grow { flex:1; }
+.banner.info { border-color:var(--border-strong); }
+.banner.info .i { color:var(--text-muted); }
+.upload { position:relative; width:220px; aspect-ratio:4/3; border-radius:10px; overflow:hidden; }
+.upload svg.ph { width:100%; height:100%; display:block; }
+.upload .veil { position:absolute; inset:0; background:rgba(10,8,6,.55); display:grid; place-items:center; color:#F3EDE6; gap:8px; align-content:center; justify-items:center; font-size:12px; font-weight:600; }
+.progress { width:120px; height:4px; border-radius:2px; background:rgba(255,255,255,.25); overflow:hidden; }
+.progress div { width:62%; height:100%; background:#F2B45A; }
+.dropzone { position:absolute; inset:8px; border:2px dashed var(--accent); border-radius:var(--r-panel); background:color-mix(in srgb, var(--bg-app) 88%, var(--accent)); display:grid; place-items:center; text-align:center; }
+.dropzone .i { width:28px; height:28px; color:var(--accent-text); margin:0 auto 6px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .app *, .app *::before, .app *::after { animation:none !important; transition-duration:0ms !important; scroll-behavior:auto !important; }
+}
+</style>
+</head>
+<body>
+<!-- lucide-static 1.69.0 icons (ISC license) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0" /><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" /></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+<symbol id="i-check-check" viewBox="0 0 24 24"><path d="M18 6 7 17l-5-5" /><path d="m22 10-7.5 7.5L13 16" /></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></symbol>
+<symbol id="i-circle-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></symbol>
+<symbol id="i-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="m16 9-5.5 5.5L8 12" /></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></symbol>
+<symbol id="i-headphones" viewBox="0 0 24 24"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3" /></symbol>
+<symbol id="i-image-plus" viewBox="0 0 24 24"><path d="M16 5h6" /><path d="M19 2v6" /><path d="M21 11.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /><circle cx="9" cy="9" r="2" /></symbol>
+<symbol id="i-loader-circle" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></symbol>
+<symbol id="i-message-circle" viewBox="0 0 24 24"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719" /></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></symbol>
+<symbol id="i-mic-off" viewBox="0 0 24 24"><path d="M12 19v3" /><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" /><path d="M16.95 16.95A7 7 0 0 1 5 12v-2" /><path d="M18.89 13.23A7 7 0 0 0 19 12v-2" /><path d="m2 2 20 20" /><path d="M9 9v3a3 3 0 0 0 5.12 2.12" /></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></symbol>
+<symbol id="i-network" viewBox="0 0 24 24"><rect x="16" y="16" width="6" height="6" rx="1" /><rect x="2" y="16" width="6" height="6" rx="1" /><rect x="9" y="2" width="6" height="6" rx="1" /><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" /><path d="M12 12V8" /></symbol>
+<symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z" /><circle cx="13.5" cy="6.5" r=".5" fill="currentColor" /><circle cx="17.5" cy="10.5" r=".5" fill="currentColor" /><circle cx="6.5" cy="12.5" r=".5" fill="currentColor" /><circle cx="8.5" cy="7.5" r=".5" fill="currentColor" /></symbol>
+<symbol id="i-phone" viewBox="0 0 24 24"><path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384" /></symbol>
+<symbol id="i-phone-off" viewBox="0 0 24 24"><path d="M10.1 13.9a14 14 0 0 0 3.732 2.668 1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2 18 18 0 0 1-12.728-5.272" /><path d="M22 2 2 22" /><path d="M4.76 13.582A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 .244.473" /></symbol>
+<symbol id="i-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /><path d="M8 16H3v5" /></symbol>
+<symbol id="i-send-horizontal" viewBox="0 0 24 24"><path d="M3.714 3.048a.498.498 0 0 0-.683.627l2.843 7.627a2 2 0 0 1 0 1.396l-2.842 7.627a.498.498 0 0 0 .682.627l18-8.5a.5.5 0 0 0 0-.904z" /><path d="M6 12h16" /></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /><circle cx="12" cy="12" r="3" /></symbol>
+<symbol id="i-smile" viewBox="0 0 24 24"><path d="M15 10V9" /><path d="M16.472 15a6 6 0 01-8.943 0" /><path d="M9 10V9" /><circle cx="12" cy="12" r="10" /></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></symbol>
+<symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m17 8-5-5-5 5" /><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /></symbol>
+<symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></symbol>
+<symbol id="i-wifi-off" viewBox="0 0 24 24"><path d="M12 20h.01" /><path d="M8.5 16.429a5 5 0 0 1 7 0" /><path d="M5 12.859a10 10 0 0 1 5.17-2.69" /><path d="M19 12.859a10 10 0 0 0-2.007-1.523" /><path d="M2 8.82a15 15 0 0 1 4.177-2.643" /><path d="M22 8.82a15 15 0 0 0-11.288-3.764" /><path d="m2 2 20 20" /></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></symbol>
+</defs></svg>
+
+<!-- Shared image gradients for placeholder "photos" -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="g-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B2340"/><stop offset=".55" stop-color="#C9724A"/><stop offset="1" stop-color="#F2B45A"/></linearGradient>
+    <linearGradient id="g-water" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7A4A3A"/><stop offset="1" stop-color="#1E1A26"/></linearGradient>
+    <linearGradient id="g-mtn-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9CC3D5"/><stop offset="1" stop-color="#E9E2CF"/></linearGradient>
+    <linearGradient id="g-paper" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#EFE7DA"/><stop offset="1" stop-color="#DCCFBB"/></linearGradient>
+  </defs>
+</svg>
+<template id="img-lake">
+  <svg viewBox="0 0 400 300" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Sunset over a lake">
+    <rect width="400" height="180" fill="url(#g-sky)"/><circle cx="250" cy="168" r="26" fill="#FBD38D"/>
+    <path d="M0 150 L70 120 L130 145 L200 110 L280 150 L340 125 L400 150 L400 180 L0 180Z" fill="#3A2A3A"/>
+    <rect y="180" width="400" height="120" fill="url(#g-water)"/>
+    <g fill="#FBD38D" opacity=".55"><rect x="220" y="190" width="60" height="3" rx="1.5"/><rect x="232" y="202" width="36" height="3" rx="1.5"/><rect x="240" y="214" width="20" height="3" rx="1.5"/></g>
+  </svg>
+</template>
+<template id="img-mtn">
+  <svg viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Snowy mountains above a pine forest">
+    <rect width="300" height="400" fill="url(#g-mtn-sky)"/>
+    <path d="M-10 260 L90 110 L150 190 L200 130 L310 260Z" fill="#5E7A8C"/>
+    <path d="M90 110 L112 143 L98 140 L84 152 L72 137Z M200 130 L222 160 L206 156 L192 166 L182 154Z" fill="#F4F1EA"/>
+    <path d="M-10 400 L-10 280 L300 260 L310 400Z" fill="#2F4A3A"/>
+    <g fill="#223A2C"><path d="M30 300 l14 -40 l14 40z"/><path d="M80 310 l18 -52 l18 52z"/><path d="M200 296 l14 -42 l14 42z"/><path d="M250 312 l18 -50 l18 50z"/></g>
+  </svg>
+</template>
+<template id="img-sketch">
+  <svg viewBox="0 0 400 300" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Sketch of the Hush icon on paper">
+    <rect width="400" height="300" fill="url(#g-paper)"/>
+    <g transform="translate(140 90) scale(1.9)">
+      <rect width="64" height="64" rx="14" fill="#1A1714"/>
+      <path fill="#F2B45A" d="M17 13h30a8 8 0 0 1 8 8v17a8 8 0 0 1-8 8H29l-10 8.5a1.2 1.2 0 0 1-2-.9V46a8 8 0 0 1-8-8V21a8 8 0 0 1 8-8z"/>
+      <path fill="#1A1714" d="M35 21.7a9.5 9.5 0 1 0 4.3 15.9 8 8 0 0 1-4.3-15.9z"/>
+    </g>
+    <g stroke="#8A7D6B" stroke-width="2" fill="none" opacity=".6"><path d="M40 60 q30 -12 60 0"/><path d="M300 240 q30 -10 60 4"/><circle cx="330" cy="70" r="18"/></g>
+  </svg>
+</template>
+
+<!-- ======================= Review controls ======================= -->
+<div class="review" role="toolbar" aria-label="Mockup review controls">
+  <b>Hush mockup</b>
+  <div class="grp"><span class="lbl">Screen</span>
+    <button data-screen="chat" aria-pressed="true">Chat</button>
+    <button data-screen="settings" aria-pressed="false">Settings</button>
+    <button data-screen="states" aria-pressed="false">Component states</button>
+  </div>
+  <div class="grp"><span class="lbl">Theme</span>
+    <button data-theme="dark" aria-pressed="true">Dark</button>
+    <button data-theme="light" aria-pressed="false">Light</button>
+  </div>
+  <div class="grp"><span class="lbl">Simulate</span>
+    <button id="sim-online" aria-pressed="false">Mira comes online</button>
+    <button id="sim-call" aria-pressed="false">In call</button>
+    <button id="sim-incoming">Incoming call</button>
+  </div>
+</div>
+
+<div class="stage">
+<div class="app" id="app">
+
+  <!-- ======================= CHAT SCREEN ======================= -->
+  <div class="screen active" id="screen-chat">
+    <aside class="sidebar" aria-label="Contact">
+      <div class="brand">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#1A1714"/><path fill="#F2B45A" d="M17 13h30a8 8 0 0 1 8 8v17a8 8 0 0 1-8 8H29l-10 8.5a1.2 1.2 0 0 1-2-.9V46a8 8 0 0 1-8-8V21a8 8 0 0 1 8-8z"/><path fill="#1A1714" d="M35 21.7a9.5 9.5 0 1 0 4.3 15.9 8 8 0 0 1-4.3-15.9z"/></svg>
+        Hush
+      </div>
+      <div class="peer-card">
+        <div class="avatar lg" aria-hidden="true">M<span class="badge offline" data-peer-badge></span></div>
+        <div class="peer-name">Mira</div>
+        <div class="status-line muted" data-peer-status><span class="dot offline" aria-hidden="true"></span><span>Offline · last seen 13:11</span></div>
+        <div class="small muted mono">100.101.42.7</div>
+        <button class="btn btn-secondary" data-call-btn disabled title="Mira is offline"><svg class="i sm" aria-hidden="true"><use href="#i-phone"/></svg>Call</button>
+      </div>
+      <div class="side-spacer"></div>
+      <div class="self">
+        <div class="avatar sm sam" aria-hidden="true">S</div>
+        <div class="who"><div class="name">Sam</div><div class="small muted">You</div></div>
+        <button class="icon-btn" aria-label="Settings" data-goto="settings"><svg class="i" aria-hidden="true"><use href="#i-settings"/></svg></button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- call bar -->
+      <div class="callbar" id="callbar" role="region" aria-label="Ongoing call">
+        <span class="live" aria-hidden="true"></span>
+        <span class="who">In call with Mira</span>
+        <span class="timer" id="call-timer" aria-label="Call duration">12:43</span>
+        <span class="grow"></span>
+        <button class="mic-select" aria-label="Microphone: Blue Yeti" aria-haspopup="listbox"><svg class="i sm" aria-hidden="true"><use href="#i-mic"/></svg><span>Blue Yeti</span><svg class="i sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+        <button class="icon-btn" id="mute-btn" aria-pressed="false" aria-label="Mute microphone"><svg class="i" aria-hidden="true"><use href="#i-mic"/></svg></button>
+        <button class="btn btn-danger" id="hangup"><svg class="i sm" aria-hidden="true"><use href="#i-phone-off"/></svg>Hang up</button>
+      </div>
+
+      <header class="chat-header">
+        <div class="avatar sm" aria-hidden="true">M</div>
+        <div>
+          <div class="title">Mira</div>
+        </div>
+        <div class="status-line small muted" data-peer-status><span class="dot offline" aria-hidden="true"></span><span>Offline · last seen 13:11</span></div>
+        <span class="grow"></span>
+        <button class="icon-btn" data-call-btn disabled aria-label="Start voice call (Mira is offline)"><svg class="i" aria-hidden="true"><use href="#i-phone"/></svg></button>
+      </header>
+
+      <div class="log" id="log" role="log" aria-label="Messages with Mira">
+        <div class="col" id="col">
+          <div class="sep"><span>Tuesday</span></div>
+          <div class="group theirs">
+            <div class="avatar sm" aria-hidden="true">M</div>
+            <div class="stack">
+              <div class="who">Mira</div>
+              <div class="bubble">Found the photos from the lake trip, sending a few<span class="meta-in"><time title="Tuesday 3 Nov 2026, 21:04">21:04</time></span></div>
+              <div class="bubble img"><button class="thumb" data-img="img-lake" aria-label="Open image: sunset over a lake"></button><span class="meta-in"><time>21:04</time></span></div>
+              <div class="bubble img"><button class="thumb tall" data-img="img-mtn" aria-label="Open image: snowy mountains"></button><span class="meta-in"><time>21:05</time></span></div>
+            </div>
+          </div>
+          <div class="group mine">
+            <div class="stack">
+              <div class="bubble">These are so good. The second one should be a wallpaper<span class="meta-in"><time>21:12</time></span></div>
+              <div class="bubble">Do you have the one from the boat too?<span class="meta-in"><time>21:12</time><svg class="i xs read" role="img" aria-label="Read"><use href="#i-check-check"/></svg></span></div>
+            </div>
+          </div>
+
+          <div class="sep"><span>Yesterday</span></div>
+          <div class="group theirs">
+            <div class="avatar sm" aria-hidden="true">M</div>
+            <div class="stack">
+              <div class="who">Mira</div>
+              <div class="bubble">Morning. Did the Tailscale setup work on your laptop?<span class="meta-in"><time>08:30</time></span></div>
+            </div>
+          </div>
+          <div class="group mine">
+            <div class="stack">
+              <div class="bubble">Yes, finally. Both our IPs start with 100.<span class="meta-in"><time>08:41</time></span></div>
+              <div class="bubble">Want to try a voice call tonight?<span class="meta-in"><time>08:41</time><svg class="i xs read" role="img" aria-label="Read"><use href="#i-check-check"/></svg></span></div>
+            </div>
+          </div>
+          <div class="group theirs">
+            <div class="avatar sm" aria-hidden="true">M</div>
+            <div class="stack">
+              <div class="who">Mira</div>
+              <div class="bubble">After 9 works for me 🌙<span class="meta-in"><time>08:43</time></span></div>
+            </div>
+          </div>
+
+          <div class="sep"><span>Today</span></div>
+          <div class="group mine">
+            <div class="stack">
+              <div class="bubble img"><button class="thumb" data-img="img-sketch" aria-label="Open image: sketch of the Hush icon"></button><div class="caption">Icon idea for the app</div><span class="meta-in"><time>13:02</time><svg class="i xs read" role="img" aria-label="Read"><use href="#i-check-check"/></svg></span></div>
+            </div>
+          </div>
+          <div class="group theirs">
+            <div class="avatar sm" aria-hidden="true">M</div>
+            <div class="stack">
+              <div class="who">Mira</div>
+              <div class="bubble">Oh the little moon is cute. Heading out, back later<span class="meta-in"><time>13:10</time></span></div>
+            </div>
+          </div>
+          <div class="group mine" id="pending-group">
+            <div class="stack">
+              <div class="bubble" data-pending>I'll send the settings mockup tonight<span class="meta-in"><time>13:15</time><svg class="i xs" role="img" aria-label="Pending"><use href="#i-clock"/></svg></span></div>
+              <div class="bubble" data-pending>Ping me when you're back<span class="meta-in"><time>13:15</time><svg class="i xs" role="img" aria-label="Pending"><use href="#i-clock"/></svg></span></div>
+              <div class="pending-note" id="pending-note"><svg class="i xs" aria-hidden="true"><use href="#i-clock"/></svg>Waiting for Mira to come online</div>
+            </div>
+          </div>
+          <div id="typing-slot"></div>
+        </div>
+      </div>
+
+      <div class="composer-wrap">
+        <div class="col">
+          <div class="composer">
+            <button class="icon-btn" aria-label="Attach image"><svg class="i" aria-hidden="true"><use href="#i-image-plus"/></svg></button>
+            <label for="msg" class="sr-only">Message Mira</label>
+            <textarea id="msg" rows="1" placeholder="Message Mira"></textarea>
+            <button class="icon-btn" id="emoji-btn" aria-label="Emoji" aria-expanded="false" aria-controls="emoji"><svg class="i" aria-hidden="true"><use href="#i-smile"/></svg></button>
+            <button class="btn btn-primary send" id="send" aria-label="Send message"><svg class="i" aria-hidden="true"><use href="#i-send-horizontal"/></svg></button>
+          </div>
+          <div class="composer-hint"><kbd>Enter</kbd> to send · <kbd>Shift + Enter</kbd> for a new line · drop or paste images</div>
+          <div class="popover" id="emoji" role="dialog" aria-label="Emoji picker">
+            <label class="sr-only" for="emoji-search">Search emoji</label>
+            <input class="input" id="emoji-search" placeholder="Search emoji" style="width:100%">
+            <div class="grid">
+              <button>😀</button><button>😂</button><button>🥲</button><button>😍</button><button>🥰</button><button>😴</button><button>🤔</button><button>😎</button>
+              <button>👍</button><button>👏</button><button>🙏</button><button>💛</button><button>🔥</button><button>✨</button><button>🌙</button><button>☕</button>
+            </div>
+            <div class="small muted" style="margin-top:8px">The real app uses emoji-mart, themed with Hush tokens.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="toast" id="toast" role="status"><svg class="i sm" aria-hidden="true"><use href="#i-circle-check"/></svg><span>2 queued messages delivered to Mira</span></div>
+      <div role="status" class="sr-only" id="live"></div>
+    </main>
+  </div>
+
+  <!-- ======================= SETTINGS SCREEN ======================= -->
+  <div class="screen" id="screen-settings">
+    <div class="settings">
+      <nav class="settings-nav" aria-label="Settings sections">
+        <h2>Settings</h2>
+        <button class="nav-item" aria-current="true" data-sec="s-profile"><svg class="i sm" aria-hidden="true"><use href="#i-user"/></svg>Profile</button>
+        <button class="nav-item" data-sec="s-connection"><svg class="i sm" aria-hidden="true"><use href="#i-network"/></svg>Connection</button>
+        <button class="nav-item" data-sec="s-audio"><svg class="i sm" aria-hidden="true"><use href="#i-headphones"/></svg>Audio</button>
+        <button class="nav-item" data-sec="s-notif"><svg class="i sm" aria-hidden="true"><use href="#i-bell"/></svg>Notifications</button>
+        <button class="nav-item" data-sec="s-appearance"><svg class="i sm" aria-hidden="true"><use href="#i-palette"/></svg>Appearance</button>
+      </nav>
+      <div class="settings-body" id="settings-body">
+        <div class="close-settings">
+          <button class="icon-btn" aria-label="Close settings" data-goto="chat"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button>
+          <span class="small muted">Esc</span>
+        </div>
+        <div class="inner">
+          <section id="s-profile" aria-labelledby="h-profile">
+            <h1 id="h-profile">Profile</h1>
+            <div class="avatar-row">
+              <div class="avatar xl sam" aria-hidden="true">S</div>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <div style="display:flex;gap:8px">
+                  <button class="btn btn-secondary"><svg class="i sm" aria-hidden="true"><use href="#i-upload"/></svg>Change avatar</button>
+                  <button class="btn btn-ghost">Remove</button>
+                </div>
+                <span class="helper">PNG or JPG, square works best. Mira sees it.</span>
+              </div>
+            </div>
+            <div class="field">
+              <label for="f-name">Display name</label>
+              <input class="input" id="f-name" value="Sam" aria-describedby="f-name-help">
+              <span class="helper" id="f-name-help">How your name appears to Mira. <span class="saved"><svg class="i xs" aria-hidden="true"><use href="#i-check"/></svg>Saved</span></span>
+            </div>
+          </section>
+
+          <section id="s-connection" aria-labelledby="h-conn">
+            <h1 id="h-conn">Connection</h1>
+            <div class="conn-card" data-conn>
+              <span class="dot offline" aria-hidden="true"></span>
+              <div class="grow"><div style="font-weight:600" data-conn-title>Not connected</div><div class="small muted" data-conn-sub>Mira's app isn't reachable right now. Messages will wait in the queue.</div></div>
+              <button class="btn btn-secondary" id="test-conn"><svg class="i sm" aria-hidden="true"><use href="#i-refresh-cw"/></svg>Test connection</button>
+            </div>
+            <div class="field">
+              <span class="label" id="l-myip">Your Tailscale IP</span>
+              <div class="copy-row">
+                <input class="input mono" value="100.88.14.2" readonly aria-labelledby="l-myip" aria-describedby="myip-help" style="flex:1">
+                <button class="btn btn-secondary" id="copy-ip"><svg class="i sm" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button>
+              </div>
+              <span class="helper" id="myip-help">Detected from Tailscale. Send this to Mira so they can add you.</span>
+            </div>
+            <div class="field">
+              <label for="f-peer">Mira's Tailscale IP</label>
+              <input class="input mono" id="f-peer" value="100.101.42.7" aria-describedby="f-peer-help">
+              <span class="helper" id="f-peer-help">Starts with 100. It's shown in Mira's Tailscale app. Hush only accepts connections from this address.</span>
+            </div>
+          </section>
+
+          <section id="s-audio" aria-labelledby="h-audio">
+            <h1 id="h-audio">Audio</h1>
+            <div class="field">
+              <label for="f-mic">Microphone</label>
+              <div class="select-wrap"><select class="input" id="f-mic"><option>Blue Yeti</option><option>Built-in microphone</option><option>System default</option></select><svg class="i sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></div>
+            </div>
+            <div class="field">
+              <span class="label" id="l-level">Input level</span>
+              <div class="meter" role="meter" aria-labelledby="l-level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="40"><div id="meter"></div></div>
+              <span class="helper">Speak to test. The bar should move when you talk.</span>
+            </div>
+            <div class="field">
+              <label for="f-out">Speaker</label>
+              <div class="select-wrap"><select class="input" id="f-out"><option>Headphones (USB)</option><option>Built-in speakers</option><option>System default</option></select><svg class="i sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></div>
+            </div>
+          </section>
+
+          <section id="s-notif" aria-labelledby="h-notif">
+            <h1 id="h-notif">Notifications</h1>
+            <div class="toggle-row">
+              <div><h3 id="l-notif">Desktop notifications</h3><div class="helper">Show a notification when Mira messages or calls you while Hush isn't focused.</div></div>
+              <button class="switch" role="switch" aria-checked="true" aria-labelledby="l-notif"></button>
+            </div>
+          </section>
+
+          <section id="s-appearance" aria-labelledby="h-app">
+            <h1 id="h-app">Appearance</h1>
+            <div class="field">
+              <span class="label" id="l-theme">Theme</span>
+              <div class="segmented" role="radiogroup" aria-labelledby="l-theme">
+                <button role="radio" aria-checked="true" data-set-theme="dark"><svg class="i sm" aria-hidden="true"><use href="#i-moon"/></svg>Dark</button>
+                <button role="radio" aria-checked="false" data-set-theme="light"><svg class="i sm" aria-hidden="true"><use href="#i-sun"/></svg>Light</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= STATES GALLERY ======================= -->
+  <div class="screen" id="screen-states">
+    <div class="states">
+      <h1>Component states</h1>
+      <p>Hover, focus, pressed, loading, disabled, empty and error states, shown frozen so you can compare them. Everything here uses the same tokens as the app.</p>
+      <div class="gallery">
+
+        <div class="card wide">
+          <h2>Buttons</h2>
+          <div class="row">
+            <div class="cap">Default<button class="btn btn-primary">Send</button></div>
+            <div class="cap">Hover<button class="btn btn-primary is-hover">Send</button></div>
+            <div class="cap">Focus<button class="btn btn-primary is-focus">Send</button></div>
+            <div class="cap">Pressed<button class="btn btn-primary is-active">Send</button></div>
+            <div class="cap">Disabled<button class="btn btn-primary" disabled>Send</button></div>
+            <div class="cap">Loading<button class="btn btn-primary" aria-busy="true"><svg class="i sm spin" aria-hidden="true"><use href="#i-loader-circle"/></svg>Sending</button></div>
+            <div class="cap">Secondary<button class="btn btn-secondary">Test connection</button></div>
+            <div class="cap">Secondary hover<button class="btn btn-secondary is-hover">Test connection</button></div>
+            <div class="cap">Ghost<button class="btn btn-ghost">Remove</button></div>
+            <div class="cap">Danger<button class="btn btn-danger"><svg class="i sm" aria-hidden="true"><use href="#i-phone-off"/></svg>Hang up</button></div>
+            <div class="cap">Danger hover<button class="btn btn-danger is-hover"><svg class="i sm" aria-hidden="true"><use href="#i-phone-off"/></svg>Hang up</button></div>
+            <div class="cap">Icon / toggled<span class="row"><button class="icon-btn" aria-label="Mute"><svg class="i" aria-hidden="true"><use href="#i-mic"/></svg></button><button class="icon-btn is-hover" aria-label="Mute (hover)"><svg class="i" aria-hidden="true"><use href="#i-mic"/></svg></button><button class="icon-btn" aria-pressed="true" aria-label="Unmute"><svg class="i" aria-hidden="true"><use href="#i-mic-off"/></svg></button></span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Text field</h2>
+          <div class="field"><label for="st1">Default</label><input class="input mono" id="st1" placeholder="100.x.x.x"></div>
+          <div class="field"><label for="st2">Focus</label><input class="input mono is-focus" id="st2" value="100.101.4"></div>
+          <div class="field"><label for="st3">Error</label><input class="input mono" id="st3" value="192.168.1.20" aria-invalid="true" aria-describedby="st3e"><span class="error" id="st3e"><svg class="i xs" aria-hidden="true" style="margin-top:1px"><use href="#i-circle-alert"/></svg>That's a home network address, not a Tailscale one. Tailscale IPs start with 100.</span></div>
+          <div class="field"><label for="st4">Disabled</label><input class="input" id="st4" value="Sam" disabled></div>
+        </div>
+
+        <div class="card">
+          <h2>Toggles & selection</h2>
+          <div class="row">
+            <div class="cap">On<button class="switch" role="switch" aria-checked="true" aria-label="On"></button></div>
+            <div class="cap">Off<button class="switch" role="switch" aria-checked="false" aria-label="Off"></button></div>
+            <div class="cap">Focus<button class="switch is-focus" role="switch" aria-checked="true" aria-label="Focus"></button></div>
+            <div class="cap">Disabled<button class="switch" role="switch" aria-checked="false" disabled aria-label="Disabled"></button></div>
+          </div>
+          <div class="cap">Nav item: default / hover / current
+            <div style="display:flex;flex-direction:column;gap:2px;width:220px">
+              <button class="nav-item"><svg class="i sm" aria-hidden="true"><use href="#i-headphones"/></svg>Audio</button>
+              <button class="nav-item" style="background:var(--hover);color:var(--text)"><svg class="i sm" aria-hidden="true"><use href="#i-bell"/></svg>Notifications</button>
+              <button class="nav-item" aria-current="true"><svg class="i sm" aria-hidden="true"><use href="#i-palette"/></svg>Appearance</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Message delivery status</h2>
+          <div class="inset" style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+            <div class="group mine" style="margin:0"><div class="stack" style="max-width:100%"><div class="bubble">Pending<span class="meta-in"><time>13:15</time><svg class="i xs" role="img" aria-label="Pending"><use href="#i-clock"/></svg></span></div></div></div>
+            <div class="group mine" style="margin:0"><div class="stack" style="max-width:100%"><div class="bubble">Sent<span class="meta-in"><time>13:16</time><svg class="i xs" role="img" aria-label="Sent"><use href="#i-check"/></svg></span></div></div></div>
+            <div class="group mine" style="margin:0"><div class="stack" style="max-width:100%"><div class="bubble">Delivered<span class="meta-in"><time>13:16</time><svg class="i xs" role="img" aria-label="Delivered"><use href="#i-check-check"/></svg></span></div></div></div>
+            <div class="group mine" style="margin:0"><div class="stack" style="max-width:100%"><div class="bubble">Read<span class="meta-in"><time>13:17</time><svg class="i xs read" role="img" aria-label="Read"><use href="#i-check-check"/></svg></span></div></div></div>
+          </div>
+          <div class="sys" style="margin:0"><svg class="i xs" aria-hidden="true"><use href="#i-circle-check"/></svg>2 queued messages delivered · 18:02</div>
+        </div>
+
+        <div class="card">
+          <h2>Loading history (skeleton)</h2>
+          <div class="inset" style="display:flex;flex-direction:column;gap:8px" aria-busy="true" aria-label="Loading messages">
+            <div class="skel" style="width:55%;height:40px"></div>
+            <div class="skel" style="width:35%;height:40px"></div>
+            <div class="skel" style="width:48%;height:40px;align-self:flex-end"></div>
+            <div class="skel" style="width:62%;height:120px"></div>
+            <div class="skel" style="width:30%;height:40px;align-self:flex-end"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Empty chat</h2>
+          <div class="inset empty">
+            <div class="art"><svg class="i" aria-hidden="true"><use href="#i-message-circle"/></svg></div>
+            <h3>No messages yet</h3>
+            <p>Your conversation with Mira lives only on your two computers.</p>
+            <button class="btn btn-primary">Say hi to Mira</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>First run: no peer set</h2>
+          <div class="inset empty">
+            <div class="art"><svg class="i" aria-hidden="true"><use href="#i-network"/></svg></div>
+            <h3>Connect to your person</h3>
+            <p>Add their Tailscale IP to start chatting. Yours is <span class="mono" style="color:var(--text)">100.88.14.2</span>.</p>
+            <button class="btn btn-primary">Open connection settings</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Errors</h2>
+          <div class="banner" role="alert"><svg class="i" aria-hidden="true"><use href="#i-wifi-off"/></svg><div class="grow"><div style="font-weight:600">Tailscale isn't running</div><div class="small muted">Start Tailscale, then retry. Messages you send will wait.</div></div><button class="btn btn-secondary">Retry</button></div>
+          <div class="banner" role="alert"><svg class="i" aria-hidden="true"><use href="#i-mic-off"/></svg><div class="grow"><div style="font-weight:600">Can't use your microphone</div><div class="small muted">Hush needs microphone access for calls.</div></div><button class="btn btn-secondary">Audio settings</button></div>
+          <div class="banner info" role="status"><svg class="i" aria-hidden="true"><use href="#i-clock"/></svg><div class="grow small">Mira is offline. Messages will be delivered when you're both online.</div></div>
+        </div>
+
+        <div class="card">
+          <h2>Image sending</h2>
+          <div class="row">
+            <div class="cap">Uploading
+              <div class="upload"><svg class="ph" viewBox="0 0 400 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#ph-lake"/></svg><div class="veil" role="status"><svg class="i spin" aria-hidden="true"><use href="#i-loader-circle"/></svg>Sending 62%<div class="progress"><div></div></div></div></div>
+            </div>
+            <div class="cap">Failed
+              <div class="upload"><svg class="ph" viewBox="0 0 400 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#ph-lake"/></svg><div class="veil" role="alert"><svg class="i" aria-hidden="true" style="color:#F47067"><use href="#i-circle-alert"/></svg>Couldn't send<button class="btn btn-secondary" style="height:30px">Retry</button></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Drag and drop</h2>
+          <div class="inset" style="height:200px">
+            <div class="dropzone"><div><svg class="i" aria-hidden="true"><use href="#i-image-plus"/></svg><div style="font-weight:600">Drop to send to Mira</div><div class="small muted">PNG, JPG, GIF or WebP</div></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Incoming call</h2>
+          <div class="inset" style="display:grid;place-items:center;padding:24px;background:var(--scrim)">
+            <div class="dialog" style="width:300px;animation:none">
+              <div class="ring-wrap"><div class="avatar lg" aria-hidden="true">M</div></div>
+              <h2>Mira is calling</h2>
+              <div class="small muted">Voice call</div>
+              <div class="actions">
+                <button class="btn btn-danger"><svg class="i sm" aria-hidden="true"><use href="#i-phone-off"/></svg>Decline</button>
+                <button class="btn btn-success"><svg class="i sm" aria-hidden="true"><use href="#i-phone"/></svg>Accept</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Outgoing call (ringing)</h2>
+          <div class="inset" style="padding:0">
+            <div class="callbar show" style="animation:none">
+              <svg class="i sm spin" aria-hidden="true" style="color:var(--success)"><use href="#i-loader-circle"/></svg>
+              <span class="who">Calling Mira…</span>
+              <span class="grow"></span>
+              <button class="btn btn-danger"><svg class="i sm" aria-hidden="true"><use href="#i-phone-off"/></svg>Cancel</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Incoming call dialog -->
+  <div class="overlay" id="incoming" role="dialog" aria-modal="true" aria-labelledby="inc-title">
+    <div class="dialog">
+      <div class="ring-wrap"><div class="avatar lg" aria-hidden="true">M</div></div>
+      <h2 id="inc-title">Mira is calling</h2>
+      <div class="small muted">Voice call · Esc to decline</div>
+      <div class="actions">
+        <button class="btn btn-danger btn-lg" id="decline"><svg class="i sm" aria-hidden="true"><use href="#i-phone-off"/></svg>Decline</button>
+        <button class="btn btn-success btn-lg" id="accept"><svg class="i sm" aria-hidden="true"><use href="#i-phone"/></svg>Accept</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lightbox -->
+  <div class="overlay lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="Image viewer">
+    <button class="icon-btn close" id="lb-close" aria-label="Close image (Esc)"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button>
+    <figure><div id="lb-img" style="width:100%;display:flex;justify-content:center"></div><figcaption id="lb-cap"></figcaption></figure>
+  </div>
+</div>
+</div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="ph-lake" viewBox="0 0 400 300"><rect width="400" height="180" fill="url(#g-sky)"/><circle cx="250" cy="168" r="26" fill="#FBD38D"/><path d="M0 150 L70 120 L130 145 L200 110 L280 150 L340 125 L400 150 L400 180 L0 180Z" fill="#3A2A3A"/><rect y="180" width="400" height="120" fill="url(#g-water)"/></symbol>
+</defs></svg>
+
+<script>
+(() => {
+  const app = document.getElementById('app');
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const live = $('#live');
+  const announce = (t) => { live.textContent = ''; setTimeout(() => live.textContent = t, 50); };
+  const icon = (name, cls = 'i xs', label) =>
+    `<svg class="${cls}" ${label ? `role="img" aria-label="${label}"` : 'aria-hidden="true"'}><use href="#i-${name}"/></svg>`;
+
+  // fill image thumbnails from templates
+  $$('.thumb').forEach(b => b.appendChild($('#' + b.dataset.img).content.cloneNode(true)));
+
+  // ---------- review controls ----------
+  function setScreen(name) {
+    $$('.screen').forEach(s => s.classList.toggle('active', s.id === 'screen-' + name));
+    $$('[data-screen]').forEach(b => b.setAttribute('aria-pressed', b.dataset.screen === name));
+  }
+  function setTheme(t) {
+    app.classList.toggle('light', t === 'light');
+    $$('[data-theme]').forEach(b => b.setAttribute('aria-pressed', b.dataset.theme === t));
+    $$('[data-set-theme]').forEach(b => b.setAttribute('aria-checked', b.dataset.setTheme === t));
+  }
+  $$('[data-screen]').forEach(b => b.onclick = () => setScreen(b.dataset.screen));
+  $$('[data-theme]').forEach(b => b.onclick = () => setTheme(b.dataset.theme));
+  $$('[data-set-theme]').forEach(b => b.onclick = () => setTheme(b.dataset.setTheme));
+  $$('[data-goto]').forEach(b => b.onclick = () => setScreen(b.dataset.goto));
+
+  // ---------- peer online / offline ----------
+  let online = false;
+  function setOnline(on) {
+    online = on;
+    $('#sim-online').setAttribute('aria-pressed', on);
+    $$('[data-peer-status]').forEach(el => el.innerHTML = on
+      ? `<span class="dot online" aria-hidden="true"></span><span>Online</span>`
+      : `<span class="dot offline" aria-hidden="true"></span><span>Offline · last seen 13:11</span>`);
+    $$('[data-peer-badge]').forEach(b => b.className = 'badge ' + (on ? 'online' : 'offline'));
+    $$('[data-call-btn]').forEach(b => { b.disabled = !on; b.title = on ? 'Start voice call' : 'Mira is offline'; });
+    const conn = $('[data-conn]');
+    conn.querySelector('.dot').className = 'dot ' + (on ? 'online' : 'offline');
+    $('[data-conn-title]').textContent = on ? 'Connected to Mira' : 'Not connected';
+    $('[data-conn-sub]').textContent = on ? 'Direct over Tailscale · 100.101.42.7:47821' : "Mira's app isn't reachable right now. Messages will wait in the queue.";
+
+    const pending = $$('[data-pending]');
+    if (on && pending.length) {
+      pending.forEach(b => { b.removeAttribute('data-pending'); b.querySelector('.meta-in svg').outerHTML = icon('check-check', 'i xs', 'Delivered'); });
+      $('#pending-note')?.remove();
+      const n = document.createElement('div');
+      n.className = 'sys';
+      n.innerHTML = `${icon('circle-check')}2 queued messages delivered · 18:02`;
+      $('#typing-slot').before(n);
+      const t = $('#toast'); t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3200);
+      setTimeout(showTyping, 1400);
+    }
+    if (!on) { hideTyping(); if (inCall) setCall(false); }
+    announce(on ? 'Mira is online' : 'Mira went offline');
+  }
+  function showTyping() {
+    if (!online) return;
+    $('#typing-slot').innerHTML = `<div class="group theirs"><div class="avatar sm" aria-hidden="true">M</div><div class="stack"><div class="bubble typing" aria-hidden="true"><i></i><i></i><i></i></div><div class="typing-label">Mira is typing…</div></div></div>`;
+    announce('Mira is typing');
+    scrollBottom();
+  }
+  function hideTyping() { $('#typing-slot').innerHTML = ''; }
+  $('#sim-online').onclick = () => setOnline(!online);
+
+  // ---------- calls ----------
+  let inCall = false, secs = 763, timer;
+  function setCall(on) {
+    inCall = on;
+    if (on && !online) setOnline(true);
+    $('#callbar').classList.toggle('show', on);
+    $('#sim-call').setAttribute('aria-pressed', on);
+    $$('[data-call-btn]').forEach(b => { b.disabled = on || !online; b.title = on ? 'Already in a call' : 'Start voice call'; });
+    clearInterval(timer);
+    if (on) {
+      secs = 763;
+      const tick = () => $('#call-timer').textContent = `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
+      tick(); timer = setInterval(() => { secs++; tick(); }, 1000);
+    }
+    announce(on ? 'Call started' : 'Call ended');
+  }
+  $('#sim-call').onclick = () => { setScreen('chat'); setCall(!inCall); };
+  $('#hangup').onclick = () => setCall(false);
+  $$('[data-call-btn]').forEach(b => b.onclick = () => setCall(true));
+  $('#mute-btn').onclick = (e) => {
+    const b = e.currentTarget, m = b.getAttribute('aria-pressed') !== 'true';
+    b.setAttribute('aria-pressed', m);
+    b.setAttribute('aria-label', m ? 'Unmute microphone' : 'Mute microphone');
+    b.innerHTML = icon(m ? 'mic-off' : 'mic', 'i');
+  };
+
+  // ---------- dialogs (focus trap + restore) ----------
+  let lastFocus = null, openDlg = null;
+  function openDialog(el, focusEl) {
+    lastFocus = document.activeElement; openDlg = el;
+    el.classList.add('show'); (focusEl || el.querySelector('button')).focus();
+  }
+  function closeDialog() {
+    if (!openDlg) return;
+    openDlg.classList.remove('show'); openDlg = null;
+    lastFocus?.focus();
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (openDlg?.id === 'incoming') { closeDialog(); return; }
+      if (openDlg) { closeDialog(); return; }
+      if ($('#emoji').classList.contains('show')) { toggleEmoji(false); return; }
+      if ($('#screen-settings').classList.contains('active')) setScreen('chat');
+    }
+    if (e.key === 'Tab' && openDlg) {
+      const f = $$('button', openDlg); const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+  $('#sim-incoming').onclick = () => { setScreen('chat'); if (!online) setOnline(true); openDialog($('#incoming'), $('#accept')); };
+  $('#decline').onclick = closeDialog;
+  $('#accept').onclick = () => { closeDialog(); setCall(true); };
+
+  // lightbox
+  $$('.thumb').forEach(b => b.onclick = () => {
+    const holder = $('#lb-img'); holder.innerHTML = '';
+    holder.appendChild($('#' + b.dataset.img).content.cloneNode(true));
+    $('#lb-cap').textContent = b.getAttribute('aria-label').replace('Open image: ', '');
+    openDialog($('#lightbox'), $('#lb-close'));
+  });
+  $('#lb-close').onclick = closeDialog;
+  $('#lightbox').onclick = (e) => { if (e.target.id === 'lightbox') closeDialog(); };
+
+  // ---------- composer ----------
+  const ta = $('#msg');
+  const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 200) + 'px'; };
+  ta.addEventListener('input', grow);
+  function scrollBottom(instant) { const l = $('#log'); l.scrollTo({ top: l.scrollHeight, behavior: instant ? 'instant' : 'smooth' }); }
+  function send() {
+    const text = ta.value.trim(); if (!text) return;
+    const now = new Date(); const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const status = online ? icon('check', 'i xs', 'Sent') : icon('clock', 'i xs', 'Pending');
+    const b = document.createElement('div'); b.className = 'bubble';
+    b.textContent = text;
+    b.insertAdjacentHTML('beforeend', `<span class="meta-in"><time>${time}</time>${status}</span>`);
+    if (!online) b.setAttribute('data-pending', '');
+    let group = $('#typing-slot').previousElementSibling;
+    if (!group || !group.classList.contains('mine')) {
+      group = document.createElement('div'); group.className = 'group mine';
+      group.innerHTML = '<div class="stack"></div>'; $('#typing-slot').before(group);
+    }
+    const stack = group.querySelector('.stack');
+    const note = $('#pending-note', stack);
+    note ? note.before(b) : stack.appendChild(b);
+    if (!online && !$('#pending-note')) stack.insertAdjacentHTML('beforeend', `<div class="pending-note" id="pending-note">${icon('clock')}Waiting for Mira to come online</div>`);
+    if (online) setTimeout(() => b.querySelector('.meta-in svg').outerHTML = icon('check-check', 'i xs', 'Delivered'), 700);
+    ta.value = ''; grow(); scrollBottom();
+  }
+  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+  $('#send').onclick = send;
+
+  // emoji popover
+  function toggleEmoji(show) {
+    $('#emoji').classList.toggle('show', show); $('#emoji-btn').setAttribute('aria-expanded', show);
+    if (show) $('#emoji-search').focus(); else $('#emoji-btn').focus();
+  }
+  $('#emoji-btn').onclick = () => toggleEmoji(!$('#emoji').classList.contains('show'));
+  $$('#emoji .grid button').forEach(b => b.onclick = () => { ta.value += b.textContent; toggleEmoji(false); ta.focus(); });
+
+  // ---------- settings ----------
+  $$('.nav-item[data-sec]').forEach(b => b.onclick = () => {
+    $$('.nav-item[data-sec]').forEach(x => x.removeAttribute('aria-current'));
+    b.setAttribute('aria-current', 'true');
+    document.getElementById(b.dataset.sec).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  $$('.settings .switch').forEach(s => s.onclick = () => s.setAttribute('aria-checked', s.getAttribute('aria-checked') !== 'true'));
+  $('#copy-ip').onclick = (e) => {
+    const s = e.currentTarget.querySelector('span'); s.textContent = 'Copied';
+    setTimeout(() => s.textContent = 'Copy', 1500);
+  };
+  $('#test-conn').onclick = (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    b.innerHTML = `${icon('loader-circle', 'i sm spin')}Testing`;
+    setTimeout(() => { b.disabled = false; b.innerHTML = `${icon('refresh-cw', 'i sm')}Test connection`; }, 1200);
+  };
+  // peer IP inline validation
+  const peer = $('#f-peer');
+  peer.addEventListener('blur', () => {
+    const ok = /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(peer.value.trim());
+    const help = $('#f-peer-help');
+    peer.setAttribute('aria-invalid', !ok);
+    help.className = ok ? 'helper' : 'error';
+    help.innerHTML = ok
+      ? `Starts with 100. It's shown in Mira's Tailscale app. <span class="saved">${icon('check')}Saved</span>`
+      : `${icon('circle-alert')}That isn't a Tailscale IP. It should look like 100.x.x.x.`;
+  });
+  // mic meter
+  setInterval(() => { const v = 15 + Math.round(Math.random() * 55); $('#meter').style.width = v + '%'; $('.meter').setAttribute('aria-valuenow', v); }, 180);
+
+  scrollBottom(true);
+})();
+</script>
+</body>
+</html>

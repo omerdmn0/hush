@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Hush">
+  <!-- chamfered tile -->
+  <path fill="#0D0B14" d="M0 0H50L64 14V64H14L0 50Z"/>
+  <!-- cyan chromatic ghost -->
+  <path fill="#00E5FF" d="M9 14H43L51 22V38L45 44H25L15 53V44H9Z"/>
+  <!-- magenta angular bubble -->
+  <path fill="#FF2E88" d="M12 14H46L54 22V38L48 44H28L18 53V44H12Z"/>
+  <!-- crescent moon cut-out -->
+  <path fill="#0D0B14" d="M35 21.7a9.5 9.5 0 1 0 4.3 15.9 8 8 0 0 1-4.3-15.9z"/>
+</svg>

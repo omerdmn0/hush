@@ -1,0 +1,375 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Hush is dark-only (design-system/hush/MASTER.md v2 "Neon").
+   <html class="dark"> is set permanently so shadcn's dark: variants apply. */
+@custom-variant dark (&:is(.dark *));
+
+/* ---------- Tokens (MASTER.md §2) ---------- */
+:root {
+  color-scheme: dark;
+
+  /* Hush tokens */
+  --bg-sidebar: #08070d;
+  --bg-app: #0d0b14;
+  --surface: #15121f;
+  --surface-elevated: #1c1828;
+  --sunken: #0a0910;
+  --hover: #1a1626;
+  --pressed: #241e33;
+  --edge: #2a2440;
+  --border-strong: #6e6491;
+  --grid: rgba(0, 229, 255, 0.045);
+  --scanlines: 0.3;
+  --scrim: rgba(4, 3, 10, 0.78);
+  --text: #eceaf4;
+  --text-muted: #9c95b8;
+  --cyan: #00e5ff;
+  --on-cyan: #04030a;
+  --cyan-hover: #7df3ff;
+  --cyan-subtle: #0b2830;
+  --magenta: #ff2e88;
+  --magenta-subtle: #2b0d1f;
+  --glow: 0 0 16px rgba(0, 229, 255, 0.45);
+  --chroma: -1px 0 rgba(255, 46, 136, 0.7), 1px 0 rgba(0, 229, 255, 0.7);
+  --bubble-mine: #24101f;
+  --edge-mine: #7a1a49;
+  --bubble-theirs: #0c1c24;
+  --edge-theirs: #0b5560;
+  --online: #3dff8e;
+  --offline: #7a7398;
+  --queued: #ffc23d;
+  --danger-text: #ff3b4e;
+  --danger: #e0243a;
+  --danger-2: #c81e33;
+  --on-danger: #ffffff;
+  --callbar: #06170f;
+  --avatar-peer: linear-gradient(135deg, #0e7c8a, #14304d);
+  --avatar-me: linear-gradient(135deg, #b0206a, #3f1550);
+
+  --dur-micro: 120ms;
+  --dur-enter: 180ms;
+  --dur-exit: 120ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* shadcn/ui semantic variables, mapped onto Hush tokens */
+  --background: var(--bg-app);
+  --foreground: var(--text);
+  --card: var(--surface);
+  --card-foreground: var(--text);
+  --popover: var(--surface-elevated);
+  --popover-foreground: var(--text);
+  --primary: var(--cyan);
+  --primary-foreground: var(--on-cyan);
+  --secondary: var(--pressed);
+  --secondary-foreground: var(--text);
+  --muted: var(--hover);
+  --muted-foreground: var(--text-muted);
+  --accent: var(--hover);
+  --accent-foreground: var(--text);
+  --destructive: var(--danger);
+  --border: var(--edge);
+  --input: var(--border-strong);
+  --ring: var(--cyan);
+  --radius: 0.125rem;
+  --sidebar: var(--bg-sidebar);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--cyan);
+  --sidebar-primary-foreground: var(--on-cyan);
+  --sidebar-accent: var(--cyan-subtle);
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-border: var(--edge);
+  --sidebar-ring: var(--cyan);
+}
+
+@theme inline {
+  --font-display: "Orbitron Variable", "Exo 2 Variable", sans-serif;
+  --font-sans: "Exo 2 Variable", "Segoe UI", "Noto Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", monospace;
+  --font-heading: var(--font-display);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Hush-specific colours as utilities: bg-surface, text-cyan, border-edge, … */
+  --color-app: var(--bg-app);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-sunken: var(--sunken);
+  --color-hover: var(--hover);
+  --color-pressed: var(--pressed);
+  --color-edge: var(--edge);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-cyan: var(--cyan);
+  --color-on-cyan: var(--on-cyan);
+  --color-cyan-hover: var(--cyan-hover);
+  --color-cyan-subtle: var(--cyan-subtle);
+  --color-magenta: var(--magenta);
+  --color-magenta-subtle: var(--magenta-subtle);
+  --color-online: var(--online);
+  --color-offline: var(--offline);
+  --color-queued: var(--queued);
+  --color-danger: var(--danger);
+  --color-danger-2: var(--danger-2);
+  --color-danger-text: var(--danger-text);
+  --color-on-danger: var(--on-danger);
+  --color-callbar: var(--callbar);
+
+  --radius-sm: var(--radius);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-xl: var(--radius);
+
+  --shadow-glow: var(--glow);
+  --ease-hush: var(--ease);
+
+  --animate-rise: rise var(--dur-enter) var(--ease);
+  --animate-blink: blink 1.2s infinite;
+  --animate-caret: caret 1s steps(1) infinite;
+  --animate-wave: wave 1s ease-in-out infinite;
+  --animate-pulse-soft: pulse-soft 1.4s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.4s infinite;
+
+  @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+  @keyframes blink { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+  @keyframes caret { 50% { opacity: 0; } }
+  @keyframes wave { 0%, 100% { transform: scaleY(0.25); } 50% { transform: scaleY(1); } }
+  @keyframes pulse-soft { 50% { opacity: 0.35; } }
+  @keyframes shimmer { to { transform: translateX(100%); } }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background: var(--bg-app);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  ::selection {
+    background: var(--magenta);
+    color: var(--on-cyan);
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--edge);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--border-strong);
+  }
+}
+
+/* ---------- HUD utilities (MASTER.md §4) ---------- */
+@layer components {
+  /* Static scanlines over the whole window */
+  .scanlines::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 100;
+    opacity: var(--scanlines);
+    background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.35) 0 1px, transparent 1px 3px);
+  }
+
+  .hud-grid {
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  /* Chamfered containers: outer layer = edge colour, ::before inset 1px = fill.
+     Never apply to focusable controls (clip-path would hide the focus ring). */
+  .cut {
+    position: relative;
+    isolation: isolate;
+    background: var(--edge-c, var(--edge));
+    clip-path: var(--clip);
+  }
+  .cut::before {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    background: var(--fill-c, var(--surface));
+    clip-path: var(--clip-in);
+    z-index: -1;
+    transition: inset var(--dur-micro) var(--ease);
+  }
+  .panel {
+    --c: 12px;
+    --ci: calc(var(--c) - 0.41px);
+    --clip: polygon(var(--c) 0, 100% 0, 100% calc(100% - var(--c)), calc(100% - var(--c)) 100%, 0 100%, 0 var(--c));
+    --clip-in: polygon(var(--ci) 0, 100% 0, 100% calc(100% - var(--ci)), calc(100% - var(--ci)) 100%, 0 100%, 0 var(--ci));
+  }
+  .panel-sm {
+    --c: 8px;
+  }
+  .shape-mine {
+    --c: 10px;
+    --ci: calc(var(--c) - 0.41px);
+    --clip: polygon(0 0, 100% 0, 100% calc(100% - var(--c)), calc(100% - var(--c)) 100%, 0 100%);
+    --clip-in: polygon(0 0, 100% 0, 100% calc(100% - var(--ci)), calc(100% - var(--ci)) 100%, 0 100%);
+    --edge-c: var(--edge-mine);
+    --fill-c: var(--bubble-mine);
+  }
+  .shape-theirs {
+    --c: 10px;
+    --ci: calc(var(--c) - 0.41px);
+    --clip: polygon(0 0, 100% 0, 100% 100%, var(--c) 100%, 0 calc(100% - var(--c)));
+    --clip-in: polygon(0 0, 100% 0, 100% 100%, var(--ci) 100%, 0 calc(100% - var(--ci)));
+    --edge-c: var(--edge-theirs);
+    --fill-c: var(--bubble-theirs);
+  }
+  .chamfer-avatar {
+    --c: calc(var(--s, 36px) * 0.25);
+    clip-path: polygon(0 0, calc(100% - var(--c)) 0, 100% var(--c), 100% 100%, var(--c) 100%, 0 calc(100% - var(--c)));
+  }
+
+  /* Corner brackets (targeting reticle) */
+  .reticle {
+    position: relative;
+    padding: 8px;
+  }
+  .reticle::before,
+  .reticle::after {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--cyan);
+  }
+  .reticle::before {
+    top: 0;
+    left: 0;
+    border-right: 0;
+    border-bottom: 0;
+  }
+  .reticle::after {
+    bottom: 0;
+    right: 0;
+    border-left: 0;
+    border-top: 0;
+  }
+
+  /* Typography roles (MASTER.md §3) */
+  .display {
+    font-family: var(--font-display);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-weight: 700;
+    text-shadow: var(--chroma);
+  }
+  .label {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 16px;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .data {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 16px;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+
+  /* Hairline separator with fading ends */
+  .rule {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .rule::before,
+  .rule::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--rule-c, var(--edge)));
+  }
+  .rule::after {
+    background: linear-gradient(90deg, var(--rule-c, var(--edge)), transparent);
+  }
+
+  .glitch {
+    animation: glitch 4s steps(2) infinite;
+  }
+  .glitch-hover:hover {
+    animation: glitch 0.35s steps(2) 1;
+  }
+}
+
+@keyframes glitch {
+  0%, 8%, 100% { transform: none; text-shadow: var(--chroma); }
+  2% { transform: translate(-2px, 1px) skewX(-8deg); text-shadow: -3px 0 rgba(255, 46, 136, 0.9), 3px 0 rgba(0, 229, 255, 0.9); }
+  4% { transform: translate(2px, -1px); text-shadow: 3px 0 rgba(255, 46, 136, 0.9), -3px 0 rgba(0, 229, 255, 0.9); }
+  6% { transform: translate(-1px, 0) skewX(4deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition-duration: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}
