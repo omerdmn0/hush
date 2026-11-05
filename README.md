@@ -3,8 +3,8 @@
 Private chat for two people, peer-to-peer over Tailscale. No servers, no accounts, no cloud —
 messages live only on your two computers.
 
-> **Status:** stage b — text chat over WebSocket with SQLite history. Offline delivery,
-> images, voice calls, notifications and packaging follow in later stages. A full setup guide for
+> **Status:** stage c — text chat with history, offline queue and sync. Images, voice calls,
+> notifications and packaging follow in later stages. A full setup guide for
 > both users (installing Tailscale, finding each other's IP) will be added once the app is complete.
 
 ## Development
@@ -35,8 +35,13 @@ persist. These overrides only work in development builds, never in an installed 
 
 - Each app listens on its own Tailscale IP, port **47821**, and only accepts the configured peer IP.
   Both apps also dial each other; if both connections succeed, both keep the same one.
-- Messages are JSON frames identified by UUID; delivery and read receipts move a message's status
-  forward only, so repeats are harmless.
+- Messages are JSON frames identified by UUID and numbered per author (1, 2, 3…). Delivery and
+  read receipts only move a message's status forward, so repeats are harmless.
+- **Offline queue and sync:** a message written while the other person is offline is stored as
+  *queued*. On every connection both apps exchange one `sync` frame ("I have your messages up to
+  N, and have read up to R"); each then sends whatever the other is missing. Nothing is lost or
+  duplicated, and read receipts made offline catch up too. Both apps must run the same protocol
+  version (currently 2) — Hush shows an error if they don't.
 - History and settings are stored in `hush.db` (SQLite) in the app's data folder and never leave
   the two computers.
 

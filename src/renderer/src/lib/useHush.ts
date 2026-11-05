@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChatMessage, HushEvent, Settings, Snapshot } from '../../../shared/types'
+import type { DeliveryNotice } from './timeline'
 
 const PAGE = 100
 /** Hide the typing indicator if no refresh arrives within this time. */
@@ -11,6 +12,11 @@ export interface HushState {
   hasMore: boolean
   loadingOlder: boolean
   peerTyping: boolean
+  /** Session-only "N queued messages delivered" lines. */
+  notices: DeliveryNotice[]
+  /** The most recent flush, for the pop-up; null once it has been dismissed. */
+  flush: DeliveryNotice | null
+  dismissFlush: () => void
   loadOlder: () => void
   send: (text: string) => Promise<void>
   markRead: (ids: string[]) => void
@@ -24,8 +30,12 @@ export function useHush(): HushState {
   const [hasMore, setHasMore] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [peerTyping, setPeerTyping] = useState(false)
+  const [notices, setNotices] = useState<DeliveryNotice[]>([])
+  const [flush, setFlush] = useState<DeliveryNotice | null>(null)
   const typingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loading = useRef(false)
+  const hasMoreRef = useRef(false)
+  hasMoreRef.current = hasMore
 
   useEffect(() => {
     let alive = true
@@ -34,8 +44,14 @@ export function useHush(): HushState {
     const onEvent = (e: HushEvent): void => {
       switch (e.type) {
         case 'message':
-          setMessages((prev) => (prev.some((m) => m.id === e.message.id) ? prev : [...prev, e.message]))
+          setMessages((prev) => insertSorted(prev, e.message, hasMoreRef.current))
           break
+        case 'flushed': {
+          const notice = { id: `${e.at}`, at: e.at, count: e.count }
+          setNotices((prev) => [...prev, notice])
+          setFlush(notice)
+          break
+        }
         case 'status': {
           const next = new Map(e.updates.map((u) => [u.id, u.status]))
           setMessages((prev) => prev.map((m) => (next.has(m.id) ? { ...m, status: next.get(m.id)! } : m)))
@@ -114,5 +130,34 @@ export function useHush(): HushState {
     setSnapshot((s) => s && { ...s, settings })
   }, [])
 
-  return { snapshot, messages, hasMore, loadingOlder, peerTyping, loadOlder, send, markRead, updateSettings }
+  const dismissFlush = useCallback(() => setFlush(null), [])
+
+  return {
+    snapshot,
+    messages,
+    hasMore,
+    loadingOlder,
+    peerTyping,
+    notices,
+    flush,
+    dismissFlush,
+    loadOlder,
+    send,
+    markRead,
+    updateSettings
+  }
+}
+
+/**
+ * Adds a message keeping time order — synced messages can be older than ones already shown.
+ * If it is older than the loaded window while more history remains unloaded, it is skipped
+ * (inserting it would move the paging cursor past the unloaded messages); paging loads it.
+ */
+export function insertSorted(list: ChatMessage[], m: ChatMessage, moreHistory: boolean): ChatMessage[] {
+  if (list.some((x) => x.id === m.id)) return list
+  const after = (x: ChatMessage): boolean => x.sentAt > m.sentAt || (x.sentAt === m.sentAt && x.id > m.id)
+  if (list.length === 0 || !after(list[list.length - 1])) return [...list, m]
+  if (after(list[0])) return moreHistory ? list : [m, ...list]
+  const i = list.findIndex(after)
+  return [...list.slice(0, i), m, ...list.slice(i)]
 }

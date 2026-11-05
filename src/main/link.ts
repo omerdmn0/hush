@@ -11,6 +11,8 @@ import { MAX_FRAME_BYTES, parseFrame, PROTOCOL_VERSION, type Frame } from '../sh
  * - If both directions connect at once, both apps deterministically keep the connection dialed
  *   by the smaller install id and close the other.
  * - Heartbeats detect dead connections; dialing retries with exponential backoff.
+ * - 'up' fires whenever the active connection changes (first connect, or a switch to the
+ *   surviving duplicate), so the chat layer can re-sync anything cut off mid-switch.
  *
  * It only moves validated frames; chat logic lives in ChatService.
  */
@@ -32,6 +34,7 @@ export interface LinkPeer {
 }
 
 interface LinkEvents {
+  /** A (new) active connection is ready. May fire again without 'down' when it switches. */
   up: [peer: LinkPeer]
   down: []
   frame: [frame: Frame, peer: LinkPeer]
@@ -139,10 +142,14 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     this.scheduleDial(0)
   }
 
-  /** Sends a frame on the active connection. Resolves false if offline or the write failed. */
+  /**
+   * Sends a frame on the active connection — or, while a duplicate is being closed, on the
+   * other open one. Resolves false if offline or the write failed.
+   */
   send(frame: Frame): Promise<boolean> {
-    const c = this.active
-    if (!c || c.ws.readyState !== WebSocket.OPEN) return Promise.resolve(false)
+    const open = (c: Conn | null): c is Conn => c !== null && c.peer !== null && c.ws.readyState === WebSocket.OPEN
+    const c = open(this.active) ? this.active : ([...this.conns].find(open) ?? null)
+    if (!c) return Promise.resolve(false)
     return new Promise((resolve) => c.ws.send(JSON.stringify(frame), (err) => resolve(!err)))
   }
 
@@ -284,6 +291,7 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     } else if (this.prefer(conn, current)) {
       this.active = conn
       current.ws.close(1000, 'duplicate connection')
+      this.emit('up', conn.peer)
     } else {
       conn.ws.close(1000, 'duplicate connection')
     }
@@ -304,6 +312,7 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     const fallback = [...this.conns].find((c) => c.peer !== null && c.ws.readyState === WebSocket.OPEN)
     if (fallback) {
       this.active = fallback
+      this.emit('up', fallback.peer!)
       return
     }
     this.active = null

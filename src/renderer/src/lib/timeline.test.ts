@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChatMessage } from '../../../shared/types'
 import { dayLabel, initial } from './format'
 import { buildTimeline, GROUP_WINDOW_MS, lastQueuedId } from './timeline'
+import { insertSorted } from './useHush'
 
 const at = (y: number, mo: number, d: number, h: number, mi: number, s = 0, ms = 0): number =>
   new Date(y, mo - 1, d, h, mi, s, ms).getTime()
@@ -52,6 +53,14 @@ describe('buildTimeline', () => {
     expect(groups.map((g) => g.kind === 'group' && g.messages[0].id)).toEqual([early.id, late.id])
   })
 
+  it('places a delivery notice by time and breaks the group around it', () => {
+    const t = at(2026, 11, 5, 13, 15)
+    const items = buildTimeline([msg('me', t, 'delivered'), msg('me', t + 60_000, 'delivered')], NOW, [
+      { id: 'n1', at: t + 30_000, count: 1 }
+    ])
+    expect(items.map((i) => i.kind)).toEqual(['day', 'group', 'notice', 'group'])
+  })
+
   it('returns nothing for an empty history', () => {
     expect(buildTimeline([], NOW)).toEqual([])
   })
@@ -80,5 +89,19 @@ describe('initial', () => {
     expect(initial('mira')).toBe('M')
     expect(initial('  Ömer')).toBe('Ö')
     expect(initial('')).toBe('?')
+  })
+})
+
+describe('insertSorted', () => {
+  const t = at(2026, 11, 5, 12, 0)
+  const [m1, m2, m3] = [msg('me', t), msg('peer', t + 1000), msg('me', t + 2000)]
+  it('appends new messages and places synced ones by time, ignoring duplicates', () => {
+    expect(insertSorted([m1, m3], m2, false).map((m) => m.id)).toEqual([m1.id, m2.id, m3.id])
+    expect(insertSorted([m1, m2], m3, false)).toEqual([m1, m2, m3])
+    expect(insertSorted([m1, m2], m2, false)).toEqual([m1, m2])
+  })
+  it('only prepends an older message when no unloaded history remains', () => {
+    expect(insertSorted([m2, m3], m1, true)).toEqual([m2, m3])
+    expect(insertSorted([m2, m3], m1, false)).toEqual([m1, m2, m3])
   })
 })

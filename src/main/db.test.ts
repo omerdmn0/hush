@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { HushDb, toChatMessage, type StoredMessage } from './db'
 
@@ -19,10 +20,11 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-const make = (authorId: string, sentAt: number, status: StoredMessage['status'] = 'sent'): StoredMessage => ({
+const make = (authorId: string, seq: number | null, sentAt: number, status: StoredMessage['status'] = 'sent'): StoredMessage => ({
   id: randomUUID(),
   authorId,
-  body: `msg at ${sentAt}`,
+  seq,
+  body: `msg ${seq} at ${sentAt}`,
   sentAt,
   status
 })
@@ -37,30 +39,68 @@ describe('HushDb', () => {
     expect(db.getSetting('missing')).toBeUndefined()
   })
 
+  it('numbers own messages 1, 2, 3… per author', () => {
+    const a = db.createOwnMessage(ME, 'one', 10)
+    const b = db.createOwnMessage(ME, 'two', 20)
+    db.insertMessage(make(PEER, 1, 15))
+    const c = db.createOwnMessage(ME, 'three', 30)
+    expect([a.seq, b.seq, c.seq]).toEqual([1, 2, 3])
+    expect(a.status).toBe('queued')
+  })
+
   it('ignores a duplicate message id (sync-safe insert)', () => {
-    const m = make(PEER, 1000, 'delivered')
+    const m = make(PEER, 1, 1000, 'delivered')
     expect(db.insertMessage(m)).toBe(true)
     expect(db.insertMessage({ ...m, body: 'tampered' })).toBe(false)
     expect(db.getMessage(m.id)?.body).toBe(m.body)
   })
 
+  it('fills in a missing sequence number when a known message is re-sent', () => {
+    const legacy = make(PEER, null, 1000, 'delivered')
+    db.insertMessage(legacy)
+    expect(db.insertMessage({ ...legacy, seq: 5 })).toBe(false)
+    expect(db.getMessage(legacy.id)?.seq).toBe(5)
+  })
+
   it('only advances status forward and only for the given author', () => {
-    const mine = make(ME, 1000, 'queued')
-    db.insertMessage(mine)
+    const mine = db.createOwnMessage(ME, 'x', 1000)
     expect(db.advanceStatus([mine.id], 'sent', ME)).toEqual([mine.id])
     expect(db.advanceStatus([mine.id], 'read', ME)).toEqual([mine.id])
     expect(db.advanceStatus([mine.id], 'delivered', ME)).toEqual([]) // no going back
     expect(db.getMessage(mine.id)?.status).toBe('read')
 
-    const theirs = make(PEER, 2000, 'delivered')
+    const theirs = make(PEER, 1, 2000, 'delivered')
     db.insertMessage(theirs)
-    // A receipt for "their" message claiming to come from me must not touch it.
     expect(db.advanceStatus([theirs.id], 'read', ME)).toEqual([])
-    expect(db.advanceStatus([theirs.id], 'read', PEER)).toEqual([theirs.id])
+    expect(db.advanceStatusFromOthers([theirs.id], 'read', ME)).toEqual([theirs.id])
+  })
+
+  it('computes the contiguous sequence watermark and stops at the first gap', () => {
+    expect(db.contiguousSeq(PEER)).toBe(0)
+    for (const s of [2, 3]) db.insertMessage(make(PEER, s, s))
+    expect(db.contiguousSeq(PEER)).toBe(0) // #1 missing
+    db.insertMessage(make(PEER, 1, 1))
+    expect(db.contiguousSeq(PEER)).toBe(3)
+    db.insertMessage(make(PEER, 5, 5))
+    expect(db.contiguousSeq(PEER)).toBe(3) // #4 missing
+    db.insertMessage(make(PEER, 4, 4))
+    expect(db.contiguousSeq(PEER)).toBe(5)
+  })
+
+  it('advances everything up to a watermark and reports the read watermark', () => {
+    const own = [1, 2, 3].map((i) => db.createOwnMessage(ME, `m${i}`, i))
+    expect(db.advanceUpTo(ME, 2, 'delivered').sort()).toEqual([own[0].id, own[1].id].sort())
+    expect(db.getMessage(own[2].id)?.status).toBe('queued')
+    expect(db.advanceUpTo(ME, 0, 'read')).toEqual([])
+
+    for (const s of [1, 2, 3]) db.insertMessage(make(PEER, s, 10 + s, s < 3 ? 'read' : 'delivered'))
+    expect(db.readSeq(PEER)).toBe(2)
+    expect(db.messagesAfter(ME, 1, 10).map((m) => m.seq)).toEqual([2, 3])
+    expect(db.idsWithStatus(ME, ['queued'])).toEqual([own[2].id])
   })
 
   it('pages history newest-last with a stable cursor, including equal timestamps', () => {
-    const all = [make(ME, 1), make(PEER, 2), make(ME, 3), make(PEER, 3), make(ME, 4)]
+    const all = [make(ME, 1, 1), make(PEER, 1, 2), make(ME, 2, 3), make(PEER, 2, 3), make(ME, 3, 4)]
     for (const m of all) db.insertMessage(m)
     const expected = [...all].sort((a, b) => a.sentAt - b.sentAt || a.id.localeCompare(b.id)).map((m) => m.id)
 
@@ -73,8 +113,38 @@ describe('HushDb', () => {
   })
 
   it('maps authors to me/peer for the UI', () => {
-    const m = make(ME, 5)
+    const m = make(ME, 1, 5)
     expect(toChatMessage(m, ME).from).toBe('me')
     expect(toChatMessage(m, PEER).from).toBe('peer')
+  })
+})
+
+describe('migration from stage b (v1)', () => {
+  it('numbers only this install’s own messages, in time order; the peer’s stay unnumbered', () => {
+    const file = join(dir, 'legacy.db')
+    const raw = new Database(file)
+    raw.exec(`
+      CREATE TABLE messages (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, body TEXT NOT NULL,
+        sent_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued','sent','delivered','read')));
+      CREATE INDEX messages_by_time ON messages (sent_at, id);
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      PRAGMA user_version = 1;`)
+    raw.prepare(`INSERT INTO settings VALUES ('selfId', ?)`).run(JSON.stringify(ME))
+    const ins = raw.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)')
+    const ids = { mineLate: randomUUID(), mineEarly: randomUUID(), theirs: randomUUID() }
+    ins.run(ids.mineLate, ME, 'late', 300, 300, 'queued')
+    ins.run(ids.mineEarly, ME, 'early', 100, 100, 'read')
+    ins.run(ids.theirs, PEER, 'hi', 200, 200, 'read')
+    raw.close()
+
+    const migrated = new HushDb(file)
+    expect(migrated.version).toBe(2)
+    expect(migrated.getMessage(ids.mineEarly)?.seq).toBe(1)
+    expect(migrated.getMessage(ids.mineLate)?.seq).toBe(2)
+    expect(migrated.getMessage(ids.theirs)?.seq).toBeNull()
+    expect(migrated.contiguousSeq(PEER)).toBe(0) // so the peer re-sends and fills it in
+    expect(migrated.createOwnMessage(ME, 'next', 400).seq).toBe(3)
+    migrated.close()
   })
 })

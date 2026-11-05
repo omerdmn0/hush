@@ -69,6 +69,8 @@ export type HushEvent =
   | { type: 'typing'; on: boolean }
   | { type: 'net'; net: NetState }
   | { type: 'settings'; settings: Settings }
+  /** Messages that were queued while offline have now been delivered. */
+  | { type: 'flushed'; count: number; at: number }
 
 /** API the preload script exposes to the renderer as `window.hush`. */
 export interface HushApi {

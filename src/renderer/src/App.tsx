@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { ChatMessage } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatHeader } from '@/components/chat/ChatHeader'
-import { MessageList } from '@/components/chat/MessageList'
+import { CircleCheck } from 'lucide-react'
+import { deliveredText, MessageList } from '@/components/chat/MessageList'
 import { Composer } from '@/components/chat/Composer'
 import { EmptyChat, FirstRun } from '@/components/chat/EmptyStates'
 import { SettingsScreen, type SectionId } from '@/components/settings/SettingsScreen'
@@ -109,12 +110,16 @@ export default function App(): ReactNode {
             ) : (
               <MessageList
                 messages={messages}
+                notices={hush.notices}
                 peerName={peer.name}
                 typing={hush.peerTyping}
                 hasMore={hush.hasMore}
                 loadingOlder={hush.loadingOlder}
                 onLoadOlder={hush.loadOlder}
               />
+            )}
+            {hush.flush && peer && (
+              <FlushToast key={hush.flush.id} text={deliveredText(hush.flush.count, peer.name)} onDone={hush.dismissFlush} />
             )}
             <Composer
               peerName={peer?.name ?? ''}
@@ -126,7 +131,12 @@ export default function App(): ReactNode {
           </main>
         </>
       )}
-      <LiveAnnouncer peerName={peer?.name ?? ''} typing={hush.peerTyping} lastIncomingId={lastIncomingId(messages)} />
+      <LiveAnnouncer
+        peerName={peer?.name ?? ''}
+        typing={hush.peerTyping}
+        lastIncomingId={lastIncomingId(messages)}
+        flushText={hush.flush && peer ? deliveredText(hush.flush.count, peer.name) : null}
+      />
     </div>
   )
 }
@@ -137,8 +147,21 @@ function lastIncomingId(messages: ChatMessage[]): string | null {
 }
 
 /** The app's single polite status region (MASTER.md §7): typing and new messages. */
-function LiveAnnouncer({ peerName, typing, lastIncomingId }: { peerName: string; typing: boolean; lastIncomingId: string | null }): ReactNode {
+function LiveAnnouncer({
+  peerName,
+  typing,
+  lastIncomingId,
+  flushText
+}: {
+  peerName: string
+  typing: boolean
+  lastIncomingId: string | null
+  flushText: string | null
+}): ReactNode {
   const [text, setText] = useState('')
+  useEffect(() => {
+    if (flushText) setText(flushText)
+  }, [flushText])
   const seen = useRef<string | null | undefined>(undefined)
   useEffect(() => {
     if (typing) setText(`${peerName} is typing`)
@@ -151,6 +174,23 @@ function LiveAnnouncer({ peerName, typing, lastIncomingId }: { peerName: string;
   return (
     <div role="status" aria-live="polite" className="sr-only">
       {text}
+    </div>
+  )
+}
+
+/** Short pop-up when the offline queue has been delivered (MASTER.md §6). Announced via LiveAnnouncer. */
+function FlushToast({ text, onDone }: { text: string; onDone: () => void }): ReactNode {
+  useEffect(() => {
+    const t = setTimeout(onDone, 4000)
+    return () => clearTimeout(t)
+  }, [onDone])
+  return (
+    <div
+      aria-hidden="true"
+      className="cut panel panel-sm animate-rise pointer-events-none absolute top-[76px] left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 px-4 py-2.5 whitespace-nowrap [--edge-c:var(--online)] [--fill-c:var(--surface-elevated)]"
+    >
+      <CircleCheck className="size-4 text-online" />
+      <span className="data text-text">{text}</span>
     </div>
   )
 }

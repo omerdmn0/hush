@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import type { ChatMessage } from '../../../../shared/types'
-import { buildTimeline, lastQueuedId, type TimelineItem } from '@/lib/timeline'
+import { CircleCheck } from 'lucide-react'
+import { formatTime } from '@/lib/format'
+import { buildTimeline, lastQueuedId, type DeliveryNotice, type TimelineItem } from '@/lib/timeline'
 import { Avatar } from '@/components/common'
 import { MessageGroup } from './MessageGroup'
 
@@ -15,6 +17,7 @@ const Column = ({ children }: { children: ReactNode }): ReactNode => (
  */
 export function MessageList({
   messages,
+  notices,
   peerName,
   typing,
   hasMore,
@@ -22,13 +25,14 @@ export function MessageList({
   onLoadOlder
 }: {
   messages: ChatMessage[]
+  notices: DeliveryNotice[]
   peerName: string
   typing: boolean
   hasMore: boolean
   loadingOlder: boolean
   onLoadOlder: () => void
 }): ReactNode {
-  const items = useMemo(() => buildTimeline(messages), [messages])
+  const items = useMemo(() => buildTimeline(messages, Date.now(), notices), [messages, notices])
 
   // Virtuoso keeps the scroll position on prepend when firstItemIndex drops by exactly the
   // number of prepended items. Recomputed idempotently during render (StrictMode-safe).
@@ -90,6 +94,8 @@ export function MessageList({
               <div className="rule pt-[22px] pb-1.5">
                 <span className="label">{item.label}</span>
               </div>
+            ) : item.kind === 'notice' ? (
+              <NoticeLine notice={item.notice} peerName={peerName} />
             ) : (
               <MessageGroup from={item.from} messages={item.messages} peerName={peerName} queuedNoteAfter={noteAfter} />
             )}
@@ -127,6 +133,22 @@ const COMPONENTS = {
       {context?.typing && <TypingIndicator peerName={context.peerName} />}
       <div className="h-4" />
     </Column>
+  )
+}
+
+export function deliveredText(count: number, peerName?: string): string {
+  return `${count} queued message${count === 1 ? '' : 's'} delivered${peerName ? ` to ${peerName}` : ''}`
+}
+
+function NoticeLine({ notice, peerName }: { notice: DeliveryNotice; peerName: string }): ReactNode {
+  return (
+    <div className="rule animate-rise pt-[18px] [--rule-c:color-mix(in_srgb,var(--online)_45%,transparent)]">
+      <span className="label inline-flex items-center gap-1.5 text-online">
+        <CircleCheck aria-hidden="true" className="size-3.5" />
+        {deliveredText(notice.count)} · {formatTime(notice.at)}
+        <span className="sr-only"> to {peerName}</span>
+      </span>
+    </div>
   )
 }
 

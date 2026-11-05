@@ -1,39 +1,71 @@
+import { randomUUID } from 'node:crypto'
 import Database from 'better-sqlite3'
 import type { ChatMessage, HistoryCursor, MessageStatus } from '../shared/types'
 
-/** A message as stored: author is a stable install id, not "me"/"peer". */
+/**
+ * A message as stored. `authorId` is a stable install id, not "me"/"peer".
+ * `seq` is the author's own counter (1, 2, 3…); null only for messages received before
+ * sequence numbers existed (stage b) until the next sync fills it in.
+ */
 export interface StoredMessage {
   id: string
   authorId: string
+  seq: number | null
   body: string
   sentAt: number
   status: MessageStatus
 }
 
-const MIGRATIONS: string[] = [
-  // v1
-  `CREATE TABLE messages (
-     id          TEXT PRIMARY KEY,
-     author_id   TEXT NOT NULL,
-     body        TEXT NOT NULL,
-     sent_at     INTEGER NOT NULL,
-     received_at INTEGER NOT NULL,
-     status      TEXT NOT NULL CHECK (status IN ('queued','sent','delivered','read'))
-   );
-   CREATE INDEX messages_by_time ON messages (sent_at, id);
-   CREATE TABLE settings (
-     key   TEXT PRIMARY KEY,
-     value TEXT NOT NULL
-   );`
+type Migration = (db: Database.Database) => void
+
+const MIGRATIONS: Migration[] = [
+  // v1 — stage b
+  (db) =>
+    db.exec(`
+      CREATE TABLE messages (
+        id          TEXT PRIMARY KEY,
+        author_id   TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        sent_at     INTEGER NOT NULL,
+        received_at INTEGER NOT NULL,
+        status      TEXT NOT NULL CHECK (status IN ('queued','sent','delivered','read'))
+      );
+      CREATE INDEX messages_by_time ON messages (sent_at, id);
+      CREATE TABLE settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );`),
+
+  // v2 — stage c: per-author sequence numbers for sync.
+  // Only this install's own messages are numbered here (it is the authority for them);
+  // the other person's messages get their numbers from them during the next sync.
+  // Numbering both sides locally could disagree and wrongly mark a message as delivered.
+  (db) => {
+    db.exec(`
+      ALTER TABLE messages ADD COLUMN seq INTEGER;
+      CREATE UNIQUE INDEX messages_by_author_seq ON messages (author_id, seq) WHERE seq IS NOT NULL;`)
+    const self = db.prepare(`SELECT value FROM settings WHERE key = 'selfId'`).get() as { value: string } | undefined
+    if (self) {
+      db.prepare(
+        `UPDATE messages SET seq = (
+           SELECT n FROM (
+             SELECT id, ROW_NUMBER() OVER (ORDER BY sent_at, id) AS n FROM messages WHERE author_id = ?
+           ) numbered WHERE numbered.id = messages.id)
+         WHERE author_id = ?`
+      ).run(JSON.parse(self.value), JSON.parse(self.value))
+    }
+  }
 ]
 
 // Status only ever moves forward, so replayed or out-of-order receipts are harmless.
 const RANK = `CASE status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 END`
 const RANK_OF: Record<MessageStatus, number> = { queued: 0, sent: 1, delivered: 2, read: 3 }
+const COLUMNS = 'id, author_id, seq, body, sent_at, status'
 
 interface Row {
   id: string
   author_id: string
+  seq: number | null
   body: string
   sent_at: number
   status: MessageStatus
@@ -53,11 +85,15 @@ export class HushDb {
     this.db.close()
   }
 
+  /** Schema version, for tests. */
+  get version(): number {
+    return this.db.pragma('user_version', { simple: true }) as number
+  }
+
   private migrate(): void {
-    const current = this.db.pragma('user_version', { simple: true }) as number
-    for (let v = current; v < MIGRATIONS.length; v++) {
+    for (let v = this.version; v < MIGRATIONS.length; v++) {
       this.db.transaction(() => {
-        this.db.exec(MIGRATIONS[v])
+        MIGRATIONS[v](this.db)
         this.db.pragma(`user_version = ${v + 1}`)
       })()
     }
@@ -78,19 +114,39 @@ export class HushDb {
 
   // ---------- messages ----------
 
-  /** Inserts a message unless its id already exists. Returns true if it was new. */
+  /** Creates a message authored on this computer, assigning the next sequence number. */
+  createOwnMessage(authorId: string, body: string, sentAt: number): StoredMessage {
+    return this.db.transaction(() => {
+      const { next } = this.db
+        .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE author_id = ?')
+        .get(authorId) as { next: number }
+      const m: StoredMessage = { id: randomUUID(), authorId, seq: next, body, sentAt, status: 'queued' }
+      this.insertMessage(m)
+      return m
+    })()
+  }
+
+  /**
+   * Inserts a message unless its id already exists (so re-sends never duplicate).
+   * If it exists without a sequence number (stage-b history), the number is filled in.
+   * Returns true only if the message was new.
+   */
   insertMessage(m: StoredMessage, receivedAt: number = Date.now()): boolean {
     const r = this.db
       .prepare(
-        `INSERT INTO messages (id, author_id, body, sent_at, received_at, status)
-         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
       )
-      .run(m.id, m.authorId, m.body, m.sentAt, receivedAt, m.status)
-    return r.changes === 1
+      .run(m.id, m.authorId, m.seq, m.body, m.sentAt, receivedAt, m.status)
+    if (r.changes === 1) return true
+    if (m.seq !== null) {
+      this.db.prepare('UPDATE messages SET seq = ? WHERE id = ? AND author_id = ? AND seq IS NULL').run(m.seq, m.id, m.authorId)
+    }
+    return false
   }
 
   getMessage(id: string): StoredMessage | undefined {
-    const row = this.db.prepare('SELECT id, author_id, body, sent_at, status FROM messages WHERE id = ?').get(id) as Row | undefined
+    const row = this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE id = ?`).get(id) as Row | undefined
     return row && toStored(row)
   }
 
@@ -100,18 +156,7 @@ export class HushDb {
    * Returns the ids that actually changed.
    */
   advanceStatus(ids: readonly string[], status: MessageStatus, authorId: string): string[] {
-    if (ids.length === 0) return []
-    const stmt = this.db.prepare(
-      `UPDATE messages SET status = ? WHERE id = ? AND author_id = ? AND ${RANK} < ? RETURNING id`
-    )
-    const changed: string[] = []
-    this.db.transaction(() => {
-      for (const id of ids) {
-        const row = stmt.get(status, id, authorId, RANK_OF[status]) as { id: string } | undefined
-        if (row) changed.push(row.id)
-      }
-    })()
-    return changed
+    return this.advanceEach(ids, status, `author_id = ?`, authorId)
   }
 
   /**
@@ -119,18 +164,74 @@ export class HushDb {
    * Not tied to one peer id, so history from before a reinstall on their side still works.
    */
   advanceStatusFromOthers(ids: readonly string[], status: MessageStatus, selfId: string): string[] {
+    return this.advanceEach(ids, status, `author_id <> ?`, selfId)
+  }
+
+  private advanceEach(ids: readonly string[], status: MessageStatus, authorClause: string, authorArg: string): string[] {
     if (ids.length === 0) return []
     const stmt = this.db.prepare(
-      `UPDATE messages SET status = ? WHERE id = ? AND author_id <> ? AND ${RANK} < ? RETURNING id`
+      `UPDATE messages SET status = ? WHERE id = ? AND ${authorClause} AND ${RANK} < ? RETURNING id`
     )
     const changed: string[] = []
     this.db.transaction(() => {
       for (const id of ids) {
-        const row = stmt.get(status, id, selfId, RANK_OF[status]) as { id: string } | undefined
+        const row = stmt.get(status, id, authorArg, RANK_OF[status]) as { id: string } | undefined
         if (row) changed.push(row.id)
       }
     })()
     return changed
+  }
+
+  /** Advances every message by `authorId` with seq ≤ upTo (sync watermarks). Returns changed ids. */
+  advanceUpTo(authorId: string, upTo: number, status: MessageStatus): string[] {
+    if (upTo <= 0) return []
+    const rows = this.db
+      .prepare(
+        `UPDATE messages SET status = ? WHERE author_id = ? AND seq IS NOT NULL AND seq <= ? AND ${RANK} < ? RETURNING id`
+      )
+      .all(status, authorId, upTo, RANK_OF[status]) as { id: string }[]
+    return rows.map((r) => r.id)
+  }
+
+  /**
+   * Highest N such that messages 1…N by this author are all stored here.
+   * "Contiguous" matters: a gap means something is missing and must be re-sent.
+   */
+  contiguousSeq(authorId: string): number {
+    const hasFirst = this.db.prepare('SELECT 1 FROM messages WHERE author_id = ? AND seq = 1').get(authorId)
+    if (!hasFirst) return 0
+    const row = this.db
+      .prepare(
+        `SELECT MIN(m.seq) AS end FROM messages m
+         WHERE m.author_id = ? AND m.seq IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.author_id = m.author_id AND n.seq = m.seq + 1)`
+      )
+      .get(authorId) as { end: number }
+    return row.end
+  }
+
+  /** Highest sequence number among this author's messages that are marked read here. */
+  readSeq(authorId: string): number {
+    const row = this.db
+      .prepare(`SELECT COALESCE(MAX(seq), 0) AS r FROM messages WHERE author_id = ? AND status = 'read' AND seq IS NOT NULL`)
+      .get(authorId) as { r: number }
+    return row.r
+  }
+
+  /** This author's messages with seq > afterSeq, oldest first. */
+  messagesAfter(authorId: string, afterSeq: number, limit: number): StoredMessage[] {
+    const rows = this.db
+      .prepare(`SELECT ${COLUMNS} FROM messages WHERE author_id = ? AND seq > ? ORDER BY seq LIMIT ?`)
+      .all(authorId, afterSeq, limit) as Row[]
+    return rows.map(toStored)
+  }
+
+  /** Ids of this author's messages currently in one of the given statuses. */
+  idsWithStatus(authorId: string, statuses: MessageStatus[]): string[] {
+    const rows = this.db
+      .prepare(`SELECT id FROM messages WHERE author_id = ? AND status IN (${statuses.map(() => '?').join(',')})`)
+      .all(authorId, ...statuses) as { id: string }[]
+    return rows.map((r) => r.id)
   }
 
   /** Newest-last page of history, older than `before` when given. */
@@ -139,14 +240,12 @@ export class HushDb {
       before
         ? this.db
             .prepare(
-              `SELECT id, author_id, body, sent_at, status FROM messages
+              `SELECT ${COLUMNS} FROM messages
                WHERE sent_at < ? OR (sent_at = ? AND id < ?)
                ORDER BY sent_at DESC, id DESC LIMIT ?`
             )
             .all(before.sentAt, before.sentAt, before.id, limit + 1)
-        : this.db
-            .prepare(`SELECT id, author_id, body, sent_at, status FROM messages ORDER BY sent_at DESC, id DESC LIMIT ?`)
-            .all(limit + 1)
+        : this.db.prepare(`SELECT ${COLUMNS} FROM messages ORDER BY sent_at DESC, id DESC LIMIT ?`).all(limit + 1)
     ) as Row[]
     const hasMore = rows.length > limit
     return { rows: rows.slice(0, limit).reverse().map(toStored), hasMore }
@@ -154,7 +253,7 @@ export class HushDb {
 }
 
 function toStored(r: Row): StoredMessage {
-  return { id: r.id, authorId: r.author_id, body: r.body, sentAt: r.sent_at, status: r.status }
+  return { id: r.id, authorId: r.author_id, seq: r.seq, body: r.body, sentAt: r.sent_at, status: r.status }
 }
 
 /** Converts a stored message for the UI, from this install's point of view. */
