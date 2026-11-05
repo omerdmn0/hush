@@ -33,7 +33,8 @@ export function MessageList({
   onLoadOlder,
   images,
   actions,
-  newMarkerId
+  newMarkerId,
+  jumpRequest
 }: {
   messages: ChatMessage[]
   notices: DeliveryNotice[]
@@ -49,6 +50,8 @@ export function MessageList({
   actions: Omit<MessageActions, 'onJump' | 'highlightId'>
   /** First message that arrived while you were away ("New messages" line). */
   newMarkerId: string | null
+  /** Scroll to this message once it's loaded (search results); `n` makes repeats distinct. */
+  jumpRequest: { id: string; n: number } | null
 }): ReactNode {
   const items = useMemo(() => buildTimeline(messages, Date.now(), notices, calls, newMarkerId), [messages, notices, calls, newMarkerId])
   const list = useRef<VirtuosoHandle>(null)
@@ -69,6 +72,14 @@ export function MessageList({
     highlightTimer.current = setTimeout(() => setHighlightId(null), 1600)
   }, [])
   const allActions: MessageActions = useMemo(() => ({ ...actions, onJump: jumpTo, highlightId }), [actions, jumpTo, highlightId])
+  const handledJump = useRef(0)
+  useEffect(() => {
+    if (!jumpRequest || jumpRequest.n === handledJump.current) return
+    if (!items.some((it) => it.kind === 'group' && it.messages.some((m) => m.id === jumpRequest.id))) return // not loaded yet
+    handledJump.current = jumpRequest.n
+    // Let Virtuoso take in newly loaded history before scrolling.
+    requestAnimationFrame(() => jumpTo(jumpRequest.id))
+  }, [jumpRequest, items, jumpTo])
 
   // Virtuoso keeps the scroll position on prepend when firstItemIndex drops by exactly the
   // number of prepended items. Recomputed idempotently during render (StrictMode-safe).

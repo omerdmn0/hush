@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { CallRecord, ChatMessage } from '../../shared/types'
+import type { CallRecord, ChatMessage, SearchResult } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
 import { QuitDialog } from '@/components/QuitDialog'
 import { PairingScreen } from '@/components/PairingScreen'
@@ -11,6 +11,7 @@ import { IncomingCall } from '@/components/chat/IncomingCall'
 import { deliveredText, MessageList } from '@/components/chat/MessageList'
 import { Composer, type ComposerHandle, type ComposerMode } from '@/components/chat/Composer'
 import { DeleteDialog, type MessageActions } from '@/components/chat/MessageActions'
+import { SearchPanel } from '@/components/chat/SearchPanel'
 import { Lightbox } from '@/components/chat/Lightbox'
 import type { ImageActions } from '@/components/chat/MessageGroup'
 import { EmptyChat, FirstRun } from '@/components/chat/EmptyStates'
@@ -127,6 +128,34 @@ export default function App(): ReactNode {
     if (unread.length) markRead(unread)
   }, [loaded, messages, windowActive, screen, markRead])
 
+  // Search (Ctrl+F or the header button); picking a result loads history up to it and scrolls there.
+  const [searchOpen, setSearchOpen] = useState(false)
+  const searchButton = useRef<HTMLButtonElement>(null)
+  const [jumpRequest, setJumpRequest] = useState<{ id: string; n: number } | null>(null)
+  const canSearch = screen === 'chat' && !!snapshot?.settings.peerIp && snapshot.pairing.status === 'paired'
+  useEffect(() => {
+    if (!canSearch) return
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        setSearchOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [canSearch])
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false)
+    requestAnimationFrame(() => searchButton.current?.focus())
+  }, [])
+  const { reveal } = hush
+  const pickResult = useCallback(
+    (r: SearchResult) => {
+      void reveal(r.id, r.sentAt).then((found) => found && setJumpRequest((prev) => ({ id: r.id, n: (prev?.n ?? 0) + 1 })))
+    },
+    [reveal]
+  )
+
   // Reply / edit / delete / react
   const [composerMode, setComposerMode] = useState<ComposerMode | null>(null)
   const [deleting, setDeleting] = useState<ChatMessage | null>(null)
@@ -230,7 +259,14 @@ export default function App(): ReactNode {
               if (peer) composerHandle.current?.addFiles([...e.dataTransfer.files])
             }}
           >
-            <ChatHeader peer={peer} call={callAction} />
+            <ChatHeader
+              peer={peer}
+              call={callAction}
+              onSearch={canSearch ? () => setSearchOpen((o) => !o) : undefined}
+              searchOpen={searchOpen}
+              searchButtonRef={searchButton}
+            />
+            {searchOpen && canSearch && peer && <SearchPanel peerName={peer.name} onPick={pickResult} onClose={closeSearch} />}
             {peer && (
               <CallBar
                 view={callView}
@@ -265,6 +301,7 @@ export default function App(): ReactNode {
                 images={imageActions}
                 actions={messageActions}
                 newMarkerId={newMarker}
+                jumpRequest={jumpRequest}
               />
             )}
             {hush.flush && peer && (

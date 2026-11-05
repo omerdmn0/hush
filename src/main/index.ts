@@ -338,7 +338,10 @@ if (!app.requestSingleInstanceLock()) {
       if (process.platform === 'win32') mainWindow?.setOverlayIcon(n > 0 ? nativeImage.createFromPath(badgeIcon) : null, n > 0 ? `${n} unread` : '')
       updateTray()
     }
+    /** Set when Hush is closing, so nothing new touches the database. */
+    let closing = false
     const scheduleUnread = (): void => {
+      if (closing) return
       clearTimeout(unreadTimer)
       unreadTimer = setTimeout(refreshUnread, 100)
     }
@@ -543,6 +546,11 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.react, (_e, id: unknown, emoji: unknown, on: unknown) => {
       if (typeof id !== 'string' || typeof emoji !== 'string' || typeof on !== 'boolean') throw new Error('Invalid reaction')
       return chat.react(id, emoji, on)
+    })
+
+    ipcMain.handle(IPC.search, (_e, query: unknown) => {
+      if (typeof query !== 'string' || query.length > 200) return { results: [], more: false }
+      return chat.search(query)
     })
 
     // Links in messages open in the browser — only http(s), never files or app protocols.
@@ -810,6 +818,14 @@ if (!app.requestSingleInstanceLock()) {
         await link.stop()
       },
       close() {
+        // Nothing may touch the database once it's closed: stop timers that would (the unread
+        // recount used to fire after closing and crash with "database connection is not open"),
+        // and stop listening to the window.
+        closing = true
+        clearTimeout(unreadTimer)
+        chat.dispose()
+        pairing.dispose()
+        ipcMain.removeAllListeners()
         tray?.destroy()
         db.close()
       }

@@ -24,6 +24,8 @@ export interface HushState {
   sendImage: (image: OutgoingImage, caption: string, replyTo?: string) => Promise<void>
   retryImage: (id: string) => void
   loadOlder: () => void
+  /** Loads older history until this message is in the list (for search). False if not found. */
+  reveal: (id: string, sentAt: number) => Promise<boolean>
   send: (text: string, replyTo?: string) => Promise<void>
   markRead: (ids: string[]) => void
   updateSettings: (patch: Partial<Settings>) => Promise<void>
@@ -159,6 +161,33 @@ export function useHush(): HushState {
       })
   }, [hasMore, messages])
 
+  const reveal = useCallback(async (id: string, sentAt: number): Promise<boolean> => {
+    if (messagesRef.current.some((m) => m.id === id)) return true
+    if (loading.current) return false
+    loading.current = true
+    setLoadingOlder(true)
+    try {
+      const fetched: ChatMessage[] = []
+      let more = hasMoreRef.current
+      let cursor = messagesRef.current[0]
+      while (more && cursor && cursor.sentAt >= sentAt && !fetched.some((m) => m.id === id)) {
+        const page = await window.hush.listMessages({ sentAt: cursor.sentAt, id: cursor.id }, 500)
+        fetched.unshift(...page.messages)
+        more = page.hasMore
+        cursor = page.messages[0]
+      }
+      setMessages((prev) => {
+        const ids = new Set(prev.map((m) => m.id))
+        return [...fetched.filter((m) => !ids.has(m.id)), ...prev]
+      })
+      setHasMore(more)
+      return fetched.some((m) => m.id === id)
+    } finally {
+      loading.current = false
+      setLoadingOlder(false)
+    }
+  }, [])
+
   const send = useCallback(async (text: string, replyTo?: string) => {
     // The main process echoes the new message back as a 'message' event.
     await window.hush.sendMessage(text, replyTo)
@@ -201,6 +230,7 @@ export function useHush(): HushState {
     sendImage,
     retryImage,
     loadOlder,
+    reveal,
     send,
     markRead,
     updateSettings

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { IMAGE_MIME, isUuid, MAX_IMAGE_BYTES, MAX_TEXT_LENGTH, sniffImage, type Frame, type ImageMeta, type ImageMime } from '../shared/protocol'
-import type { ChatMessage, HistoryCursor, HushEvent, OutgoingImage, PeerState } from '../shared/types'
+import type { ChatMessage, HistoryCursor, HushEvent, OutgoingImage, PeerState, SearchResult } from '../shared/types'
+import { fold, matchesAll, queryTerms } from '../shared/search'
 import { toChatMessage, type HushDb, type StoredMessage } from './db'
 import { applyEvents, isReactionEmoji, reactionData } from './events'
 import { sha256, type ImageStore } from './images'
@@ -18,6 +19,11 @@ const FLUSH_QUIET_MS = 600
 const MAX_THUMB_BYTES = 150 * 1024
 const PREVIEW_TYPES = new Set<string>(['image/webp', 'image/jpeg', 'image/png'])
 
+/** Setting: a backup was restored and the peer hasn't synced with us since. */
+export const AWAITING_SYNC = 'awaitingSync'
+/** The in-memory search text is dropped after this long without a search. */
+const SEARCH_IDLE_MS = 10 * 60_000
+
 /**
  * Chat logic on top of a PeerLink: stores messages, sends receipts, tracks presence, and
  * runs the sync exchange on every connection (see protocol.ts for the model).
@@ -26,9 +32,6 @@ const PREVIEW_TYPES = new Set<string>(['image/webp', 'image/jpeg', 'image/png'])
  * connection the peer's `sync` frame says which of our messages it already holds; everything
  * after that is re-sent, acked, and moves to `delivered`.
  */
-/** Setting: a backup was restored and the peer hasn't synced with us since. */
-export const AWAITING_SYNC = 'awaitingSync'
-
 export class ChatService {
   private ackQueue: string[] = []
   private ackTimer: ReturnType<typeof setTimeout> | undefined
@@ -38,15 +41,22 @@ export class ChatService {
   private flushTimer: ReturnType<typeof setTimeout> | undefined
   readonly transfers: Transfers
   private readonly avatars: Avatars | null
+  private readonly emit: (e: HushEvent) => void
 
   constructor(
     private readonly db: HushDb,
     private readonly link: PeerLink,
     private readonly selfId: string,
-    private readonly emit: (e: HushEvent) => void,
+    emit: (e: HushEvent) => void,
     private readonly store: ImageStore,
     opts: { chunkBytes?: number; avatars?: Avatars } = {}
   ) {
+    // Everything the UI hears about also keeps the search text up to date.
+    this.emit = (e) => {
+      if (e.type === 'message') this.searchUpdate(e.message.id)
+      else if (e.type === 'event') this.searchUpdate(e.target)
+      emit(e)
+    }
     this.avatars = opts.avatars ?? null
     this.transfers = new Transfers(db, store, link, emit, opts.chunkBytes)
     link.on('up', (peer) => this.onUp(peer))
@@ -77,6 +87,63 @@ export class ChatService {
   /** Current state of these messages for the UI (left out: unknown, or deleted for me). */
   getMessages(ids: string[]): ChatMessage[] {
     return this.decorate(this.db.getMessages(ids.slice(0, 500)).filter((m) => !m.ref))
+  }
+
+  /** Hush is closing (before the database closes): stop every timer. */
+  dispose(): void {
+    clearTimeout(this.ackTimer)
+    clearTimeout(this.flushTimer)
+    clearTimeout(this.searchIdle)
+    this.searchText = null
+    this.transfers.dispose()
+  }
+
+  // ---------- search ----------
+  // History is encrypted on disk, so there is no search index there. The first search decrypts
+  // the current text of every message into memory; it's kept up to date while in use and
+  // dropped after SEARCH_IDLE_MS without a search.
+
+  private searchText: Map<string, SearchEntry> | null = null
+  private searchIdle: ReturnType<typeof setTimeout> | undefined
+
+  search(query: string, limit = 50): { results: SearchResult[]; more: boolean } {
+    const terms = queryTerms(query.slice(0, 200))
+    if (terms.length === 0) return { results: [], more: false }
+    this.searchText ??= this.buildSearch()
+    clearTimeout(this.searchIdle)
+    this.searchIdle = setTimeout(() => (this.searchText = null), SEARCH_IDLE_MS)
+    this.searchIdle.unref?.() // never keeps the process alive
+    const hits: SearchEntry[] = []
+    for (const e of this.searchText.values()) if (matchesAll(e.folded, terms)) hits.push(e)
+    hits.sort((a, b) => b.sentAt - a.sentAt || (b.id < a.id ? -1 : 1))
+    return { results: hits.slice(0, limit).map(({ folded: _, ...r }) => r), more: hits.length > limit }
+  }
+
+  private buildSearch(): Map<string, SearchEntry> {
+    const { messages, events } = this.db.searchSource()
+    const byRef = new Map<string, StoredMessage[]>()
+    for (const e of events) byRef.set(e.ref!, [...(byRef.get(e.ref!) ?? []), e])
+    const out = new Map<string, SearchEntry>()
+    for (const m of messages) {
+      const state = applyEvents(m.authorId, byRef.get(m.id) ?? [], this.selfId)
+      if (state.deleted) continue
+      const entry = this.searchEntry(m.id, m.authorId === this.selfId ? 'me' : 'peer', m.sentAt, state.text ?? m.body, !!m.image)
+      if (entry) out.set(m.id, entry)
+    }
+    return out
+  }
+
+  private searchEntry(id: string, from: 'me' | 'peer', sentAt: number, text: string, hasImage: boolean): SearchEntry | null {
+    return text ? { id, from, sentAt, text, hasImage, folded: fold(text).text } : null
+  }
+
+  /** A message appeared or changed: refresh its search text (only while search is in use). */
+  private searchUpdate(id: string): void {
+    if (!this.searchText) return
+    const m = this.getMessages([id])[0]
+    const entry = m && !m.deleted && !m.unsupported ? this.searchEntry(m.id, m.from, m.sentAt, m.text, !!m.image) : null
+    if (entry) this.searchText.set(id, entry)
+    else this.searchText.delete(id)
   }
 
   /** A reply must point at a chat message we have. */
@@ -484,4 +551,8 @@ export class ChatService {
     this.db.setSetting('peerApp', peer.app)
     this.db.setSetting('peerLastSeen', Date.now())
   }
+}
+
+interface SearchEntry extends SearchResult {
+  folded: string
 }

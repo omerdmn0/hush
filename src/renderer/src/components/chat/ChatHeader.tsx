@@ -1,11 +1,24 @@
-import type { ReactNode } from 'react'
-import { Phone } from 'lucide-react'
+import type { ReactNode, Ref } from 'react'
+import { Phone, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Avatar, HudLabel, StatusTag } from '@/components/common'
 import type { CallAction, PeerView } from '@/lib/view'
 
-export function ChatHeader({ peer, call }: { peer: PeerView | null; call: CallAction }): ReactNode {
+export function ChatHeader({
+  peer,
+  call,
+  onSearch,
+  searchOpen,
+  searchButtonRef
+}: {
+  peer: PeerView | null
+  call: CallAction
+  /** Opens message search (absent when there's nothing to search). */
+  onSearch?: () => void
+  searchOpen?: boolean
+  searchButtonRef?: Ref<HTMLButtonElement>
+}): ReactNode {
   const online = peer?.presence === 'online'
   return (
     <header className="relative flex h-16 flex-none items-center gap-3 bg-app pr-4 pl-6 after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-[linear-gradient(90deg,var(--cyan),var(--edge)_45%,var(--edge))] after:opacity-80">
@@ -16,6 +29,16 @@ export function ChatHeader({ peer, call }: { peer: PeerView | null; call: CallAc
       </div>
       {peer && <StatusTag online={online} className="ml-2" />}
       <div className="flex-1" />
+      {onSearch && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button ref={searchButtonRef} variant="icon" size="icon" aria-label="Search messages" aria-expanded={searchOpen} onClick={onSearch}>
+              <Search className="size-5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Search messages (Ctrl+F)</TooltipContent>
+        </Tooltip>
+      )}
       <Tooltip>
         <TooltipTrigger asChild>
           <Button

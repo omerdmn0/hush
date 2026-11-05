@@ -643,3 +643,41 @@ describe('ChatService — message actions', () => {
     expect(() => a.chat.deleteForMe(queued.id)).toThrow(/Not sent yet/)
   })
 })
+
+describe('ChatService — search', () => {
+  it('finds current text only, and stays up to date with new, edited and deleted messages', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    // A few ms apart, so "newest first" has a defined order.
+    const m1 = await a.chat.send('Yarın İstanbul’a gidiyoruz')
+    await settle(5)
+    const m2 = await b.chat.send('Şeker getir lütfen')
+    await settle(5)
+    const typo = await a.chat.send('meet at the libary')
+    await settle(5)
+    const gone = await b.chat.send('secret plan istanbul')
+    await settle(5)
+    const hidden = await b.chat.send('istanbul again, hide me')
+    await until(() => a.count() === 5)
+    const ids = (q: string): string[] => a.chat.search(q).results.map((r) => r.id)
+
+    expect(ids('istanbul')).toEqual([hidden.id, gone.id, m1.id]) // newest first
+    expect(a.chat.search('seker')).toMatchObject({ results: [{ id: m2.id, from: 'peer', text: 'Şeker getir lütfen' }], more: false })
+
+    // Kept current after the first search (the cache is built by now):
+    await a.chat.edit(typo.id, 'meet at the library')
+    expect(ids('libary')).toEqual([])
+    expect(ids('library')).toEqual([typo.id])
+    await b.chat.deleteForEveryone(gone.id)
+    await until(() => !ids('istanbul').includes(gone.id))
+    a.chat.deleteForMe(hidden.id)
+    expect(ids('istanbul')).toEqual([m1.id])
+    await settle(5)
+    const late = await b.chat.send('istanbul tomorrow?')
+    await until(() => ids('istanbul').includes(late.id))
+    expect(ids('istanbul')).toEqual([late.id, m1.id])
+    expect(ids('   ')).toEqual([])
+  })
+})

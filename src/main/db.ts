@@ -280,6 +280,13 @@ export class HushDb {
     ).map((r) => this.toStored(r))
   }
 
+  /** Every visible chat message, and every edit / delete (to build the in-memory search). */
+  searchSource(): { messages: StoredMessage[]; events: StoredMessage[] } {
+    const messages = this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IS NULL AND hidden = 0 AND kind = 'message'`).all() as Row[]
+    const events = this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE kind IN ('edit', 'delete')`).all() as Row[]
+    return { messages: messages.map((r) => this.toStored(r)), events: events.map((r) => this.toStored(r)) }
+  }
+
   /** All events (edit / delete / react) acting on these messages. */
   eventsFor(ids: readonly string[]): StoredMessage[] {
     return this.inChunks(ids, (part, marks) =>

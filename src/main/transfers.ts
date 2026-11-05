@@ -52,6 +52,12 @@ export class Transfers {
     this.pump()
   }
 
+  /** Hush is closing: no more timers. */
+  dispose(): void {
+    clearTimeout(this.stallTimer)
+    this.uploads.clear()
+  }
+
   /** The image was deleted: stop downloading or serving it. */
   cancel(id: string): void {
     this.queue = this.queue.filter((x) => x !== id)

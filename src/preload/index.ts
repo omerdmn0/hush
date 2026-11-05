@@ -12,6 +12,7 @@ const api: HushApi = {
   deleteMessage: (id, mode) => ipcRenderer.invoke(IPC.deleteMessage, id, mode),
   react: (id, emoji, on) => ipcRenderer.invoke(IPC.react, id, emoji, on),
   openLink: (url) => ipcRenderer.send(IPC.openLink, url),
+  search: (query) => ipcRenderer.invoke(IPC.search, query),
   retryImage: (id) => ipcRenderer.send(IPC.retryImage, id),
   sendCallSignal: (signal) => ipcRenderer.invoke(IPC.callSignal, signal),
   listCalls: () => ipcRenderer.invoke(IPC.listCalls),

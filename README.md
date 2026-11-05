@@ -128,6 +128,9 @@ can bring your history back.
   your computer only. Neither can be undone.
 - **Links** (http/https) open in your browser. A **New messages** line marks what arrived while you
   were away, and **Jump to latest** appears when you've scrolled up (with a count of new ones).
+- **Search:** the 🔍 button or **Ctrl+F**. Finds messages containing all the words you type,
+  ignoring capitals and accents (“seker” finds “Şeker”); click a result to jump there. Because
+  your history is encrypted on disk, search works in memory only — nothing searchable is saved.
 - **Images:** drag them onto the chat, paste them (Ctrl+V), or use the 🖼 button. Click an image
   to see it full size. PNG, JPEG, GIF and WebP up to 25 MB.
 - **Voice calls:** the phone button in the sidebar or header. Mute, switch microphone and hang up

@@ -78,6 +78,15 @@ export interface ChatMessage {
   replyTo?: ReplyPreview
 }
 
+/** A search hit: the message's current text (edits applied). */
+export interface SearchResult {
+  id: string
+  from: 'me' | 'peer'
+  sentAt: number
+  text: string
+  hasImage: boolean
+}
+
 /** One emoji under a message: who of the two of you added it. */
 export interface Reaction {
   emoji: string
@@ -254,6 +263,8 @@ export interface HushApi {
   react(id: string, emoji: string, on: boolean): Promise<void>
   /** Opens an http(s) link in the default browser. */
   openLink(url: string): void
+  /** Messages whose current text contains every word of the query, newest first (up to 50). */
+  search(query: string): Promise<{ results: SearchResult[]; more: boolean }>
   /** Try downloading a failed image again. */
   retryImage(id: string): void
   /** Sends WebRTC signaling to the other app; resolves false if it's offline. */
@@ -306,6 +317,7 @@ export const IPC = {
   deleteMessage: 'hush:delete-message',
   react: 'hush:react',
   openLink: 'hush:open-link',
+  search: 'hush:search',
   sendImage: 'hush:send-image',
   retryImage: 'hush:retry-image',
   callSignal: 'hush:call-signal',
