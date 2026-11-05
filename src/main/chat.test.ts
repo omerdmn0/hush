@@ -12,6 +12,7 @@ import type { HushEvent } from '../shared/types'
 import { ChatService } from './chat'
 import { HushDb } from './db'
 import { ImageStore } from './images'
+import { Avatars } from './avatars'
 import { PeerLink } from './link'
 
 const HOST = '127.0.0.1'
@@ -33,6 +34,7 @@ async function freePort(): Promise<number> {
 class Side {
   readonly db: HushDb
   readonly store: ImageStore
+  readonly avatars: Avatars
   readonly events: HushEvent[] = []
   link!: PeerLink
   chat!: ChatService
@@ -47,6 +49,7 @@ class Side {
     const dir = mkdtempSync(join(tmpdir(), `hush-chat-${name}-`))
     this.db = new HushDb(file ?? join(dir, 'hush.db'))
     this.store = new ImageStore(join(dir, 'images'))
+    this.avatars = new Avatars(dir)
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
     cleanups.push(() => this.db.close())
   }
@@ -55,7 +58,7 @@ class Side {
   start(): this {
     this.link = new PeerLink({ selfId: this.id, name: this.name, bindHost: HOST, port: this.port, peerHost: HOST, peerPort: this.peerPort })
     // Tiny chunks so every test image spans many chunks (exercises resume and ordering).
-    this.chat = new ChatService(this.db, this.link, this.id, (e) => this.events.push(e), this.store, { chunkBytes: 1024 })
+    this.chat = new ChatService(this.db, this.link, this.id, (e) => this.events.push(e), this.store, { chunkBytes: 1024, avatars: this.avatars })
     const link = this.link
     cleanups.push(() => link.stop())
     link.start()
@@ -372,5 +375,23 @@ describe('ChatService — images', () => {
     const fake = new TextEncoder().encode('<svg onload="alert(1)"></svg>')
     await expect(a.chat.sendImage({ ...outgoing(fake), mime: 'image/png' }, '')).rejects.toThrow()
     expect(a.count()).toBe(0)
+  })
+})
+
+describe('ChatService — avatars', () => {
+  it('sends the profile picture on connect, on change, and removes it', async () => {
+    const [a, b] = await sides()
+    a.start()
+    const pic = png(64, 64)
+    expect(a.chat.setAvatar(pic)).toBe(true) // set while offline: goes out on connect
+    expect(a.chat.setAvatar(new TextEncoder().encode('<svg/>'))).toBe(false)
+    b.start()
+    await until(() => b.avatars.resolve('peer') !== null)
+    expect(Buffer.compare(readFileSync(b.avatars.resolve('peer')!), Buffer.from(pic))).toBe(0)
+    expect(b.avatars.urls().peer).toMatch(/^hush-img:\/\/avatar\/peer\?v=\d+$/)
+
+    a.chat.setAvatar(null)
+    await until(() => b.avatars.resolve('peer') === null)
+    expect(b.events.filter((e) => e.type === 'avatars').length).toBeGreaterThanOrEqual(2)
   })
 })

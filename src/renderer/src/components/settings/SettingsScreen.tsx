@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Check, CircleAlert, Copy, Mic, RefreshCw, Upload, Volume2, X } from 'lucide-react'
 import { checkPeerIp, type PeerIpProblem } from '../../../../shared/ip'
 import { Button } from '@/components/ui/button'
@@ -7,8 +7,10 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import type { NetState, Settings } from '../../../../shared/types'
-import { Avatar, StatusTag } from '@/components/common'
+import { Avatar, AvatarContext, StatusTag } from '@/components/common'
 import { getMic } from '@/lib/call'
+import { ImageError, imageErrorText, makeAvatar } from '@/lib/images'
+import { IMAGE_MIME } from '../../../../shared/protocol'
 import { Ringer } from '@/lib/ringtone'
 import { useAudioDevices, type AudioDevice } from '@/lib/useAudioDevices'
 import { cn } from '@/lib/utils'
@@ -95,20 +97,7 @@ export function SettingsScreen({
 
         <div className="flex max-w-[700px] flex-col gap-5 px-10 pt-7 pb-16">
           <Module index={1} id="profile" title="Profile">
-            <div className="flex items-center gap-4">
-              <div className="reticle">
-                <Avatar name={settings.displayName || 'You'} who="me" size={80} />
-              </div>
-              <div className="flex flex-col gap-2">
-                <div className="flex gap-2">
-                  <Button variant="secondary" aria-disabled>
-                    <Upload />
-                    Change avatar
-                  </Button>
-                </div>
-                <span className="text-xs text-text-muted">Custom avatars aren't available yet.</span>
-              </div>
-            </div>
+            <AvatarField name={settings.displayName || 'You'} />
             <NameField value={settings.displayName} onSave={(displayName) => onChange({ displayName })} />
           </Module>
 
@@ -129,7 +118,8 @@ export function SettingsScreen({
                   Desktop notifications
                 </Label>
                 <div id="notif-help" className="text-xs text-text-muted">
-                  Show a notification when the other person messages or calls you while Hush isn't focused.
+                  Show a notification when the other person messages or calls you while Hush isn't focused. Closing the window keeps Hush
+                  running in the tray so messages and calls still reach you — use the power button to quit completely.
                 </div>
               </div>
               <Switch
@@ -508,6 +498,66 @@ function ConnectionStatus({
           Retry now
         </Button>
       )}
+    </div>
+  )
+}
+
+function AvatarField({ name }: { name: string }): ReactNode {
+  const hasAvatar = useContext(AvatarContext).self !== null
+  const picker = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const apply = async (bytes: Uint8Array | null): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      if (!(await window.hush.setAvatar(bytes))) setError('That picture couldn’t be used. Try a PNG, JPEG or WebP image.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-4">
+      <div className="reticle">
+        <Avatar name={name} who="me" size={80} />
+      </div>
+      <div className="flex flex-col gap-2">
+        <input
+          ref={picker}
+          type="file"
+          accept={IMAGE_MIME.filter((m) => m !== 'image/gif').join(',')}
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            e.target.value = ''
+            if (!file) return
+            void makeAvatar(file).then(apply, (err: unknown) =>
+              setError(err instanceof ImageError ? imageErrorText(err) : 'That picture couldn’t be used.')
+            )
+          }}
+        />
+        <div className="flex gap-2">
+          <Button variant="secondary" disabled={busy} onClick={() => picker.current?.click()}>
+            <Upload />
+            {hasAvatar ? 'Change avatar' : 'Add avatar'}
+          </Button>
+          {hasAvatar && (
+            <Button variant="ghost" disabled={busy} onClick={() => void apply(null)}>
+              Remove
+            </Button>
+          )}
+        </div>
+        {error ? (
+          <span role="alert" className="flex items-start gap-1.5 text-xs text-danger-text">
+            <CircleAlert aria-hidden="true" className="mt-px size-3.5 flex-none" />
+            {error}
+          </span>
+        ) : (
+          <span className="text-xs text-text-muted">Cropped to a square. The other person sees it right away.</span>
+        )}
+      </div>
     </div>
   )
 }

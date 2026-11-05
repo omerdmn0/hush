@@ -257,6 +257,12 @@ export class HushDb {
     return rows.map((r) => r.id)
   }
 
+  /** Messages from the other person not yet seen on this computer. */
+  unreadCount(selfId: string): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE author_id <> ? AND status <> 'read'`).get(selfId) as { n: number }
+    return row.n
+  }
+
   // ---------- call history ----------
 
   /** Inserts or updates a call record (validated: it comes from the UI). */

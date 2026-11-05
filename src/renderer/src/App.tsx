@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { CallRecord, ChatMessage } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
+import { QuitDialog } from '@/components/QuitDialog'
+import { AvatarContext } from '@/components/common'
 import { ChatHeader } from '@/components/chat/ChatHeader'
 import { CircleCheck, ImagePlus } from 'lucide-react'
 import { CallBar } from '@/components/chat/CallBar'
@@ -18,29 +20,13 @@ import { useCall } from '@/lib/useCall'
 import { useHush } from '@/lib/useHush'
 import type { CallAction, PeerView } from '@/lib/view'
 
-/** True while the user can actually see the chat (window focused and visible). */
-function useWindowActive(): boolean {
-  const [active, setActive] = useState(() => document.hasFocus() && document.visibilityState === 'visible')
-  useEffect(() => {
-    const update = (): void => setActive(document.hasFocus() && document.visibilityState === 'visible')
-    window.addEventListener('focus', update)
-    window.addEventListener('blur', update)
-    document.addEventListener('visibilitychange', update)
-    return () => {
-      window.removeEventListener('focus', update)
-      window.removeEventListener('blur', update)
-      document.removeEventListener('visibilitychange', update)
-    }
-  }, [])
-  return active
-}
-
 export default function App(): ReactNode {
   const hush = useHush()
   const { snapshot, messages, markRead } = hush
   const [screen, setScreen] = useState<'chat' | 'settings'>('chat')
   const [settingsSection, setSettingsSection] = useState<SectionId>('profile')
-  const windowActive = useWindowActive()
+  // Visible + focused, as reported by the main process (reliable even when hidden in the tray).
+  const windowActive = snapshot?.windowActive ?? false
 
   const settingsButton = useRef<HTMLButtonElement>(null)
   const composer = useRef<HTMLTextAreaElement>(null)
@@ -55,6 +41,18 @@ export default function App(): ReactNode {
   const restoreFocus = useCallback(() => {
     const el = viewerOpener.current
     ;(el?.isConnected ? el : composer.current)?.focus()
+  }, [])
+  const [quitOpen, setQuitOpen] = useState(false)
+  // Ctrl+Q asks to quit (the window's close button only hides Hush to the tray).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'q') {
+        e.preventDefault()
+        setQuitOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
   const [dragging, setDragging] = useState(false)
   const dragDepth = useRef(0)
@@ -139,6 +137,7 @@ export default function App(): ReactNode {
   }
 
   return (
+    <AvatarContext.Provider value={snapshot.avatars}>
     <div className="scanlines flex h-full">
       {screen === 'settings' ? (
         <SettingsScreen
@@ -158,6 +157,7 @@ export default function App(): ReactNode {
             call={callAction}
             onOpenSettings={() => openSettings()}
             onLinkPeer={openConnection}
+            onQuit={() => setQuitOpen(true)}
             settingsButtonRef={settingsButton}
           />
           <main
@@ -231,6 +231,7 @@ export default function App(): ReactNode {
           </main>
         </>
       )}
+      <QuitDialog open={quitOpen} onOpenChange={setQuitOpen} inCall={call.busy} peerName={peer?.name ?? 'Peer'} />
       <IncomingCall
         open={callView.phase === 'incoming'}
         peerName={peer?.name ?? 'Peer'}
@@ -251,6 +252,7 @@ export default function App(): ReactNode {
         callText={callAnnouncement(callView, peer?.name ?? 'Peer')}
       />
     </div>
+    </AvatarContext.Provider>
   )
 }
 

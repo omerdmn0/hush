@@ -1,5 +1,5 @@
 import type { ReactNode, Ref } from 'react'
-import { Phone, Settings, ShieldCheck } from 'lucide-react'
+import { Phone, Power, Settings, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Avatar, HudLabel, Logo, StatusTag } from '@/components/common'
@@ -11,6 +11,7 @@ export function Sidebar({
   call,
   onOpenSettings,
   onLinkPeer,
+  onQuit,
   settingsButtonRef
 }: {
   peer: PeerView | null
@@ -18,6 +19,7 @@ export function Sidebar({
   call: CallAction
   onOpenSettings: () => void
   onLinkPeer: () => void
+  onQuit: () => void
   settingsButtonRef: Ref<HTMLButtonElement>
 }): ReactNode {
   return (
@@ -46,6 +48,14 @@ export function Sidebar({
           <div className="truncate font-semibold">{myName || 'Set your name'}</div>
           <div className="label text-magenta">You</div>
         </div>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="icon" size="icon" aria-label="Quit Hush" aria-keyshortcuts="Control+Q" onClick={onQuit} className="hover:not-disabled:text-danger-text">
+              <Power className="size-[18px]" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Quit Hush (Ctrl+Q)</TooltipContent>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button ref={settingsButtonRef} variant="icon" size="icon" aria-label="Settings" onClick={onOpenSettings}>

@@ -104,8 +104,17 @@ export interface NetState {
   error: string | null
 }
 
+/** hush-img:// URLs of the profile pictures, or null when there is none. */
+export interface AvatarUrls {
+  self: string | null
+  peer: string | null
+}
+
 export interface Snapshot {
   settings: Settings
+  avatars: AvatarUrls
+  /** The window is visible and focused (from the main process, which knows reliably). */
+  windowActive: boolean
   peer: PeerState
   net: NetState
   /**
@@ -123,6 +132,9 @@ export type HushEvent =
   | { type: 'net'; net: NetState }
   | { type: 'settings'; settings: Settings }
   | { type: 'transfer'; transfer: ImageTransfer }
+  | { type: 'avatars'; avatars: AvatarUrls }
+  /** Window shown/hidden/focused/blurred — read receipts only go out while it's active. */
+  | { type: 'window'; active: boolean }
   /** A call-history entry was added or updated. */
   | { type: 'call-log'; record: CallRecord }
   /** WebRTC signaling from the other app. */
@@ -145,6 +157,10 @@ export interface HushApi {
   listCalls(): Promise<CallRecord[]>
   /** Adds or updates a call-history entry. */
   logCall(record: CallRecord): void
+  /** Sets (PNG/JPEG/WebP, ≤ 96 KB) or removes (null) your profile picture. */
+  setAvatar(bytes: Uint8Array | null): Promise<boolean>
+  /** Quits Hush completely (the window's close button only hides it to the tray). */
+  quit(): void
   markRead(ids: string[]): void
   setTyping(on: boolean): void
   updateSettings(patch: Partial<Settings>): Promise<Settings>
@@ -163,6 +179,8 @@ export const IPC = {
   callSignal: 'hush:call-signal',
   listCalls: 'hush:list-calls',
   logCall: 'hush:log-call',
+  setAvatar: 'hush:set-avatar',
+  quit: 'hush:quit',
   markRead: 'hush:mark-read',
   setTyping: 'hush:set-typing',
   updateSettings: 'hush:update-settings',

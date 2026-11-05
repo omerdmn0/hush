@@ -1,4 +1,5 @@
-import type { CSSProperties, ReactNode } from 'react'
+import { createContext, useContext, type CSSProperties, type ReactNode } from 'react'
+import type { AvatarUrls } from '../../../shared/types'
 import { initial } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -13,7 +14,10 @@ export function Logo({ className }: { className?: string }): ReactNode {
   )
 }
 
-/** Chamfered-square avatar with the person's initial (MASTER.md §4). */
+/** Current profile pictures; Avatar falls back to initials when there is none. */
+export const AvatarContext = createContext<AvatarUrls>({ self: null, peer: null })
+
+/** Chamfered-square avatar: profile picture, or the person's initial (MASTER.md §4). */
 export function Avatar({
   name,
   who,
@@ -32,9 +36,11 @@ export function Avatar({
     fontSize: Math.round(size * 0.42),
     background: who === 'me' ? 'var(--avatar-me)' : 'var(--avatar-peer)'
   } as CSSProperties
+  const urls = useContext(AvatarContext)
+  const src = who === 'me' ? urls.self : urls.peer
   return (
-    <div aria-hidden="true" style={style} className={cn('chamfer-avatar grid flex-none place-items-center font-bold text-text', className)}>
-      {initial(name)}
+    <div aria-hidden="true" style={style} className={cn('chamfer-avatar grid flex-none place-items-center overflow-hidden font-bold text-text', className)}>
+      {src ? <img src={src} alt="" draggable={false} className="h-full w-full object-cover" /> : initial(name)}
     </div>
   )
 }

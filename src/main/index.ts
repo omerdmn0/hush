@@ -1,17 +1,25 @@
-import { app, BrowserWindow, ipcMain, Menu, net as electronNet, protocol, session } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, net as electronNet, protocol, session } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import icon from '../../resources/icon.png?asset'
+import trayIcon from '../../resources/tray.png?asset'
+import trayUnreadIcon from '../../resources/tray-unread.png?asset'
+import badgeIcon from '../../resources/badge.png?asset'
 import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame } from '../shared/protocol'
 import { isTailscaleIp } from '../shared/ip'
 import { IPC, type CallRecord, type HistoryCursor, type HushEvent, type NetState, type OutgoingImage, type Settings } from '../shared/types'
+import { Avatars } from './avatars'
+import { CallTracker } from './callTracker'
 import { ChatService } from './chat'
 import { HushDb } from './db'
 import { ImageStore } from './images'
 import { PeerLink } from './link'
+import { Notifier } from './notifier'
+import { titleWithUnread } from './notifyLogic'
 import { findTailscaleIp } from './tailscale'
+import { HushTray } from './tray'
 
 // ---------------------------------------------------------------------------
 // Development-only overrides (ignored in packaged builds). They let two copies run
@@ -20,6 +28,7 @@ import { findTailscaleIp } from './tailscale'
 //   HUSH_BIND       listen address instead of the Tailscale IP (e.g. 127.0.0.1)
 //   HUSH_PEER       peer address that bypasses the Tailscale-range check
 //   HUSH_PORT       listen port      HUSH_PEER_PORT  port to dial
+//   HUSH_FAKE_MEDIA fake microphone for testing calls
 // ---------------------------------------------------------------------------
 const dev = !app.isPackaged
 const env = (k: string): string | undefined => (dev ? process.env[k] || undefined : undefined)
@@ -36,15 +45,21 @@ if (env('HUSH_FAKE_MEDIA')) {
 }
 const devPairing = env('HUSH_PEER') !== undefined
 
-// hush-img://<message-id>/thumb|full serves stored images to the UI (must be declared before ready).
+// Windows needs an app id for notifications to show.
+if (process.platform === 'win32') app.setAppUserModelId('app.hush.chat')
+
+// hush-img://<message-id>/thumb|full and hush-img://avatar/self|peer serve stored images to the UI.
 protocol.registerSchemesAsPrivileged([{ scheme: 'hush-img', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
 // One Hush per data folder — a second copy would fight over the port and database.
+// Launching Hush again while it runs in the tray brings its window back instead.
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   let mainWindow: BrowserWindow | null = null
-  const send = (e: HushEvent): void => mainWindow?.webContents.send(IPC.event, e)
+  let tray: HushTray | null = null
+  /** True once a real quit has started (the close button otherwise only hides the window). */
+  let quitting = false
 
   const db = new HushDb(join(app.getPath('userData'), 'hush.db'))
   let selfId = db.getSetting<string>('selfId')
@@ -66,6 +81,60 @@ if (!app.requestSingleInstanceLock()) {
   const visible = (s: Settings): Settings => (env('HUSH_PEER') ? { ...s, peerIp: env('HUSH_PEER')! } : s)
   const detectOwnIp = (): string | null => env('HUSH_BIND') ?? findTailscaleIp()
 
+  // ---------- window helpers ----------
+
+  const showWindow = (): void => {
+    if (!mainWindow) return createWindow()
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+  const userIsLooking = (): boolean => !!mainWindow && mainWindow.isVisible() && mainWindow.isFocused()
+
+  // ---------- core services ----------
+
+  const notifier = new Notifier({
+    enabled: () => settings.notifications,
+    focused: userIsLooking,
+    peerName: () => chat.peerState().name ?? 'Peer',
+    icon,
+    onClick: showWindow,
+    log: devPairing ? (line) => console.log(line) : undefined
+  })
+
+  let unread = 0
+  let unreadTimer: ReturnType<typeof setTimeout> | undefined
+  const updateTray = (): void => {
+    const p = chat.peerState()
+    tray?.update({ peerName: settings.peerIp || devPairing ? p.name : null, online: p.presence === 'online', unread, notifications: settings.notifications })
+  }
+  const refreshUnread = (): void => {
+    const n = db.unreadCount(selfId)
+    if (n === unread) return
+    unread = n
+    mainWindow?.setTitle(titleWithUnread(n) + (profile ? ` · ${profile}` : ''))
+    app.setBadgeCount(n) // Linux (Unity/KDE launchers) and macOS; ignored elsewhere
+    if (process.platform === 'win32') mainWindow?.setOverlayIcon(n > 0 ? nativeImage.createFromPath(badgeIcon) : null, n > 0 ? `${n} unread` : '')
+    updateTray()
+  }
+  const scheduleUnread = (): void => {
+    clearTimeout(unreadTimer)
+    unreadTimer = setTimeout(refreshUnread, 100)
+  }
+
+  /** Every event for the UI also drives notifications, the unread count and the tray. */
+  const send = (e: HushEvent): void => {
+    mainWindow?.webContents.send(IPC.event, e)
+    if (e.type === 'message' && e.message.from === 'peer') {
+      notifier.message({ text: e.message.text, hasImage: !!e.message.image })
+      scheduleUnread()
+    } else if (e.type === 'status') {
+      scheduleUnread()
+    } else if (e.type === 'peer') {
+      updateTray()
+    }
+  }
+
   const net: NetState = { ownIp: detectOwnIp(), port, listening: false, error: null }
   const link = new PeerLink({
     selfId,
@@ -76,7 +145,9 @@ if (!app.requestSingleInstanceLock()) {
     peerPort
   })
   const images = new ImageStore(join(app.getPath('userData'), 'images'))
-  const chat = new ChatService(db, link, selfId, send, images)
+  const avatars = new Avatars(app.getPath('userData'))
+  const chat = new ChatService(db, link, selfId, send, images, { avatars })
+  const calls = new CallTracker()
 
   link.on('listening', (listening, error) => {
     Object.assign(net, { listening, error })
@@ -88,7 +159,17 @@ if (!app.requestSingleInstanceLock()) {
   })
   // Call signaling is relayed to the UI untouched (it holds the WebRTC connection).
   link.on('frame', (frame) => {
-    if (isCallSignal(frame)) send({ type: 'call', signal: frame })
+    if (!isCallSignal(frame)) return
+    const what = calls.fromPeer(frame)
+    send({ type: 'call', signal: frame })
+    if (what === 'incoming') {
+      // Bring a hidden window back so the call can be answered, without stealing focus.
+      if (mainWindow && !mainWindow.isVisible()) mainWindow.showInactive()
+      mainWindow?.flashFrame(true)
+      notifier.incomingCall()
+    } else if (what === 'missed') {
+      notifier.missedCall()
+    }
   })
   link.on('up', () => {
     if (net.error && net.listening) {
@@ -107,14 +188,23 @@ if (!app.requestSingleInstanceLock()) {
   }
   const ipPoll = setInterval(refreshOwnIp, 10_000)
 
-  const createWindow = (): void => {
+  const applySettings = (next: Settings): Settings => {
+    settings = next
+    db.setSetting('settings', settings)
+    link.update({ name: settings.displayName, peerHost: peerHostFor(settings) })
+    send({ type: 'settings', settings: visible(settings) })
+    updateTray()
+    return visible(settings)
+  }
+
+  function createWindow(): void {
     mainWindow = new BrowserWindow({
       width: 1200,
       height: 780,
       minWidth: 880,
       minHeight: 560,
       show: false,
-      title: profile ? `Hush (${profile})` : 'Hush',
+      title: titleWithUnread(unread) + (profile ? ` · ${profile}` : ''),
       backgroundColor: '#0D0B14',
       autoHideMenuBar: true,
       icon,
@@ -127,6 +217,24 @@ if (!app.requestSingleInstanceLock()) {
     })
 
     mainWindow.once('ready-to-show', () => mainWindow?.show())
+    // The window title shows the unread count; don't let the page's <title> replace it.
+    mainWindow.on('page-title-updated', (e) => e.preventDefault())
+    mainWindow.on('focus', () => mainWindow?.flashFrame(false))
+    // The page can't reliably tell whether it's hidden in the tray, so tell it.
+    const reportActive = (): void => {
+      setImmediate(() => mainWindow?.webContents.send(IPC.event, { type: 'window', active: userIsLooking() } satisfies HushEvent))
+    }
+    for (const ev of ['focus', 'blur', 'show', 'hide', 'minimize', 'restore'] as const) mainWindow.on(ev as 'focus', reportActive)
+    // Closing the window keeps Hush running in the tray, so messages and calls still arrive.
+    mainWindow.on('close', (e) => {
+      if (quitting) return
+      e.preventDefault()
+      mainWindow?.hide()
+      if (!db.getSetting<boolean>('trayHintShown')) {
+        db.setSetting('trayHintShown', true)
+        notifier.info('Hush is still running', 'It stays in the tray so messages and calls reach you. Use Quit to close it completely.')
+      }
+    })
     // Gather WebRTC candidates on every interface, so the Tailscale address is among them.
     mainWindow.webContents.setWebRTCIPHandlingPolicy('default')
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -140,14 +248,27 @@ if (!app.requestSingleInstanceLock()) {
     mainWindow.on('closed', () => (mainWindow = null))
   }
 
+  const quitApp = (): void => {
+    quitting = true
+    app.quit()
+  }
+
   // ---------- IPC (inputs from the renderer are validated here) ----------
 
-  ipcMain.handle(IPC.snapshot, () => ({ settings: visible(settings), peer: chat.peerState(), net: { ...net }, devPairing }))
+  ipcMain.handle(IPC.snapshot, () => ({
+    settings: visible(settings),
+    peer: chat.peerState(),
+    net: { ...net },
+    avatars: avatars.urls(),
+    windowActive: userIsLooking(),
+    devPairing
+  }))
 
   ipcMain.handle(IPC.callSignal, (_e, signal: unknown) => {
     // Same validation as frames from the network.
     const frame = parseFrame(JSON.stringify(signal ?? null))
     if (!frame || !isCallSignal(frame)) return false
+    calls.fromUs(frame)
     return link.send(frame)
   })
 
@@ -169,6 +290,11 @@ if (!app.requestSingleInstanceLock()) {
     return chat.sendImage(img, caption) // validates type, signature, size and preview
   })
 
+  ipcMain.handle(IPC.setAvatar, (_e, bytes: unknown) => {
+    if (bytes !== null && !(bytes instanceof Uint8Array)) return false
+    return chat.setAvatar(bytes) // validates signature and size
+  })
+
   ipcMain.handle(IPC.listCalls, () => db.listCalls())
 
   ipcMain.on(IPC.logCall, (_e, record: CallRecord) => {
@@ -185,7 +311,10 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   ipcMain.on(IPC.markRead, (_e, ids: unknown) => {
-    if (Array.isArray(ids) && ids.every((id) => typeof id === 'string')) chat.markRead(ids as string[])
+    if (Array.isArray(ids) && ids.every((id) => typeof id === 'string')) {
+      chat.markRead(ids as string[])
+      scheduleUnread()
+    }
   })
 
   ipcMain.on(IPC.setTyping, (_e, on: unknown) => {
@@ -203,11 +332,7 @@ if (!app.requestSingleInstanceLock()) {
       if (ip !== '' && !isTailscaleIp(ip)) throw new Error('Not a Tailscale IP')
       next.peerIp = ip
     }
-    settings = next
-    db.setSetting('settings', settings)
-    link.update({ name: settings.displayName, peerHost: peerHostFor(settings) })
-    send({ type: 'settings', settings: visible(settings) })
-    return visible(settings)
+    return applySettings(next)
   })
 
   ipcMain.on(IPC.reconnect, () => {
@@ -215,13 +340,11 @@ if (!app.requestSingleInstanceLock()) {
     link.reconnectNow()
   })
 
+  ipcMain.on(IPC.quit, quitApp)
+
   // ---------- lifecycle ----------
 
-  app.on('second-instance', () => {
-    if (!mainWindow) return
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.focus()
-  })
+  app.on('second-instance', showWindow)
 
   app.whenReady().then(() => {
     if (app.isPackaged) Menu.setApplicationMenu(null)
@@ -232,34 +355,49 @@ if (!app.requestSingleInstanceLock()) {
 
     protocol.handle('hush-img', (req) => {
       const url = new URL(req.url)
-      const id = url.hostname
-      const file = images.resolve(id, url.pathname.slice(1), db.getMessage(id)?.image ?? null)
+      const host = url.hostname
+      const kind = url.pathname.slice(1)
+      const file = host === 'avatar' ? avatars.resolve(kind) : images.resolve(host, kind, db.getMessage(host)?.image ?? null)
       return file ? electronNet.fetch(pathToFileURL(file).toString()) : new Response('Not found', { status: 404 })
     })
 
+    tray = new HushTray(
+      { normal: trayIcon, unread: trayUnreadIcon },
+      {
+        open: showWindow,
+        quit: quitApp,
+        setNotifications: (on) => applySettings({ ...settings, notifications: on })
+      }
+    )
     link.start()
     createWindow()
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    refreshUnread()
+    updateTray()
+    app.on('activate', showWindow)
+  })
+
+  // Real quit (power button, tray "Quit Hush", Ctrl+Q, or the OS shutting down):
+  // hang up any call properly, close the link, and never take longer than a second.
+  let shuttingDown = false
+  app.on('before-quit', (e) => {
+    quitting = true
+    if (shuttingDown) return
+    shuttingDown = true
+    e.preventDefault()
+    clearInterval(ipPoll)
+    const cleanup = (async () => {
+      for (const id of calls.openCalls()) await link.send({ t: 'call-end', id, reason: 'hangup' })
+      await link.stop()
+    })().catch(() => {})
+    void Promise.race([cleanup, new Promise((r) => setTimeout(r, 1000))]).finally(() => {
+      tray?.destroy()
+      db.close()
+      app.exit(0)
     })
   })
 
-  let quitting = false
-  app.on('before-quit', (e) => {
-    if (quitting) return
-    quitting = true
-    e.preventDefault()
-    clearInterval(ipPoll)
-    link
-      .stop()
-      .catch(() => {})
-      .finally(() => {
-        db.close()
-        app.quit()
-      })
-  })
-
+  // The window is only hidden, never closed, until a real quit — so don't quit here.
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit()
+    if (quitting) app.quit()
   })
 }

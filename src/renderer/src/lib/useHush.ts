@@ -54,6 +54,12 @@ export function useHush(): HushState {
         case 'message':
           setMessages((prev) => insertSorted(prev, e.message, hasMoreRef.current))
           break
+        case 'window':
+          setSnapshot((s) => s && { ...s, windowActive: e.active })
+          break
+        case 'avatars':
+          setSnapshot((s) => s && { ...s, avatars: e.avatars })
+          break
         case 'call-log':
           setCalls((prev) => [...prev.filter((c) => c.id !== e.record.id), e.record].sort((a, b) => a.startedAt - b.startedAt))
           break

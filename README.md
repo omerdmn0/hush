@@ -3,8 +3,8 @@
 Private chat for two people, peer-to-peer over Tailscale. No servers, no accounts, no cloud —
 messages live only on your two computers.
 
-> **Status:** stage e — text, images and voice calls, with history, offline queue and sync.
-> Notifications, tray and packaging follow in later stages. A full setup guide for
+> **Status:** stage f — text, images, voice calls with call history, notifications and tray.
+> Packaging for Windows and Linux follows in the next stage. A full setup guide for
 > both users (installing Tailscale, finding each other's IP) will be added once the app is complete.
 
 ## Development
@@ -47,7 +47,7 @@ HUSH_FAKE_MEDIA=1 npm run pair
   *queued*. On every connection both apps exchange one `sync` frame ("I have your messages up to
   N, and have read up to R"); each then sends whatever the other is missing. Nothing is lost or
   duplicated, and read receipts made offline catch up too. Both apps must run the same protocol
-  version (currently 4) — Hush shows an error if they don't.
+  version (currently 5) — Hush shows an error if they don't.
 - **Images** (PNG, JPEG, GIF, WebP, up to 25 MB) are added by drag-and-drop, paste or the file
   picker. The message carries a small preview; the receiver then pulls the full file in chunks,
   resuming after interruptions and checking its SHA-256 before showing it. Files are stored in the
@@ -56,7 +56,16 @@ HUSH_FAKE_MEDIA=1 npm run pair
 - **Voice calls** use WebRTC audio. Call setup travels over the same link; the audio then goes
   directly between the two computers, encrypted by WebRTC (DTLS-SRTP) and by Tailscale. Hush uses
   no STUN/TURN servers and only offers/accepts network paths on Tailscale addresses (100.x).
-  Microphone and speaker are chosen in Settings → Audio.
+  Microphone and speaker are chosen in Settings → Audio. Each computer keeps its own call history,
+  shown in the chat ("You called Mira · 04:12", "Missed call from Mira" with Call back).
+- **Runs in the tray:** closing the window keeps Hush running so messages and calls still arrive.
+  Use the power button next to Settings (or Ctrl+Q, or the tray menu's *Quit Hush*) to quit
+  completely. Launching Hush again while it runs brings its window back — on Linux desktops
+  without a tray (e.g. GNOME without the AppIndicator extension) that is how you reopen it.
+- **Notifications** appear for new messages (bursts are combined), incoming and missed calls,
+  only while Hush isn't focused, and can be turned off in Settings or the tray menu. The unread
+  count shows in the window title, tray icon and tooltip.
+- **Avatars** are cropped to a 256 px square and sent to the other person on every connection.
 - History and settings are stored in `hush.db` (SQLite) in the app's data folder and never leave
   the two computers.
 

@@ -4,6 +4,7 @@ import type { ChatMessage, HistoryCursor, HushEvent, OutgoingImage, PeerState } 
 import { toChatMessage, type HushDb, type StoredMessage } from './db'
 import { sha256, type ImageStore } from './images'
 import type { LinkPeer, PeerLink } from './link'
+import type { Avatars } from './avatars'
 import { Transfers } from './transfers'
 
 /** Messages re-sent per database page during sync. */
@@ -32,6 +33,7 @@ export class ChatService {
   private flushCount = 0
   private flushTimer: ReturnType<typeof setTimeout> | undefined
   readonly transfers: Transfers
+  private readonly avatars: Avatars | null
 
   constructor(
     private readonly db: HushDb,
@@ -39,8 +41,9 @@ export class ChatService {
     private readonly selfId: string,
     private readonly emit: (e: HushEvent) => void,
     private readonly store: ImageStore,
-    opts: { chunkBytes?: number } = {}
+    opts: { chunkBytes?: number; avatars?: Avatars } = {}
   ) {
+    this.avatars = opts.avatars ?? null
     this.transfers = new Transfers(db, store, link, selfId, emit, opts.chunkBytes)
     link.on('up', (peer) => this.onUp(peer))
     link.on('down', () => this.onDown())
@@ -125,6 +128,15 @@ export class ChatService {
       read: { [peer.id]: this.db.readSeq(peer.id) }
     })
     this.transfers.onUp()
+    if (this.avatars) void this.link.send({ t: 'avatar', data: this.avatars.selfBase64() })
+  }
+
+  /** Sets or removes our profile picture and tells the other app. */
+  setAvatar(bytes: Uint8Array | null): boolean {
+    if (!this.avatars?.setSelf(bytes)) return false
+    this.emit({ type: 'avatars', avatars: this.avatars.urls() })
+    void this.link.send({ t: 'avatar', data: this.avatars.selfBase64() })
+    return true
   }
 
   private onDown(): void {
@@ -183,6 +195,11 @@ export class ChatService {
         break
       case 'typing':
         this.emit({ type: 'typing', on: frame.on })
+        break
+      case 'avatar':
+        if (this.avatars?.setPeer(frame.data === null ? null : Buffer.from(frame.data, 'base64'))) {
+          this.emit({ type: 'avatars', avatars: this.avatars.urls() })
+        }
         break
       case 'profile':
         this.rememberPeer(peer)

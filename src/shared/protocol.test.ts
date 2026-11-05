@@ -102,3 +102,13 @@ describe('call signaling', () => {
     expect(parseFrame(j({ t: 'call-end', id: A, reason: 'exploded' }))).toBeNull()
   })
 })
+
+describe('avatar frames', () => {
+  it('accepts a base64 picture or null, and rejects oversized or malformed data', () => {
+    expect(parseFrame(j({ t: 'avatar', data: 'UklGRg==' }))).toEqual({ t: 'avatar', data: 'UklGRg==' })
+    expect(parseFrame(j({ t: 'avatar', data: null }))).toEqual({ t: 'avatar', data: null })
+    expect(parseFrame(j({ t: 'avatar', data: 'A'.repeat(140_000) }))).toBeNull()
+    expect(parseFrame(j({ t: 'avatar', data: '<svg>' }))).toBeNull()
+    expect(parseFrame(j({ t: 'avatar' }))).toBeNull()
+  })
+})

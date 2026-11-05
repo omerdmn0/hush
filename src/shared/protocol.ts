@@ -16,8 +16,13 @@
 // Calls (stage e): WebRTC signaling rides on the same link — `call` (offer), `call-ringing`,
 // `call-answer`, `call-ice`, `call-end`. Media then flows peer-to-peer (DTLS-SRTP), restricted
 // to Tailscale addresses; no STUN/TURN servers are used.
+//
+// Avatars (stage f): `avatar` carries the sender's small profile picture (or null = removed);
+// it is sent on every connection and whenever it changes.
 
-export const PROTOCOL_VERSION = 4
+export const PROTOCOL_VERSION = 5
+/** Largest avatar image accepted (already a 256 px square, so this is generous). */
+export const MAX_AVATAR_BYTES = 96 * 1024
 export const DEFAULT_PORT = 47821
 /** Upper bound for a single frame on the wire. */
 export const MAX_FRAME_BYTES = 256 * 1024
@@ -68,6 +73,8 @@ export type Frame =
   | { t: 'call-answer'; id: string; sdp: string }
   | { t: 'call-ice'; id: string; candidate: string; mid: string | null; line: number | null }
   | { t: 'call-end'; id: string; reason: CallEndReason }
+  /** Sender's profile picture as base64 PNG/JPEG/WebP, or null when removed. */
+  | { t: 'avatar'; data: string | null }
   /** Sent once per connection by both sides; see the sync model above. */
   | { t: 'sync'; have: Record<string, number>; read: Record<string, number> }
   /** "These messages are stored on my side" → sender marks them delivered. */
@@ -200,6 +207,11 @@ function parseRaw(raw: string): Frame | null {
         (f.mid === null || (typeof f.mid === 'string' && f.mid.length <= 64)) &&
         (f.line === null || isInt(f.line, 0, 64))
         ? { t: 'call-ice', id: f.id, candidate: f.candidate, mid: f.mid as string | null, line: f.line as number | null }
+        : null
+    case 'avatar':
+      return f.data === null ||
+        (typeof f.data === 'string' && f.data.length > 0 && f.data.length <= Math.ceil(MAX_AVATAR_BYTES / 3) * 4 && /^[A-Za-z0-9+/]+={0,2}$/.test(f.data))
+        ? { t: 'avatar', data: f.data as string | null }
         : null
     case 'call-end':
       return isUuid(f.id) && CALL_END_REASONS.includes(f.reason as CallEndReason)
