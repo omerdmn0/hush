@@ -24,6 +24,7 @@ export interface ComposerHandle {
 export function Composer({
   peerName,
   disabled,
+  disabledHint = 'Link someone in settings to start chatting',
   onSend,
   onSendImage,
   onTyping,
@@ -32,6 +33,7 @@ export function Composer({
 }: {
   peerName: string
   disabled: boolean
+  disabledHint?: string
   onSend: (text: string) => Promise<void>
   onSendImage: (image: OutgoingImage, caption: string) => Promise<void>
   onTyping: (on: boolean) => void
@@ -237,7 +239,7 @@ export function Composer({
             disabled={disabled}
             aria-describedby={error ? 'composer-error' : undefined}
             placeholder={
-              disabled ? 'Link someone in settings to start chatting' : attachments.length ? 'Add a caption (optional)' : `Message ${peerName}`
+              disabled ? disabledHint : attachments.length ? 'Add a caption (optional)' : `Message ${peerName}`
             }
             onChange={(e) => update(e.target.value)}
             onBlur={stopTyping}

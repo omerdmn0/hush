@@ -10,10 +10,13 @@ import badgeIcon from '../../resources/badge.png?asset'
 import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame } from '../shared/protocol'
 import { isTailscaleIp } from '../shared/ip'
 import { IPC, type CallRecord, type HistoryCursor, type HushEvent, type NetState, type OutgoingImage, type Settings } from '../shared/types'
+import { applyStartAtLogin, HIDDEN_FLAG } from './autostart'
 import { Avatars } from './avatars'
 import { CallTracker } from './callTracker'
 import { ChatService } from './chat'
 import { HushDb } from './db'
+import { Identity } from './identity'
+import { PairingService } from './pairing'
 import { ImageStore } from './images'
 import { PeerLink } from './link'
 import { Notifier } from './notifier'
@@ -67,11 +70,29 @@ if (!app.requestSingleInstanceLock()) {
     selfId = randomUUID()
     db.setSetting('selfId', selfId)
   }
+  // Long-term identity (Ed25519) and the key of the person we paired with.
+  let identityKey = db.getSetting<string>('identityKey')
+  if (!identityKey) {
+    identityKey = Identity.generate()
+    db.setSetting('identityKey', identityKey)
+  }
+  const identity = new Identity(identityKey)
+  let pairedKey = db.getSetting<string | null>('pairedKey') ?? null
+  const pins = {
+    getPinned: () => pairedKey,
+    setPinned: (key: string | null) => {
+      pairedKey = key
+      db.setSetting('pairedKey', key)
+    }
+  }
+  const startHidden = process.argv.includes(HIDDEN_FLAG)
+
   let settings: Settings = {
     displayName: userInfo().username,
     peerIp: '',
     notifications: true,
     notificationPreview: false,
+    startAtLogin: true,
     micId: '',
     speakerId: '',
     ...db.getSetting<Partial<Settings>>('settings')
@@ -141,6 +162,9 @@ if (!app.requestSingleInstanceLock()) {
   const link = new PeerLink({
     selfId,
     name: settings.displayName,
+    appVersion: app.getVersion(),
+    identity,
+    pinned: pins.getPinned,
     bindHost: net.ownIp,
     port,
     peerHost: peerHostFor(settings),
@@ -150,6 +174,19 @@ if (!app.requestSingleInstanceLock()) {
   const avatars = new Avatars(app.getPath('userData'))
   const chat = new ChatService(db, link, selfId, send, images, { avatars })
   const calls = new CallTracker()
+  const pairing = new PairingService(link, identity.publicKey, pins)
+  pairing.on('change', (state) => send({ type: 'pairing', pairing: state }))
+
+  const applyAutostart = (): void => {
+    applyStartAtLogin(settings.startAtLogin, {
+      platform: process.platform,
+      packaged: app.isPackaged,
+      execPath: process.execPath,
+      appImage: process.env.APPIMAGE,
+      configHome: process.env.XDG_CONFIG_HOME || join(app.getPath('home'), '.config'),
+      setLoginItem: (s) => app.setLoginItemSettings(s)
+    })
+  }
 
   link.on('listening', (listening, error) => {
     Object.assign(net, { listening, error })
@@ -218,7 +255,8 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
 
-    mainWindow.once('ready-to-show', () => mainWindow?.show())
+    // Started at login with --hidden: stay in the tray until opened.
+    mainWindow.once('ready-to-show', () => !startHidden && mainWindow?.show())
     // The window title shows the unread count; don't let the page's <title> replace it.
     mainWindow.on('page-title-updated', (e) => e.preventDefault())
     mainWindow.on('focus', () => mainWindow?.flashFrame(false))
@@ -263,6 +301,9 @@ if (!app.requestSingleInstanceLock()) {
     net: { ...net },
     avatars: avatars.urls(),
     windowActive: userIsLooking(),
+    pairing: pairing.state(),
+    appVersion: app.getVersion(),
+    packaged: app.isPackaged,
     devPairing
   }))
 
@@ -328,6 +369,11 @@ if (!app.requestSingleInstanceLock()) {
     if (typeof patch.displayName === 'string') next.displayName = patch.displayName.trim().slice(0, 40)
     if (typeof patch.notifications === 'boolean') next.notifications = patch.notifications
     if (typeof patch.notificationPreview === 'boolean') next.notificationPreview = patch.notificationPreview
+    if (typeof patch.startAtLogin === 'boolean' && patch.startAtLogin !== settings.startAtLogin) {
+      next.startAtLogin = patch.startAtLogin
+      settings = next
+      applyAutostart()
+    }
     if (typeof patch.micId === 'string' && patch.micId.length <= 256) next.micId = patch.micId
     if (typeof patch.speakerId === 'string' && patch.speakerId.length <= 256) next.speakerId = patch.speakerId
     if (typeof patch.peerIp === 'string') {
@@ -344,6 +390,12 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   ipcMain.on(IPC.quit, quitApp)
+
+  ipcMain.handle(IPC.pairSubmit, (_e, code: unknown) => {
+    if (typeof code === 'string' && code.length <= 32) return pairing.submitCode(code)
+  })
+
+  ipcMain.on(IPC.pairForget, () => pairing.forget())
 
   // ---------- lifecycle ----------
 
@@ -372,6 +424,7 @@ if (!app.requestSingleInstanceLock()) {
         setNotifications: (on) => applySettings({ ...settings, notifications: on })
       }
     )
+    applyAutostart() // keeps the entry pointing at the current app location
     link.start()
     createWindow()
     refreshUnread()

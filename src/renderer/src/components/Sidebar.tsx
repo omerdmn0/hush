@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Avatar, HudLabel, Logo, StatusTag } from '@/components/common'
 import type { CallAction, PeerView } from '@/lib/view'
+import { cn } from '@/lib/utils'
 
 export function Sidebar({
   peer,
@@ -12,6 +13,8 @@ export function Sidebar({
   onOpenSettings,
   onLinkPeer,
   onQuit,
+  paired,
+  updateHint,
   settingsButtonRef
 }: {
   peer: PeerView | null
@@ -20,6 +23,8 @@ export function Sidebar({
   onOpenSettings: () => void
   onLinkPeer: () => void
   onQuit: () => void
+  paired: boolean
+  updateHint: string | null
   settingsButtonRef: Ref<HTMLButtonElement>
 }): ReactNode {
   return (
@@ -35,9 +40,14 @@ export function Sidebar({
       </div>
 
       <HudLabel className="px-4 pt-2 pb-1.5">Link</HudLabel>
-      {peer ? <PeerCard peer={peer} call={call} /> : <NoPeerCard onOpenSettings={onLinkPeer} />}
+      {peer ? <PeerCard peer={peer} call={call} paired={paired} /> : <NoPeerCard onOpenSettings={onLinkPeer} />}
 
       <div className="flex-1" />
+      {updateHint && (
+        <div role="status" className="data mx-4 mb-3 border-l-2 border-queued pl-2 text-queued">
+          {updateHint}
+        </div>
+      )}
       <div className="data mx-4 mb-3 flex items-start gap-2 text-text-muted">
         <ShieldCheck aria-hidden="true" className="mt-px size-4 flex-none text-online" />
         <span>Direct via Tailscale · no servers</span>
@@ -69,7 +79,7 @@ export function Sidebar({
   )
 }
 
-function PeerCard({ peer, call }: { peer: PeerView; call: CallAction }): ReactNode {
+function PeerCard({ peer, call, paired }: { peer: PeerView; call: CallAction; paired: boolean }): ReactNode {
   const online = peer.presence === 'online'
   return (
     <div className="cut panel mx-3 flex flex-col items-center gap-1.5 px-4 pt-[18px] pb-4 text-center">
@@ -78,7 +88,9 @@ function PeerCard({ peer, call }: { peer: PeerView; call: CallAction }): ReactNo
       </div>
       <div className="mt-1 max-w-full truncate text-lg leading-[26px] font-semibold">{peer.name}</div>
       <StatusTag online={online} />
-      <div className="data text-text-muted">{online ? 'LINK DIRECT · P2P' : peer.lastSeen ? `LAST SEEN ${peer.lastSeen}` : 'NOT CONNECTED YET'}</div>
+      <div className={cn('data', paired ? 'text-text-muted' : 'text-queued')}>
+        {!paired ? 'PAIRING NEEDED' : online ? 'LINK VERIFIED · P2P' : peer.lastSeen ? `LAST SEEN ${peer.lastSeen}` : 'NOT CONNECTED YET'}
+      </div>
       <div className="data text-text-muted">NODE {peer.ip}</div>
       <Tooltip>
         <TooltipTrigger asChild>

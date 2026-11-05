@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events'
 import type { IncomingMessage } from 'node:http'
 import WebSocket, { WebSocketServer, type RawData } from 'ws'
-import { MAX_FRAME_BYTES, parseFrame, PROTOCOL_VERSION, type Frame } from '../shared/protocol'
+import { FEATURES, MAX_FRAME_BYTES, MIN_PROTOCOL, parseFrame, PROTOCOL_VERSION, type Frame } from '../shared/protocol'
+import { newNonce, verifyAuth } from './identity'
 
 /**
  * PeerLink keeps exactly one WebSocket connection to the other Hush app.
@@ -13,6 +14,8 @@ import { MAX_FRAME_BYTES, parseFrame, PROTOCOL_VERSION, type Frame } from '../sh
  * - Heartbeats detect dead connections; dialing retries with exponential backoff.
  * - 'up' fires whenever the active connection changes (first connect, or a switch to the
  *   surviving duplicate), so the chat layer can re-sync anything cut off mid-switch.
+ * - Identity: a connection only counts as up once the other side proved (by signature) the key
+ *   pinned at pairing, and has pinned ours. Until then only pairing frames pass ('pairing').
  *
  * It only moves validated frames; chat logic lives in ChatService.
  */
@@ -20,6 +23,13 @@ import { MAX_FRAME_BYTES, parseFrame, PROTOCOL_VERSION, type Frame } from '../sh
 export interface LinkConfig {
   selfId: string
   name: string
+  appVersion: string
+  identity: {
+    publicKey: string
+    authSignature: (peerNonce: string, peerKey: string) => string
+  }
+  /** The other person's key from pairing, or null if not paired. */
+  pinned: () => string | null
   /** Address to listen on (own Tailscale IP); null = don't listen. */
   bindHost: string | null
   port: number
@@ -31,6 +41,10 @@ export interface LinkConfig {
 export interface LinkPeer {
   id: string
   name: string
+  /** Their identity key (base64url). */
+  key: string
+  app: string
+  features: string[]
 }
 
 interface LinkEvents {
@@ -38,8 +52,14 @@ interface LinkEvents {
   up: [peer: LinkPeer]
   down: []
   frame: [frame: Frame, peer: LinkPeer]
-  /** Binary frame (image chunk) from a handshaken peer. */
+  /** Binary frame (image chunk) from an authenticated peer. */
   binary: [data: Uint8Array, peer: LinkPeer]
+  /** Reachable but not paired (or one side forgot the pairing): pairing frames may flow. */
+  pairing: [peer: LinkPeer]
+  /** pair-proof / pair-result from the peer we are pairing with. */
+  'pair-frame': [frame: Extract<Frame, { t: 'pair-proof' | 'pair-result' }>, peer: LinkPeer]
+  /** The device at the peer address has a different key than the one we paired with. */
+  'identity-mismatch': [peer: LinkPeer]
   listening: [listening: boolean, error: string | null]
   problem: [message: string]
 }
@@ -48,8 +68,18 @@ interface Conn {
   ws: WebSocket
   outgoing: boolean
   peer: LinkPeer | null
+  /** Which key the peer has pinned ('' = none), from its hello. */
+  peerPinned: string
   alive: boolean
   helloTimer: ReturnType<typeof setTimeout>
+  /** Our challenge for this connection (sent in hello). */
+  nonce: string
+  /** Their challenge (from their hello), which our auth signature covers. */
+  peerNonce: string
+  sentAuth: boolean
+  /** The peer's auth signature, kept until we can check it against a pinned key. */
+  peerAuthSig: string | null
+  authed: boolean
 }
 
 const HEARTBEAT_MS = 15_000
@@ -79,9 +109,40 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     this.cfg = { ...cfg }
   }
 
-  /** The connected peer, or null when offline. */
+  /** The connected, authenticated peer, or null. */
   get peer(): LinkPeer | null {
-    return this.active?.peer ?? null
+    return this.active?.authed ? this.active.peer : null
+  }
+
+  /**
+   * Pairing just finished: we pinned their key. Pairing only completes once *both* codes were
+   * confirmed, so the other side pins ours at the same point — their earlier hello (sent before
+   * pairing) is out of date. Re-check identity on the current connection.
+   */
+  reauth(): void {
+    const c = this.active
+    if (!c || c.authed) return
+    c.peerPinned = this.cfg.identity.publicKey
+    this.beginAuth(c)
+  }
+
+  /** Drops all connections and reconnects (e.g. after forgetting a pairing). */
+  reset(): void {
+    if (this.stopped) return
+    const wasUp = this.active !== null
+    for (const c of this.conns) c.ws.terminate()
+    this.conns.clear()
+    this.active = null
+    if (wasUp) this.emit('down')
+    this.backoff = BACKOFF_MIN_MS
+    this.scheduleDial(0)
+  }
+
+  /** Sends a pairing frame to the reachable-but-unauthenticated peer. */
+  sendPairing(frame: Extract<Frame, { t: 'pair-proof' | 'pair-result' }>): Promise<boolean> {
+    const c = this.active
+    if (!c?.peer || c.authed || c.ws.readyState !== WebSocket.OPEN) return Promise.resolve(false)
+    return new Promise((resolve) => c.ws.send(JSON.stringify(frame), (err) => resolve(!err)))
   }
 
   get isListening(): boolean {
@@ -159,7 +220,7 @@ export class PeerLink extends EventEmitter<LinkEvents> {
   }
 
   private write(payload: string | Uint8Array): Promise<boolean> {
-    const open = (c: Conn | null): c is Conn => c !== null && c.peer !== null && c.ws.readyState === WebSocket.OPEN
+    const open = (c: Conn | null): c is Conn => c !== null && c.authed && c.ws.readyState === WebSocket.OPEN
     const c = open(this.active) ? this.active : ([...this.conns].find(open) ?? null)
     if (!c) return Promise.resolve(false)
     return new Promise((resolve) => c.ws.send(payload, { binary: typeof payload !== 'string' }, (err) => resolve(!err)))
@@ -255,8 +316,14 @@ export class PeerLink extends EventEmitter<LinkEvents> {
       ws,
       outgoing,
       peer: null,
+      peerPinned: '',
       alive: true,
-      helloTimer: setTimeout(() => !conn.peer && ws.terminate(), HELLO_TIMEOUT_MS)
+      helloTimer: setTimeout(() => !conn.peer && ws.terminate(), HELLO_TIMEOUT_MS),
+      nonce: newNonce(),
+      peerNonce: '',
+      sentAuth: false,
+      peerAuthSig: null,
+      authed: false
     }
     this.conns.add(conn)
     ws.on('error', () => {})
@@ -264,52 +331,107 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     ws.on('close', () => this.onClose(conn))
     ws.on('message', (data: RawData, isBinary: boolean) => {
       if (isBinary) {
-        if (conn.peer) this.emit('binary', toBytes(data), conn.peer)
+        if (conn.authed && conn.peer) this.emit('binary', toBytes(data), conn.peer)
         return
       }
-      const frame = parseFrame(data.toString())
+      const frame = parseFrame(data.toString()) // unknown frame types (newer Hush) → null → ignored
       if (!frame) return
       if (!conn.peer) {
         if (frame.t === 'hello') this.onHello(conn, frame)
         else ws.close(4002, 'expected hello')
         return
       }
-      if (frame.t === 'hello') return
+      switch (frame.t) {
+        case 'hello':
+          return
+        case 'auth':
+          conn.peerAuthSig = frame.sig
+          if (this.active === conn) this.beginAuth(conn)
+          return
+        case 'pair-proof':
+        case 'pair-result':
+          if (this.active === conn && !conn.authed) this.emit('pair-frame', frame, conn.peer)
+          return
+      }
+      if (!conn.authed) return // nothing else before identity is proven
       if (frame.t === 'profile') conn.peer.name = frame.name
       this.emit('frame', frame, conn.peer)
     })
-    ws.send(JSON.stringify({ t: 'hello', v: PROTOCOL_VERSION, id: this.cfg.selfId, name: this.cfg.name } satisfies Frame))
+    ws.send(
+      JSON.stringify({
+        t: 'hello',
+        v: PROTOCOL_VERSION,
+        id: this.cfg.selfId,
+        name: this.cfg.name,
+        app: this.cfg.appVersion,
+        features: [...FEATURES],
+        key: this.cfg.identity.publicKey,
+        nonce: conn.nonce,
+        pinned: this.cfg.pinned() ?? ''
+      } satisfies Frame)
+    )
   }
 
   private onHello(conn: Conn, hello: Extract<Frame, { t: 'hello' }>): void {
     clearTimeout(conn.helloTimer)
-    if (hello.v !== PROTOCOL_VERSION) {
-      this.emit(
-        'problem',
-        `The other Hush uses protocol v${hello.v}, this one v${PROTOCOL_VERSION}. Update both apps to the same version.`
-      )
-      conn.ws.close(4001, 'protocol version mismatch')
+    if (hello.v < MIN_PROTOCOL) {
+      this.emit('problem', `The other Hush is too old (protocol v${hello.v}). Update it to the latest version.`)
+      conn.ws.close(4001, 'protocol too old')
       return
     }
     if (hello.id === this.cfg.selfId) {
       conn.ws.close(4003, 'connected to self')
       return
     }
-    conn.peer = { id: hello.id, name: hello.name }
+    conn.peer = { id: hello.id, name: hello.name, key: hello.key, app: hello.app, features: hello.features }
+    conn.peerPinned = hello.pinned
+    conn.peerNonce = hello.nonce
 
     const current = this.active
     if (!current) {
       this.active = conn
       this.backoff = BACKOFF_MIN_MS
       clearTimeout(this.dialTimer)
-      this.emit('up', conn.peer)
+      this.beginAuth(conn)
     } else if (this.prefer(conn, current)) {
       this.active = conn
       current.ws.close(1000, 'duplicate connection')
-      this.emit('up', conn.peer)
+      this.beginAuth(conn)
     } else {
       conn.ws.close(1000, 'duplicate connection')
     }
+  }
+
+  /**
+   * Identity check on the active connection:
+   * - neither side paired with the other → 'pairing'
+   * - we pinned a different key → 'identity-mismatch' (refused)
+   * - both pinned each other → exchange signatures; 'up' once theirs verifies.
+   */
+  private beginAuth(conn: Conn): void {
+    const peer = conn.peer!
+    const pinned = this.cfg.pinned()
+    if (pinned && pinned !== peer.key) {
+      this.emit('identity-mismatch', peer)
+      conn.ws.close(4004, 'identity mismatch')
+      return
+    }
+    if (!pinned || conn.peerPinned !== this.cfg.identity.publicKey) {
+      this.emit('pairing', peer)
+      return
+    }
+    if (!conn.sentAuth) {
+      conn.sentAuth = true
+      conn.ws.send(JSON.stringify({ t: 'auth', sig: this.cfg.identity.authSignature(conn.peerNonce, peer.key) } satisfies Frame))
+    }
+    if (conn.authed || !conn.peerAuthSig) return
+    if (!verifyAuth(conn.peerAuthSig, conn.nonce, pinned, this.cfg.identity.publicKey)) {
+      this.emit('identity-mismatch', peer)
+      conn.ws.close(4005, 'bad identity proof')
+      return
+    }
+    conn.authed = true
+    this.emit('up', peer)
   }
 
   /** Both apps run the same rule, so they keep the same one of two simultaneous connections. */
@@ -327,7 +449,8 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     const fallback = [...this.conns].find((c) => c.peer !== null && c.ws.readyState === WebSocket.OPEN)
     if (fallback) {
       this.active = fallback
-      this.emit('up', fallback.peer!)
+      if (fallback.authed) this.emit('up', fallback.peer!)
+      else this.beginAuth(fallback)
       return
     }
     this.active = null

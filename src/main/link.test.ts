@@ -4,6 +4,7 @@ import { once } from 'node:events'
 import WebSocket from 'ws'
 import { afterEach, describe, expect, it } from 'vitest'
 import { PeerLink, type LinkConfig } from './link'
+import { Identity } from './identity'
 import type { Frame } from '../shared/protocol'
 
 const HOST = '127.0.0.1'
@@ -28,11 +29,23 @@ function link(cfg: LinkConfig): PeerLink {
   return l
 }
 
-async function pair(): Promise<{ a: PeerLink; b: PeerLink; aCfg: LinkConfig; bCfg: LinkConfig }> {
+const newIdentity = (): Identity => new Identity(Identity.generate())
+
+/** Two links that are already paired with each other (unless `pinned` overrides). */
+async function pair(pins: { a?: () => string | null; b?: () => string | null } = {}): Promise<{
+  a: PeerLink
+  b: PeerLink
+  aCfg: LinkConfig
+  bCfg: LinkConfig
+  ia: Identity
+  ib: Identity
+}> {
   const [pa, pb] = [await freePort(), await freePort()]
-  const aCfg: LinkConfig = { selfId: randomUUID(), name: 'Alice', bindHost: HOST, port: pa, peerHost: HOST, peerPort: pb }
-  const bCfg: LinkConfig = { selfId: randomUUID(), name: 'Bob', bindHost: HOST, port: pb, peerHost: HOST, peerPort: pa }
-  return { a: link(aCfg), b: link(bCfg), aCfg, bCfg }
+  const [ia, ib] = [newIdentity(), newIdentity()]
+  const base = { appVersion: '0.2.0', bindHost: HOST, peerHost: HOST }
+  const aCfg: LinkConfig = { ...base, selfId: randomUUID(), name: 'Alice', port: pa, peerPort: pb, identity: ia, pinned: pins.a ?? (() => ib.publicKey) }
+  const bCfg: LinkConfig = { ...base, selfId: randomUUID(), name: 'Bob', port: pb, peerPort: pa, identity: ib, pinned: pins.b ?? (() => ia.publicKey) }
+  return { a: link(aCfg), b: link(bCfg), aCfg, bCfg, ia, ib }
 }
 
 const until = async (cond: () => boolean, ms = 4000): Promise<void> => {
@@ -54,8 +67,9 @@ describe('PeerLink', () => {
     a.start()
     b.start()
     const [[peerOfA], [peerOfB]] = await Promise.all([upA, upB])
-    expect(peerOfA).toEqual({ id: bCfg.selfId, name: 'Bob' })
-    expect(peerOfB).toEqual({ id: aCfg.selfId, name: 'Alice' })
+    expect(peerOfA).toMatchObject({ id: bCfg.selfId, name: 'Bob', app: '0.2.0' })
+    expect(peerOfB).toMatchObject({ id: aCfg.selfId, name: 'Alice' })
+    expect(peerOfA.features).toContain('events')
     // Both dialed; duplicates must be closed so exactly one connection remains on each side.
     await until(() => openConns(a) === 1 && openConns(b) === 1)
     await new Promise((r) => setTimeout(r, 300))
@@ -111,16 +125,18 @@ describe('PeerLink', () => {
     expect(up).toBe(false)
   })
 
-  it('rejects a peer speaking a different protocol version', async () => {
+  it('refuses an app that is too old, but not a newer one', async () => {
     const { a, aCfg } = await pair()
     a.start()
     await until(() => a.isListening)
     const problem = once(a, 'problem')
+    const hello = (v: number): string =>
+      JSON.stringify({ t: 'hello', v, id: randomUUID(), name: 'X', app: '9.0.0', features: [], key: newIdentity().publicKey, nonce: 'n'.repeat(43), pinned: '' })
     const ws = new WebSocket(`ws://${HOST}:${aCfg.port}`)
     await once(ws, 'open')
-    ws.send(JSON.stringify({ t: 'hello', v: 99, id: randomUUID(), name: 'Future' }))
+    ws.send(hello(5))
     const [msg] = await problem
-    expect(String(msg)).toContain('protocol v99')
+    expect(String(msg)).toContain('too old')
     const [code] = await once(ws, 'close')
     expect(code).toBe(4001)
     expect(a.peer).toBeNull()
@@ -136,5 +152,43 @@ describe('PeerLink', () => {
     const [ok, error] = await listening
     expect(ok).toBe(false)
     expect(String(error)).toContain('already in use')
+  })
+})
+
+describe('PeerLink identity', () => {
+  it('does not come up between unpaired apps, but offers pairing', async () => {
+    const { a, b } = await pair({ a: () => null, b: () => null })
+    const pairingA = once(a, 'pairing')
+    const pairingB = once(b, 'pairing')
+    let up = false
+    a.on('up', () => (up = true))
+    a.start()
+    b.start()
+    await Promise.all([pairingA, pairingB])
+    await new Promise((r) => setTimeout(r, 300))
+    expect(up).toBe(false)
+    expect(a.peer).toBeNull()
+    expect(await a.send({ t: 'typing', on: true })).toBe(false)
+    expect(await a.sendPairing({ t: 'pair-result', ok: false, attemptsLeft: 3 })).toBe(true)
+  })
+
+  it('refuses a device whose key differs from the paired one', async () => {
+    const impostor = newIdentity()
+    const { a, b } = await pair({ a: () => impostor.publicKey })
+    const mismatch = once(a, 'identity-mismatch')
+    a.start()
+    b.start()
+    await mismatch
+    await new Promise((r) => setTimeout(r, 300))
+    expect(a.peer).toBeNull()
+  })
+
+  it('goes back to pairing when the other side forgot the pairing', async () => {
+    const { a, b } = await pair({ b: () => null }) // A still trusts B, B forgot A
+    const pairingA = once(a, 'pairing')
+    a.start()
+    b.start()
+    await pairingA
+    expect(a.peer).toBeNull()
   })
 })

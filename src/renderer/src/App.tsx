@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { CallRecord, ChatMessage } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
 import { QuitDialog } from '@/components/QuitDialog'
+import { PairingScreen } from '@/components/PairingScreen'
 import { AvatarContext } from '@/components/common'
 import { ChatHeader } from '@/components/chat/ChatHeader'
 import { CircleCheck, ImagePlus } from 'lucide-react'
@@ -14,6 +15,7 @@ import type { ImageActions } from '@/components/chat/MessageGroup'
 import { EmptyChat, FirstRun } from '@/components/chat/EmptyStates'
 import { SettingsScreen, type SectionId } from '@/components/settings/SettingsScreen'
 import { formatLastSeen } from '@/lib/format'
+import { isNewer } from '@/lib/version'
 import type { CallView } from '@/lib/call'
 import { useAudioDevices } from '@/lib/useAudioDevices'
 import { useCall } from '@/lib/useCall'
@@ -78,7 +80,7 @@ export default function App(): ReactNode {
     if (!snapshot?.settings.peerIp) return null
     const p = snapshot.peer
     return {
-      name: p.name ?? 'Peer',
+      name: p.name ?? snapshot.pairing.peerName ?? 'Peer',
       ip: snapshot.settings.peerIp,
       presence: p.presence,
       lastSeen: p.lastSeen ? formatLastSeen(p.lastSeen) : undefined
@@ -144,6 +146,8 @@ export default function App(): ReactNode {
           settings={snapshot.settings}
           net={snapshot.net}
           peer={peer}
+          pairing={snapshot.pairing}
+          packaged={snapshot.packaged}
           onChange={hush.updateSettings}
           onReconnect={() => window.hush.reconnect()}
           onClose={closeSettings}
@@ -157,6 +161,8 @@ export default function App(): ReactNode {
             call={callAction}
             onOpenSettings={() => openSettings()}
             onLinkPeer={openConnection}
+            paired={snapshot.pairing.status === 'paired'}
+            updateHint={peer && snapshot.peer.appVersion && isNewer(snapshot.peer.appVersion, snapshot.appVersion) ? `${peer.name} has Hush ${snapshot.peer.appVersion} — update for new features` : null}
             onQuit={() => setQuitOpen(true)}
             settingsButtonRef={settingsButton}
           />
@@ -199,6 +205,8 @@ export default function App(): ReactNode {
             )}
             {!peer ? (
               <FirstRun ownIp={snapshot.net.ownIp} onOpenSettings={openConnection} />
+            ) : snapshot.pairing.status !== 'paired' ? (
+              <PairingScreen pairing={snapshot.pairing} peerName={peer.name} />
             ) : messages.length === 0 && hush.calls.length === 0 && !hush.peerTyping ? (
               <EmptyChat peerName={peer.name} onSayHi={() => composer.current?.focus()} />
             ) : (
@@ -220,7 +228,8 @@ export default function App(): ReactNode {
             )}
             <Composer
               peerName={peer?.name ?? ''}
-              disabled={!peer}
+              disabled={!peer || snapshot.pairing.status !== 'paired'}
+              disabledHint={!peer ? 'Link someone in settings to start chatting' : 'Pair first — exchange the codes above'}
               onSend={hush.send}
               onSendImage={hush.sendImage}
               onTyping={(on) => window.hush.setTyping(on)}

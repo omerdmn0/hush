@@ -67,6 +67,8 @@ export interface ChatMessage {
    */
   status: MessageStatus
   image?: ChatImage
+  /** Sent by a newer Hush in a form this version can't show ("update Hush to see this"). */
+  unsupported?: boolean
 }
 
 /** Position in history used to page backwards (the oldest message currently loaded). */
@@ -81,6 +83,8 @@ export interface Settings {
   notifications: boolean
   /** Include message text in notifications. Off = only "New message from Mira" (private). */
   notificationPreview: boolean
+  /** Start hidden in the tray when you log in (installed builds only). */
+  startAtLogin: boolean
   /** Preferred microphone / speaker (MediaDeviceInfo.deviceId); '' = system default. */
   micId: string
   speakerId: string
@@ -88,12 +92,34 @@ export interface Settings {
 
 export type Presence = 'online' | 'offline'
 
+/** Pairing / identity check (shown instead of the chat until paired). */
+export interface PairingState {
+  /** 'mismatch' = the device at their address has a different identity than the one paired. */
+  status: 'paired' | 'unpaired' | 'mismatch'
+  /** Connected and ready to pair (both apps running). */
+  peerReachable: boolean
+  /** Our one-time code to show, "K7P4-QX9M"; null when not pairing. */
+  code: string | null
+  codeExpiresAt: number | null
+  /** They typed our code correctly. */
+  theyEnteredMyCode: boolean
+  /** We typed their code correctly. */
+  iEnteredTheirCode: boolean
+  error: string | null
+  myFingerprint: string
+  peerFingerprint: string | null
+  /** Their display name as announced while pairing (before any verified connection). */
+  peerName: string | null
+}
+
 export interface PeerState {
   /** Learned from their first hello; null until we have ever connected. */
   name: string | null
   presence: Presence
   /** Epoch ms when they were last connected, or null if never. */
   lastSeen: number | null
+  /** Their Hush version (last seen), for the "update available" hint. */
+  appVersion: string | null
 }
 
 export interface NetState {
@@ -117,6 +143,11 @@ export interface Snapshot {
   avatars: AvatarUrls
   /** The window is visible and focused (from the main process, which knows reliably). */
   windowActive: boolean
+  pairing: PairingState
+  /** This app's version, e.g. "0.2.0". */
+  appVersion: string
+  /** Installed build (start-at-login only works there). */
+  packaged: boolean
   peer: PeerState
   net: NetState
   /**
@@ -134,7 +165,10 @@ export type HushEvent =
   | { type: 'net'; net: NetState }
   | { type: 'settings'; settings: Settings }
   | { type: 'transfer'; transfer: ImageTransfer }
+  /** An edit/delete/reaction for message `target` arrived or was made (UI re-reads it). */
+  | { type: 'event'; target: string }
   | { type: 'avatars'; avatars: AvatarUrls }
+  | { type: 'pairing'; pairing: PairingState }
   /** Window shown/hidden/focused/blurred — read receipts only go out while it's active. */
   | { type: 'window'; active: boolean }
   /** A call-history entry was added or updated. */
@@ -163,6 +197,10 @@ export interface HushApi {
   setAvatar(bytes: Uint8Array | null): Promise<boolean>
   /** Quits Hush completely (the window's close button only hides it to the tray). */
   quit(): void
+  /** Type the code shown on the other person's screen. */
+  submitPairingCode(code: string): Promise<void>
+  /** Forget the pairing (also "pair again" after an identity change). */
+  forgetPairing(): void
   markRead(ids: string[]): void
   setTyping(on: boolean): void
   updateSettings(patch: Partial<Settings>): Promise<Settings>
@@ -182,6 +220,8 @@ export const IPC = {
   listCalls: 'hush:list-calls',
   logCall: 'hush:log-call',
   setAvatar: 'hush:set-avatar',
+  pairSubmit: 'hush:pair-submit',
+  pairForget: 'hush:pair-forget',
   quit: 'hush:quit',
   markRead: 'hush:mark-read',
   setTyping: 'hush:set-typing',

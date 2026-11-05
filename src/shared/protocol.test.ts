@@ -7,7 +7,16 @@ const j = (o: unknown): string => JSON.stringify(o)
 
 describe('parseFrame', () => {
   it('accepts each valid frame type', () => {
-    expect(parseFrame(j({ t: 'hello', v: 1, id: A, name: 'Mira' }))).toEqual({ t: 'hello', v: 1, id: A, name: 'Mira' })
+    const hello = { t: 'hello', v: 6, id: A, name: 'Mira', app: '0.2.0', features: ['events', 'files'], key: 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk', nonce: 'n'.repeat(43), pinned: '' }
+    expect(parseFrame(j(hello))).toEqual(hello)
+    expect(parseFrame(j({ ...hello, v: 9, features: ['something-new'] }))).toMatchObject({ v: 9 }) // newer apps are accepted
+    expect(parseFrame(j({ ...hello, key: 'short' }))).toBeNull()
+    expect(parseFrame(j({ t: 'auth', sig: 's'.repeat(86) }))).toEqual({ t: 'auth', sig: 's'.repeat(86) })
+    expect(parseFrame(j({ t: 'pair-proof', mac: 'm'.repeat(43) }))).toEqual({ t: 'pair-proof', mac: 'm'.repeat(43) })
+    expect(parseFrame(j({ t: 'pair-result', ok: false, attemptsLeft: 3 }))).toEqual({ t: 'pair-result', ok: false, attemptsLeft: 3 })
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 2, body: '', sentAt: 1, kind: 'react', ref: A, data: '🔥' }))).toMatchObject({ kind: 'react', ref: A })
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 2, body: '', sentAt: 1, kind: 'react' }))).toBeNull() // events need a ref
+    expect(parseFrame(j({ t: 'brand-new-frame', x: 1 }))).toBeNull() // unknown frames are ignored
     expect(parseFrame(j({ t: 'profile', name: 'Ömer' }))).toEqual({ t: 'profile', name: 'Ömer' })
     expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 3, body: 'hi', sentAt: 1700000000000 }))).toMatchObject({ t: 'msg', seq: 3, body: 'hi' })
     expect(parseFrame(j({ t: 'sync', have: { [A]: 4, [B]: 0 }, read: { [B]: 2 } }))).toEqual({ t: 'sync', have: { [A]: 4, [B]: 0 }, read: { [B]: 2 } })
@@ -35,7 +44,7 @@ describe('parseFrame', () => {
     expect(parseFrame(j({ t: 'sync', have: { [A]: -1 }, read: {} }))).toBeNull()
     expect(parseFrame(j({ t: 'sync', have: [], read: {} }))).toBeNull()
     expect(parseFrame(j({ t: 'read', ids: [A] }))).toBeNull() // v1 shape is no longer accepted
-    expect(parseFrame(j({ t: 'hello', v: 1, id: A, name: 'x'.repeat(41) }))).toBeNull()
+    expect(parseFrame(j({ t: 'hello', v: 6, id: A, name: 'x'.repeat(41) }))).toBeNull()
     expect(parseFrame(j({ t: 'ack', ids: [A, 'bad'] }))).toBeNull()
     expect(parseFrame(j({ t: 'typing', on: 'yes' }))).toBeNull()
   })

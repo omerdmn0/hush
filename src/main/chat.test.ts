@@ -13,6 +13,7 @@ import { ChatService } from './chat'
 import { HushDb } from './db'
 import { ImageStore } from './images'
 import { Avatars } from './avatars'
+import { Identity } from './identity'
 import { PeerLink } from './link'
 
 const HOST = '127.0.0.1'
@@ -38,6 +39,9 @@ class Side {
   readonly events: HushEvent[] = []
   link!: PeerLink
   chat!: ChatService
+  readonly identity = new Identity(Identity.generate())
+  /** Paired peer key (set by `sides()`). */
+  peerKey: string | null = null
 
   constructor(
     readonly name: string,
@@ -56,7 +60,17 @@ class Side {
 
   /** Starts the app's networking (a fresh link + chat service, like an app launch). */
   start(): this {
-    this.link = new PeerLink({ selfId: this.id, name: this.name, bindHost: HOST, port: this.port, peerHost: HOST, peerPort: this.peerPort })
+    this.link = new PeerLink({
+      selfId: this.id,
+      name: this.name,
+      appVersion: '0.2.0',
+      identity: this.identity,
+      pinned: () => this.peerKey,
+      bindHost: HOST,
+      port: this.port,
+      peerHost: HOST,
+      peerPort: this.peerPort
+    })
     // Tiny chunks so every test image spans many chunks (exercises resume and ordering).
     this.chat = new ChatService(this.db, this.link, this.id, (e) => this.events.push(e), this.store, { chunkBytes: 1024, avatars: this.avatars })
     const link = this.link
@@ -87,9 +101,15 @@ const until = async (cond: () => boolean, ms = 5000): Promise<void> => {
 }
 const settle = (ms = 300): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+const pairUp = (a: Side, b: Side): [Side, Side] => {
+  a.peerKey = b.identity.publicKey
+  b.peerKey = a.identity.publicKey
+  return [a, b]
+}
+
 async function sides(): Promise<[Side, Side]> {
   const [pa, pb] = [await freePort(), await freePort()]
-  return [new Side('Alice', randomUUID(), pa, pb), new Side('Bob', randomUUID(), pb, pa)]
+  return pairUp(new Side('Alice', randomUUID(), pa, pb), new Side('Bob', randomUUID(), pb, pa))
 }
 const online = (a: Side, b: Side): Promise<void> => until(() => a.link.peer !== null && b.link.peer !== null)
 
@@ -249,8 +269,9 @@ describe('ChatService — offline queue and sync', () => {
     const fileA = legacy('a.db', aId, [[m1, aId, 100, 'read'], [m2, aId, 200, 'queued'], [m3, bId, 300, 'read']])
     const fileB = legacy('b.db', bId, [[m1, aId, 100, 'read'], [m3, bId, 300, 'read']])
 
-    const a = new Side('Alice', aId, pa, pb, fileA).start()
-    const b = new Side('Bob', bId, pb, pa, fileB).start()
+    const [a, b] = pairUp(new Side('Alice', aId, pa, pb, fileA), new Side('Bob', bId, pb, pa, fileB))
+    a.start()
+    b.start()
     await until(() => b.count() === 3 && a.db.getMessage(m2)?.status === 'delivered')
     await settle()
     expect(b.db.getMessage(m2)?.seq).toBe(2)
@@ -393,5 +414,39 @@ describe('ChatService — avatars', () => {
     a.chat.setAvatar(null)
     await until(() => b.avatars.resolve('peer') === null)
     expect(b.events.filter((e) => e.type === 'avatars').length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('ChatService — events', () => {
+  it('syncs events made offline and keeps them out of the message list', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const m = await a.chat.send('original')
+    await until(() => b.db.getMessage(m.id) !== undefined)
+    await b.stop()
+    await until(() => a.link.peer === null)
+    const edit = await a.chat.sendEvent('edit', m.id, 'edited text')
+    const react = await a.chat.sendEvent('react', m.id, '🔥')
+    expect(a.db.getMessage(edit.id)?.status).toBe('queued')
+    b.start()
+    await until(() => b.db.getMessage(react.id) !== undefined)
+    expect(b.db.getMessage(edit.id)).toMatchObject({ kind: 'edit', ref: m.id, data: 'edited text' })
+    expect(b.db.listMessages(undefined, 50).rows.map((r) => r.id)).toEqual([m.id])
+    expect(b.events.filter((e) => e.type === 'event' && e.target === m.id).length).toBe(2)
+    expect(b.db.unreadCount(b.id)).toBe(1)
+  })
+
+  it('stores an unknown message kind from a newer Hush and shows a placeholder', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const id = randomUUID()
+    await b.link.send({ t: 'msg', id, author: b.id, seq: 1, body: '', sentAt: Date.now(), kind: 'poll', data: '{}' })
+    await until(() => a.db.getMessage(id) !== undefined)
+    const shown = a.events.find((e) => e.type === 'message' && e.message.id === id)
+    expect(shown?.type === 'message' && shown.message.unsupported).toBe(true)
   })
 })

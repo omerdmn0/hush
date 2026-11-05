@@ -18,6 +18,12 @@ export interface StoredMessage {
   status: MessageStatus
   /** Present for image messages; the files live in the image store, named by message id. */
   image: ImageMeta | null
+  /** 'message' (default) or an event kind ('edit', 'delete', 'react', or newer ones). */
+  kind?: string
+  /** The message an event acts on. Events always have one; chat messages never do. */
+  ref?: string | null
+  /** Event payload (e.g. new text, emoji). */
+  data?: string | null
 }
 
 type Migration = (db: Database.Database) => void
@@ -63,6 +69,15 @@ const MIGRATIONS: Migration[] = [
   // v3 — stage d: image metadata (JSON); the image files themselves are stored on disk.
   (db) => db.exec(`ALTER TABLE messages ADD COLUMN image TEXT;`),
 
+  // v5 — events (edit / delete / react) live in the same per-author sequence as messages, so the
+  // offline queue and sync carry them too. They point at a message via `ref`.
+  (db) =>
+    db.exec(`
+      ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
+      ALTER TABLE messages ADD COLUMN ref TEXT;
+      ALTER TABLE messages ADD COLUMN data TEXT;
+      CREATE INDEX messages_by_ref ON messages (ref) WHERE ref IS NOT NULL;`),
+
   // v4 — call history (each computer keeps its own view of each call).
   (db) =>
     db.exec(`
@@ -80,7 +95,7 @@ const MIGRATIONS: Migration[] = [
 // Status only ever moves forward, so replayed or out-of-order receipts are harmless.
 const RANK = `CASE status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 END`
 const RANK_OF: Record<MessageStatus, number> = { queued: 0, sent: 1, delivered: 2, read: 3 }
-const COLUMNS = 'id, author_id, seq, body, sent_at, status, image'
+const COLUMNS = 'id, author_id, seq, body, sent_at, status, image, kind, ref, data'
 
 interface Row {
   id: string
@@ -90,6 +105,9 @@ interface Row {
   sent_at: number
   status: MessageStatus
   image: string | null
+  kind: string
+  ref: string | null
+  data: string | null
 }
 
 export class HushDb {
@@ -138,12 +156,19 @@ export class HushDb {
   // ---------- messages ----------
 
   /** Creates a message authored on this computer, assigning the next sequence number. */
-  createOwnMessage(authorId: string, body: string, sentAt: number, image: ImageMeta | null = null, id: string = randomUUID()): StoredMessage {
+  createOwnMessage(
+    authorId: string,
+    body: string,
+    sentAt: number,
+    image: ImageMeta | null = null,
+    id: string = randomUUID(),
+    event: { kind: string; ref: string; data: string | null } | null = null
+  ): StoredMessage {
     return this.db.transaction(() => {
       const { next } = this.db
         .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE author_id = ?')
         .get(authorId) as { next: number }
-      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image }
+      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image, ...(event ?? {}) }
       this.insertMessage(m)
       return m
     })()
@@ -157,10 +182,22 @@ export class HushDb {
   insertMessage(m: StoredMessage, receivedAt: number = Date.now()): boolean {
     const r = this.db
       .prepare(
-        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image, kind, ref, data)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
       )
-      .run(m.id, m.authorId, m.seq, m.body, m.sentAt, receivedAt, m.status, m.image ? JSON.stringify(m.image) : null)
+      .run(
+        m.id,
+        m.authorId,
+        m.seq,
+        m.body,
+        m.sentAt,
+        receivedAt,
+        m.status,
+        m.image ? JSON.stringify(m.image) : null,
+        m.kind ?? 'message',
+        m.ref ?? null,
+        m.data ?? null
+      )
     if (r.changes === 1) return true
     if (m.seq !== null) {
       this.db.prepare('UPDATE messages SET seq = ? WHERE id = ? AND author_id = ? AND seq IS NULL').run(m.seq, m.id, m.authorId)
@@ -259,7 +296,7 @@ export class HushDb {
 
   /** Messages from the other person not yet seen on this computer. */
   unreadCount(selfId: string): number {
-    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE author_id <> ? AND status <> 'read'`).get(selfId) as { n: number }
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE author_id <> ? AND status <> 'read' AND ref IS NULL`).get(selfId) as { n: number }
     return row.n
   }
 
@@ -316,11 +353,11 @@ export class HushDb {
         ? this.db
             .prepare(
               `SELECT ${COLUMNS} FROM messages
-               WHERE sent_at < ? OR (sent_at = ? AND id < ?)
+               WHERE ref IS NULL AND (sent_at < ? OR (sent_at = ? AND id < ?))
                ORDER BY sent_at DESC, id DESC LIMIT ?`
             )
             .all(before.sentAt, before.sentAt, before.id, limit + 1)
-        : this.db.prepare(`SELECT ${COLUMNS} FROM messages ORDER BY sent_at DESC, id DESC LIMIT ?`).all(limit + 1)
+        : this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IS NULL ORDER BY sent_at DESC, id DESC LIMIT ?`).all(limit + 1)
     ) as Row[]
     const hasMore = rows.length > limit
     return { rows: rows.slice(0, limit).reverse().map(toStored), hasMore }
@@ -335,7 +372,10 @@ function toStored(r: Row): StoredMessage {
     body: r.body,
     sentAt: r.sent_at,
     status: r.status,
-    image: r.image ? (JSON.parse(r.image) as ImageMeta) : null
+    image: r.image ? (JSON.parse(r.image) as ImageMeta) : null,
+    kind: r.kind,
+    ref: r.ref,
+    data: r.data
   }
 }
 
@@ -346,6 +386,11 @@ function toStored(r: Row): StoredMessage {
 export function toChatMessage(m: StoredMessage, selfId: string, imageReady: (id: string) => boolean = () => false): ChatMessage {
   const msg: ChatMessage = { id: m.id, from: m.authorId === selfId ? 'me' : 'peer', text: m.body, sentAt: m.sentAt, status: m.status }
   if (m.image) msg.image = chatImage(m.id, m.image, imageReady(m.id))
+  // A standalone message kind from a newer Hush: show a placeholder instead of breaking.
+  if (m.kind && m.kind !== 'message') {
+    msg.text = ''
+    msg.unsupported = true
+  }
   return msg
 }
 

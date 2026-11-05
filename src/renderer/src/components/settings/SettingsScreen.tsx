@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import type { NetState, Settings } from '../../../../shared/types'
+import type { NetState, PairingState, Settings } from '../../../../shared/types'
 import { Avatar, AvatarContext, StatusTag } from '@/components/common'
 import { getMic } from '@/lib/call'
 import { ImageError, imageErrorText, makeAvatar } from '@/lib/images'
@@ -20,7 +20,8 @@ const SECTIONS = [
   { id: 'profile', title: 'Profile' },
   { id: 'connection', title: 'Connection' },
   { id: 'audio', title: 'Audio' },
-  { id: 'notifications', title: 'Notifications' }
+  { id: 'notifications', title: 'Notifications' },
+  { id: 'startup', title: 'Startup' }
 ] as const
 export type SectionId = (typeof SECTIONS)[number]['id']
 
@@ -34,6 +35,8 @@ export function SettingsScreen({
   settings,
   net,
   peer,
+  pairing,
+  packaged,
   onChange,
   onReconnect,
   onClose,
@@ -42,6 +45,8 @@ export function SettingsScreen({
   settings: Settings
   net: NetState
   peer: PeerView | null
+  pairing: PairingState
+  packaged: boolean
   onChange: (patch: Partial<Settings>) => Promise<void>
   onReconnect: () => void
   onClose: () => void
@@ -105,6 +110,7 @@ export function SettingsScreen({
             <ConnectionStatus settings={settings} net={net} peer={peer} onReconnect={onReconnect} />
             <OwnIpField ownIp={net.ownIp} onRefresh={onReconnect} />
             <PeerIpField value={settings.peerIp} ownIp={net.ownIp} onSave={(peerIp) => onChange({ peerIp })} />
+            {settings.peerIp && <PairingInfo pairing={pairing} peerName={peer?.name ?? 'the other person'} />}
           </Module>
 
           <Module index={3} id="audio" title="Audio">
@@ -146,6 +152,28 @@ export function SettingsScreen({
                 disabled={!settings.notifications}
                 checked={settings.notificationPreview}
                 onCheckedChange={(notificationPreview) => void onChange({ notificationPreview })}
+              />
+            </div>
+          </Module>
+
+          <Module index={5} id="startup" title="Startup">
+            <div className="flex items-start justify-between gap-6">
+              <div>
+                <Label htmlFor="autostart" className={cn('mb-0.5', !packaged && 'opacity-50')}>
+                  Start Hush when I log in
+                </Label>
+                <div id="autostart-help" className="text-xs text-text-muted">
+                  {packaged
+                    ? 'Hush starts quietly in the tray, so messages and calls reach you after a restart.'
+                    : 'Only available in the installed app (this is a development build).'}
+                </div>
+              </div>
+              <Switch
+                id="autostart"
+                aria-describedby="autostart-help"
+                disabled={!packaged}
+                checked={settings.startAtLogin}
+                onCheckedChange={(startAtLogin) => void onChange({ startAtLogin })}
               />
             </div>
           </Module>
@@ -577,6 +605,50 @@ function AvatarField({ name }: { name: string }): ReactNode {
           <span className="text-xs text-text-muted">Cropped to a square. The other person sees it right away.</span>
         )}
       </div>
+    </div>
+  )
+}
+
+function PairingInfo({ pairing, peerName }: { pairing: PairingState; peerName: string }): ReactNode {
+  const [confirm, setConfirm] = useState(false)
+  const paired = pairing.status === 'paired'
+  return (
+    <div className="flex max-w-[560px] flex-col gap-2">
+      <span className="text-sm font-semibold">Identity check</span>
+      <div className="data flex flex-col gap-0.5 text-text-muted">
+        <span>Your device ID · {pairing.myFingerprint}</span>
+        {pairing.peerFingerprint && (
+          <span>
+            {peerName}'s device ID · {pairing.peerFingerprint}
+          </span>
+        )}
+      </div>
+      <span className="text-xs text-text-muted">
+        {paired
+          ? `Paired. Hush only talks to ${peerName}'s computer if it proves this device ID on every connection.`
+          : pairing.status === 'mismatch'
+            ? `${peerName}'s device ID changed — see the chat screen.`
+            : 'Not paired yet — pairing appears on the chat screen when you are both online.'}
+      </span>
+      {paired && (
+        <div className="flex items-center gap-2">
+          {confirm ? (
+            <>
+              <span className="text-xs text-danger-text">You will need to exchange codes again.</span>
+              <Button variant="destructive" size="sm" onClick={() => (window.hush.forgetPairing(), setConfirm(false))}>
+                Forget pairing
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirm(false)}>
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button variant="secondary" size="sm" onClick={() => setConfirm(true)}>
+              Forget pairing…
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

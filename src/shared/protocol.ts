@@ -20,7 +20,24 @@
 // Avatars (stage f): `avatar` carries the sender's small profile picture (or null = removed);
 // it is sent on every connection and whenever it changes.
 
-export const PROTOCOL_VERSION = 5
+//
+// Compatibility (stage h): from protocol 6 on, versions stay compatible. Each app announces its
+// version and `features` in `hello`; frames it doesn't know are ignored, and message kinds it
+// doesn't know are shown as "update Hush to see this". Only apps older than MIN_PROTOCOL are refused.
+//
+// Identity (stage h): each install has an Ed25519 key, sent in `hello` with a random nonce. Once
+// paired, every connection proves the pinned key by signing the other side's nonce (`auth`).
+// Pairing: each app shows a one-time code the other person types; `pair-proof` is an HMAC with
+// that code over both public keys, so only someone who saw the screen can produce it.
+
+export const PROTOCOL_VERSION = 6
+/** Oldest protocol this app still talks to. */
+export const MIN_PROTOCOL = 6
+/** Features this app supports (announced in hello). */
+export const FEATURES = ['images', 'calls', 'avatars', 'events'] as const
+/** Message kinds that act on another message (they carry `ref`). */
+export const EVENT_KINDS = ['edit', 'delete', 'react'] as const
+const MAX_EVENT_DATA = 2_000
 /** Largest avatar image accepted (already a 256 px square, so this is generous). */
 export const MAX_AVATAR_BYTES = 96 * 1024
 export const DEFAULT_PORT = 47821
@@ -57,11 +74,33 @@ export interface ImageMeta {
 
 export type Frame =
   /** First frame on every connection, from both sides. */
-  | { t: 'hello'; v: number; id: string; name: string }
+  /** `pinned` = the key the sender has paired with ('' if none), so both sides agree on pairing state. */
+  | { t: 'hello'; v: number; id: string; name: string; app: string; features: string[]; key: string; nonce: string; pinned: string }
+  /** Signature over the other side's nonce, proving we hold the pinned identity key. */
+  | { t: 'auth'; sig: string }
+  /** "I typed your pairing code": HMAC(code, "hush-pair-v1|ownerKey|typerKey"). */
+  | { t: 'pair-proof'; mac: string }
+  /** Answer to a pair-proof. */
+  | { t: 'pair-result'; ok: boolean; attemptsLeft: number }
   /** Display name changed. */
   | { t: 'profile'; name: string }
-  /** `body` may be empty when `image` is present (caption-less image). */
-  | { t: 'msg'; id: string; author: string; seq: number; body: string; sentAt: number; image?: ImageMeta & { thumb: string } }
+  /**
+   * An authored item in the per-author sequence. kind 'message' (default) is a chat message —
+   * `body` may be empty when it carries an image. Other kinds are events on message `ref`
+   * (edit / delete / react) with their payload in `data`.
+   */
+  | {
+      t: 'msg'
+      id: string
+      author: string
+      seq: number
+      body: string
+      sentAt: number
+      image?: ImageMeta & { thumb: string }
+      kind?: string
+      ref?: string
+      data?: string
+    }
   /** "Send me the full image of message `id`, starting at byte `offset`." */
   | { t: 'blob-req'; id: string; offset: number }
   /** "I can't serve that image" (not mine, or the file is gone). */
@@ -89,6 +128,8 @@ export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID
 
 const isName = (v: unknown): v is string => typeof v === 'string' && v.length <= MAX_NAME_LENGTH
 const isIdList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= MAX_IDS_PER_FRAME && v.every(isUuid)
+const isB64url = (v: unknown, min: number, max: number): v is string =>
+  typeof v === 'string' && v.length >= min && v.length <= max && /^[A-Za-z0-9_-]+$/.test(v)
 const isSeq = (v: unknown, min = 1): v is number => Number.isSafeInteger(v) && (v as number) >= min
 const isInt = (v: unknown, min: number, max: number): v is number => Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max
 
@@ -134,6 +175,7 @@ function lowercaseIds(f: Frame): Frame {
     case 'hello':
       return { ...f, id: lc(f.id) }
     case 'msg':
+      if (f.ref) return { ...f, id: lc(f.id), author: lc(f.author), ref: lc(f.ref) }
       return { ...f, id: lc(f.id), author: lc(f.author) }
     case 'ack':
       return { ...f, ids: f.ids.map(lc) }
@@ -169,25 +211,68 @@ function parseRaw(raw: string): Frame | null {
     return null
   }
   switch (f.t) {
-    case 'hello':
-      return typeof f.v === 'number' && isUuid(f.id) && isName(f.name) ? { t: 'hello', v: f.v, id: f.id, name: f.name } : null
+    case 'hello': {
+      const ok =
+        Number.isSafeInteger(f.v) &&
+        isUuid(f.id) &&
+        isName(f.name) &&
+        typeof f.app === 'string' &&
+        /^\d+\.\d+\.\d+[\w.-]*$/.test(f.app) &&
+        f.app.length <= 32 &&
+        Array.isArray(f.features) &&
+        f.features.length <= 64 &&
+        f.features.every((x) => typeof x === 'string' && /^[a-z0-9-]{1,32}$/.test(x)) &&
+        isB64url(f.key, 43, 43) &&
+        isB64url(f.nonce, 22, 64) &&
+        (f.pinned === '' || isB64url(f.pinned, 43, 43))
+      return ok
+        ? {
+            t: 'hello',
+            v: f.v as number,
+            id: f.id as string,
+            name: f.name as string,
+            app: f.app as string,
+            features: f.features as string[],
+            key: f.key as string,
+            nonce: f.nonce as string,
+            pinned: f.pinned as string
+          }
+        : null
+    }
+    case 'auth':
+      return isB64url(f.sig, 86, 86) ? { t: 'auth', sig: f.sig } : null
+    case 'pair-proof':
+      return isB64url(f.mac, 43, 43) ? { t: 'pair-proof', mac: f.mac } : null
+    case 'pair-result':
+      return typeof f.ok === 'boolean' && isInt(f.attemptsLeft, 0, 10) ? { t: 'pair-result', ok: f.ok, attemptsLeft: f.attemptsLeft } : null
     case 'profile':
       return isName(f.name) ? { t: 'profile', name: f.name } : null
     case 'msg': {
       const image = f.image === undefined ? undefined : parseInlineImage(f.image)
       if (image === null) return null
+      const kind = f.kind === undefined ? 'message' : f.kind
+      if (typeof kind !== 'string' || !/^[a-z][a-z0-9-]{0,23}$/.test(kind)) return null
+      if (f.ref !== undefined && !isUuid(f.ref)) return null
+      if (f.data !== undefined && (typeof f.data !== 'string' || f.data.length > MAX_EVENT_DATA)) return null
+      // Events act on another message; a chat message needs text or an image. Unknown kinds
+      // from a newer Hush are accepted as long as they're well-formed (forward compatibility).
+      if ((EVENT_KINDS as readonly string[]).includes(kind) && f.ref === undefined) return null
       const ok =
         isUuid(f.id) &&
         isUuid(f.author) &&
         isSeq(f.seq) &&
         typeof f.body === 'string' &&
-        (f.body.length > 0 || image !== undefined) &&
+        (kind !== 'message' || f.body.length > 0 || image !== undefined) &&
         f.body.length <= MAX_TEXT_LENGTH &&
         Number.isSafeInteger(f.sentAt) &&
         (f.sentAt as number) > 0
       if (!ok) return null
-      const msg: Frame = { t: 'msg', id: f.id as string, author: f.author as string, seq: f.seq as number, body: f.body as string, sentAt: f.sentAt as number }
-      return image ? { ...msg, image } : msg
+      const msg: Extract<Frame, { t: 'msg' }> = { t: 'msg', id: f.id as string, author: f.author as string, seq: f.seq as number, body: f.body as string, sentAt: f.sentAt as number }
+      if (image) msg.image = image
+      if (kind !== 'message') msg.kind = kind
+      if (f.ref !== undefined) msg.ref = f.ref as string
+      if (f.data !== undefined) msg.data = f.data as string
+      return msg
     }
     case 'blob-req':
       return isUuid(f.id) && isInt(f.offset, 0, MAX_IMAGE_BYTES) ? { t: 'blob-req', id: f.id, offset: f.offset } : null

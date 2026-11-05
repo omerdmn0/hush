@@ -87,12 +87,21 @@ AppImages need FUSE 2. If it says *“AppImages require FUSE to run”*, install
 `sudo pacman -S fuse2` on Arch) — or run it with `--appimage-extract-and-run`. On Ubuntu 24.04+
 the `.deb` is the smoother choice.
 
-### 5. Connect
+### 5. Connect and pair
 
 1. Open Hush. Click **Open connection settings**.
 2. Paste the **other person's** Tailscale IP into *Their Tailscale IP* and press Enter.
 3. Set your **display name** (and an avatar if you like) under Profile.
-4. When both of you have done this, the status turns **ONLINE**. Say hi.
+4. When both of you have done this, Hush shows **Pair with …**: each screen shows a code like
+   `K7P4-QX9M`. **Read your codes to each other in person or on a phone call** (not by message),
+   and each of you types the code shown on the *other* screen. Codes last 10 minutes; after 5
+   wrong tries a new one appears.
+5. Once both codes are accepted the status turns **ONLINE · LINK VERIFIED**. Say hi.
+
+Pairing happens once. From then on, Hush checks on every connection that it's really talking to
+the computer you paired with, and refuses anything else at that address — even another device on
+your Tailscale network. If one of you reinstalls Hush, you'll see *Identity changed*: confirm
+with each other, then **Pair again**.
 
 ---
 
@@ -113,6 +122,8 @@ the `.deb` is the smoother choice.
 - **Notifications** appear for messages and calls while Hush isn't focused. By default they only
   say *“New message from …”*; Settings → Notifications can show the text, or turn them off.
 - **Settings → Audio** picks your microphone and speaker, with a microphone test.
+- **Starts with your computer:** the installed app starts quietly in the tray when you log in, so
+  messages and calls reach you after a restart (Settings → Startup to turn it off).
 
 ---
 
@@ -122,7 +133,9 @@ the `.deb` is the smoother choice.
 |---|---|
 | **“Tailscale isn't running”** | Start Tailscale and make sure you're logged in, then press *Retry*. |
 | **“Waiting for …” / OFFLINE** | Both computers need Hush running and Tailscale connected. Check each person entered the *other's* IP (not their own). Test the network with `tailscale ping 100.x.y.z`. Settings → Connection → **Retry now** reconnects immediately. |
-| **“The other Hush uses protocol vN…”** | You're on different Hush versions. Both install the same release. |
+| **Pair with … / codes** | See *Connect and pair* above. Wrong code? Check you're typing the code from the *other* screen. |
+| **“Identity changed”** | The computer at that address isn't the one you paired with. Ask the other person if they reinstalled; only then press *Pair again*. |
+| **“The other Hush is too old”** | One of you runs a version from before protocol 6. Install the latest release. |
 | **“Port 47821 is already in use”** | Another copy of Hush (or another program) uses the port. Quit it and press Retry. |
 | **Call says “Couldn't connect audio”** | Both need Tailscale connected (calls only use Tailscale addresses). Check Windows Firewall allowed Hush. Try again after `tailscale ping` works. |
 | **“Can't use your microphone”** | Check the microphone is plugged in and allowed for apps (Windows: Settings → Privacy → Microphone). Pick it in Settings → Audio and use *Test microphone*. |
@@ -165,7 +178,9 @@ To test a build without publishing, use **Actions → Release → Run workflow**
 downloadable artifacts of that run. Builds use the free GitHub Actions minutes of the private repo
 (a full build takes roughly 15–25 minutes of quota; Windows minutes count double).
 
-Both people must run the same protocol version (currently **5**), so update both computers together.
+From protocol **6** on, versions stay compatible: one of you can update first and you keep
+chatting; features the other app doesn't have yet are skipped, and Hush shows *“… has Hush x.y —
+update for new features”*. Only apps older than protocol 6 are refused.
 
 ### Development
 
@@ -193,6 +208,11 @@ These development overrides are ignored in installed builds.
 
 - Each app listens on its own Tailscale IP, port **47821**, and only accepts the configured peer IP.
   Both apps also dial each other; if both connections succeed, both keep the same one.
+- Identity: each install has an Ed25519 key. Pairing pins the other's key after both people typed
+  each other's one-time code (an HMAC over both keys, so only someone who saw the screen can
+  produce it). Every connection then proves the pinned key by signing the other side's nonce.
+- Edits, deletions and reactions are events in the same per-author sequence as messages, so the
+  offline queue and sync carry them too.
 - Messages are JSON frames identified by UUID and numbered per author (1, 2, 3…). On every
   connection both apps exchange one `sync` frame (“I have your messages up to N and have read up
   to R”) and send whatever the other is missing — that's the offline queue and history sync.

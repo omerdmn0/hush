@@ -54,7 +54,8 @@ export class ChatService {
     return {
       name: this.db.getSetting<string>('peerName') ?? null,
       presence: this.link.peer ? 'online' : 'offline',
-      lastSeen: this.db.getSetting<number>('peerLastSeen') ?? null
+      lastSeen: this.db.getSetting<number>('peerLastSeen') ?? null,
+      appVersion: this.db.getSetting<string>('peerApp') ?? null
     }
   }
 
@@ -169,12 +170,20 @@ export class ChatService {
           body: frame.body,
           sentAt: frame.sentAt,
           status: 'delivered',
-          image
+          image,
+          kind: frame.kind ?? 'message',
+          ref: frame.ref ?? null,
+          data: frame.data ?? null
         }
+        // Events (edit/delete/react) are stored and acked like messages; the UI applies them.
         if (this.db.insertMessage(stored)) {
-          this.emit({ type: 'typing', on: false })
-          this.emit({ type: 'message', message: this.toChat(stored) })
-          if (image) this.transfers.want(stored.id)
+          if (stored.ref) {
+            this.emit({ type: 'event', target: stored.ref })
+          } else {
+            this.emit({ type: 'typing', on: false })
+            this.emit({ type: 'message', message: this.toChat(stored) })
+            if (image) this.transfers.want(stored.id)
+          }
         }
         // Always ack, even duplicates — the sender may have missed the first ack.
         this.queueAck(frame.id)
@@ -231,8 +240,23 @@ export class ChatService {
   // ---------- helpers ----------
 
   private msgFrame(m: StoredMessage): Frame {
-    const frame: Frame = { t: 'msg', id: m.id, author: this.selfId, seq: m.seq!, body: m.body, sentAt: m.sentAt }
-    return m.image ? { ...frame, image: { ...m.image, thumb: this.store.readThumbBase64(m.id) } } : frame
+    const frame: Extract<Frame, { t: 'msg' }> = { t: 'msg', id: m.id, author: this.selfId, seq: m.seq!, body: m.body, sentAt: m.sentAt }
+    if (m.image) frame.image = { ...m.image, thumb: this.store.readThumbBase64(m.id) }
+    if (m.kind && m.kind !== 'message') frame.kind = m.kind
+    if (m.ref) frame.ref = m.ref
+    if (m.data != null) frame.data = m.data
+    return frame
+  }
+
+  /**
+   * Records an event (edit / delete / react) on message `ref` and sends it. Like messages, it
+   * waits in the queue while the other app is offline and goes out with the next sync.
+   */
+  async sendEvent(kind: 'edit' | 'delete' | 'react', ref: string, data: string | null): Promise<StoredMessage> {
+    const stored = this.db.createOwnMessage(this.selfId, '', Date.now(), null, undefined, { kind, ref, data })
+    this.emit({ type: 'event', target: ref })
+    if (await this.link.send(this.msgFrame(stored))) this.advanceMine([stored.id], 'sent')
+    return stored
   }
 
   private toChat(m: StoredMessage): ChatMessage {
@@ -273,6 +297,7 @@ export class ChatService {
   private rememberPeer(peer: LinkPeer): void {
     this.db.setSetting('peerId', peer.id)
     this.db.setSetting('peerName', peer.name)
+    this.db.setSetting('peerApp', peer.app)
     this.db.setSetting('peerLastSeen', Date.now())
   }
 }

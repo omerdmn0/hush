@@ -54,6 +54,9 @@ export function useHush(): HushState {
         case 'message':
           setMessages((prev) => insertSorted(prev, e.message, hasMoreRef.current))
           break
+        case 'pairing':
+          setSnapshot((s) => s && { ...s, pairing: e.pairing })
+          break
         case 'window':
           setSnapshot((s) => s && { ...s, windowActive: e.active })
           break
