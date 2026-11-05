@@ -11,17 +11,25 @@ describe('notification rules', () => {
   })
 
   it('words single messages, images and bursts', () => {
-    expect(messageNotification('Mira', [{ text: 'hi\nthere', hasImage: false }])).toEqual({ title: 'Mira', body: 'hi there' })
-    expect(messageNotification('Mira', [{ text: '', hasImage: true }]).body).toBe('Sent an image')
-    expect(messageNotification('Mira', [{ text: 'look', hasImage: true }]).body).toBe('Image: look')
+    expect(messageNotification('Mira', [{ text: 'hi\nthere', hasImage: false }], true)).toEqual({ title: 'Mira', body: 'hi there' })
+    expect(messageNotification('Mira', [{ text: '', hasImage: true }], true).body).toBe('Sent an image')
+    expect(messageNotification('Mira', [{ text: 'look', hasImage: true }], true).body).toBe('Image: look')
     expect(
       messageNotification('Mira', [
         { text: 'one', hasImage: false },
         { text: 'two', hasImage: false },
         { text: 'three', hasImage: false }
-      ]).body
+      ], true).body
     ).toBe('3 new messages — three')
-    expect(messageNotification('Mira', [{ text: 'x'.repeat(500), hasImage: false }]).body).toHaveLength(140)
+    expect(messageNotification('Mira', [{ text: 'x'.repeat(500), hasImage: false }], true).body).toHaveLength(140)
+  })
+
+  it('hides message text when previews are off', () => {
+    const one = messageNotification('Mira', [{ text: 'my secret', hasImage: false }], false)
+    expect(one).toEqual({ title: 'Hush', body: 'New message from Mira' })
+    const many = messageNotification('Mira', [{ text: 'a', hasImage: false }, { text: 'b', hasImage: true }], false)
+    expect(many.body).toBe('2 new messages from Mira')
+    expect(JSON.stringify(one)).not.toContain('secret')
   })
 
   it('shows unread counts in the title and tray tooltip', () => {

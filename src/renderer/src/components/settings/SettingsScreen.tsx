@@ -129,6 +129,25 @@ export function SettingsScreen({
                 onCheckedChange={(notifications) => void onChange({ notifications })}
               />
             </div>
+            <div className="flex items-start justify-between gap-6">
+              <div>
+                <Label htmlFor="notif-preview" className={cn('mb-0.5', !settings.notifications && 'opacity-50')}>
+                  Show message text in notifications
+                </Label>
+                <div id="notif-preview-help" className="text-xs text-text-muted">
+                  {settings.notificationPreview
+                    ? 'Notifications show what was written. Anyone who can see your screen — including the lock screen — can read it.'
+                    : 'Private: notifications only say “New message from …”, never what was written.'}
+                </div>
+              </div>
+              <Switch
+                id="notif-preview"
+                aria-describedby="notif-preview-help"
+                disabled={!settings.notifications}
+                checked={settings.notificationPreview}
+                onCheckedChange={(notificationPreview) => void onChange({ notificationPreview })}
+              />
+            </div>
           </Module>
         </div>
       </div>

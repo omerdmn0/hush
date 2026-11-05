@@ -6,6 +6,8 @@ const BURST_MS = 800
 
 interface NotifierOptions {
   enabled: () => boolean
+  /** Include message text (otherwise only who wrote). */
+  preview: () => boolean
   /** True when the user is looking at Hush (no notification needed). */
   focused: () => boolean
   peerName: () => string
@@ -32,7 +34,7 @@ export class Notifier {
       this.burstTimer = undefined
       const burst = this.burst.splice(0)
       if (burst.length && shouldNotify(this.o.enabled(), this.o.focused())) {
-        const { title, body } = messageNotification(this.o.peerName(), burst)
+        const { title, body } = messageNotification(this.o.peerName(), burst, this.o.preview())
         this.show(title, body)
       }
     }, BURST_MS)

@@ -71,6 +71,7 @@ if (!app.requestSingleInstanceLock()) {
     displayName: userInfo().username,
     peerIp: '',
     notifications: true,
+    notificationPreview: false,
     micId: '',
     speakerId: '',
     ...db.getSetting<Partial<Settings>>('settings')
@@ -95,6 +96,7 @@ if (!app.requestSingleInstanceLock()) {
 
   const notifier = new Notifier({
     enabled: () => settings.notifications,
+    preview: () => settings.notificationPreview,
     focused: userIsLooking,
     peerName: () => chat.peerState().name ?? 'Peer',
     icon,
@@ -325,6 +327,7 @@ if (!app.requestSingleInstanceLock()) {
     const next = { ...settings }
     if (typeof patch.displayName === 'string') next.displayName = patch.displayName.trim().slice(0, 40)
     if (typeof patch.notifications === 'boolean') next.notifications = patch.notifications
+    if (typeof patch.notificationPreview === 'boolean') next.notificationPreview = patch.notificationPreview
     if (typeof patch.micId === 'string' && patch.micId.length <= 256) next.micId = patch.micId
     if (typeof patch.speakerId === 'string' && patch.speakerId.length <= 256) next.speakerId = patch.speakerId
     if (typeof patch.peerIp === 'string') {

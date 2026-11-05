@@ -79,6 +79,8 @@ export interface Settings {
   displayName: string
   peerIp: string
   notifications: boolean
+  /** Include message text in notifications. Off = only "New message from Mira" (private). */
+  notificationPreview: boolean
   /** Preferred microphone / speaker (MediaDeviceInfo.deviceId); '' = system default. */
   micId: string
   speakerId: string
