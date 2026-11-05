@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { Frame } from '../shared/protocol'
+import { decodeChunk, type Frame } from '../shared/protocol'
 import type { HushEvent } from '../shared/types'
 import { AWAITING_SYNC, ChatService } from './chat'
 import { HushDb } from './db'
@@ -346,9 +346,16 @@ describe('ChatService — images', () => {
     b.start()
     await online(a, b)
     const bytes = png(400, 300, true) // ~360 KB
+    // Interrupt from inside B's chunk handling once 40 KB are stored. (Polling for that moment
+    // raced the download: on a fast run all of it arrived between two polls and the test hung.)
+    let stopping: Promise<void> | null = null
+    b.link.on('binary', (data) => {
+      const chunk = decodeChunk(data)
+      if (!stopping && chunk && b.store.partSize(chunk.id) > 40_000) stopping = b.stop()
+    })
     const m = await a.chat.sendImage(outgoing(bytes), '')
-    await until(() => b.store.partSize(m.id) > 40_000, 10_000)
-    await b.stop()
+    await until(() => stopping !== null, 10_000)
+    await stopping
     const partial = b.store.partSize(m.id)
     expect(partial).toBeGreaterThan(0)
     expect(partial).toBeLessThan(bytes.length)
