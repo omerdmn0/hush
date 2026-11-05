@@ -1,0 +1,70 @@
+# Packaging for Windows (NSIS .exe) and Linux (AppImage + .deb). Built by GitHub Actions on
+# version tags (.github/workflows/release.yml), or locally with `npm run dist:linux` / `dist:win`.
+appId: app.hush.chat
+productName: Hush
+copyright: Hush — private chat for two
+
+directories:
+  output: release/${version}
+  buildResources: build
+
+# Only what the app needs at runtime. Renderer libraries are bundled by Vite into out/;
+# runtime dependencies (better-sqlite3, ws) come from node_modules automatically.
+files:
+  - out/**
+  - resources/**
+  - package.json
+  # better-sqlite3 ships prebuilt binaries for every platform; keep the x64 Linux + Windows ones.
+  # (Per-platform `files` lists would replace this list rather than extend it.)
+  - '!node_modules/better-sqlite3/{deps,src,docs,binding.gyp}'
+  - '!node_modules/better-sqlite3/prebuilds/{darwin,linuxmusl}-*'
+  - '!node_modules/better-sqlite3/prebuilds/*-arm64.node'
+
+# Icons/tray images are read from disk by the main process.
+asarUnpack:
+  - resources/**
+
+# Native code is prebuilt (N-API): never compile during packaging.
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+
+publish: null
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+
+nsis:
+  # Per-user install: no administrator rights needed.
+  oneClick: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Hush
+  # Uninstalling keeps chat history unless the user deletes %APPDATA%\Hush.
+  deleteAppDataOnUninstall: false
+  artifactName: Hush-Setup-${version}.${ext}
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  icon: build/icon.png
+  category: Network
+  synopsis: Private chat for two, peer-to-peer over Tailscale
+  description: Text, images and voice calls between two computers over Tailscale. No servers.
+  maintainer: Hush <hush@localhost>
+  executableName: hush
+  # Lets the desktop link the running window (Wayland app id) to the launcher entry.
+  syncDesktopName: true
+
+appImage:
+  artifactName: Hush-${version}-x86_64.${ext}
+
+deb:
+  artifactName: hush_${version}_amd64.${ext}

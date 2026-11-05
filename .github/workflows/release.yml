@@ -1,0 +1,91 @@
+# Builds Hush for Windows (.exe installer) and Linux (AppImage + .deb).
+#
+# - Push a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`) → builds both and
+#   publishes a GitHub Release in this (private) repo with the three files attached.
+#   The tag must match "version" in package.json.
+# - "Run workflow" on the Actions tab → builds only; files appear as run artifacts (no release).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            target: --linux
+          - name: Windows
+            os: windows-latest
+            target: --win
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      # Native modules ship prebuilt (better-sqlite3 uses N-API prebuilds), so no install
+      # scripts are needed — and none run, so nothing is compiled.
+      - run: npm ci --ignore-scripts
+
+      - name: Tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx electron-vite build
+      - run: npx electron-builder ${{ matrix.target }} --publish never
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hush-${{ matrix.name }}
+          path: |
+            release/*/*.exe
+            release/*/*.AppImage
+            release/*/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Hush $GITHUB_REF_NAME" \
+            --generate-notes
