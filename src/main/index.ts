@@ -52,6 +52,10 @@ import { fieldCipher } from './vault'
 //   HUSH_SCREEN_AUDIO_HELPER  a .js stand-in for the Windows audio helper, to test that path on Linux
 // ---------------------------------------------------------------------------
 const dev = !app.isPackaged
+// Debugging an installed Hush would expose the unlocked chat to any program on this computer.
+// The fuses in electron-builder.yml block --inspect; these flags belong to Chromium, so they're
+// refused here, before anything is unlocked.
+if (!dev && ['remote-debugging-port', 'remote-debugging-pipe'].some((s) => app.commandLine.hasSwitch(s))) process.exit(1)
 const env = (k: string): string | undefined => (dev ? process.env[k] || undefined : undefined)
 const profile = env('HUSH_PROFILE')
 const port = Number(env('HUSH_PORT') ?? DEFAULT_PORT)

@@ -31,6 +31,14 @@ buildDependenciesFromSource: false
 
 publish: null
 
+# Installed builds can't be turned into a debugger or a plain Node runtime: that would give any
+# program on the computer the unlocked chat. (index.ts refuses Chromium's debugging flags too.)
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+
 win:
   target:
     - target: nsis

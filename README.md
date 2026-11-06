@@ -286,6 +286,7 @@ These development overrides are ignored in installed builds.
   Receipts only move a status forward, so repeats are harmless.
 - Images carry an inline preview; the receiver pulls the full file in resumable chunks and checks
   its SHA-256. Files live under `images/`, shown to the UI only via the private `hush-img://` scheme.
+- Installed builds refuse debugging (`--inspect`, `--remote-debugging-port`, `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`), so another program can't attach to an unlocked Hush that way. `npm run dev` and `npm run pair` aren't affected.
 - Calls use WebRTC audio with signaling over the same link, restricted to Tailscale addresses.
 - At rest: one random data key encrypts database fields (`enc1:` prefix) and files (128 KB
   chunks, each AES-256-GCM with its index and a "last chunk" flag authenticated, so images can be
