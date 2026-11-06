@@ -26,6 +26,12 @@ export class Notifier {
 
   constructor(private readonly o: NotifierOptions) {}
 
+  /** Hush is closing: a waiting burst would read the closed database. */
+  dispose(): void {
+    clearTimeout(this.burstTimer)
+    this.burst = []
+  }
+
   message(m: IncomingSummary): void {
     if (!shouldNotify(this.o.enabled(), this.o.focused())) return
     this.burst.push(m)

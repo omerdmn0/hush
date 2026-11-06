@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import WebSocket from 'ws'
+import WebSocket, { WebSocketServer } from 'ws'
 import { afterEach, describe, expect, it } from 'vitest'
 import { PeerLink, type LinkConfig } from './link'
 import { Identity } from './identity'
@@ -144,6 +144,45 @@ describe('PeerLink', () => {
     const [ok, error] = await listening
     expect(ok).toBe(false)
     expect(String(error)).toContain('already in use')
+  })
+})
+
+describe('PeerLink redialing', () => {
+  const fakePeer = async (port: number, onConnect: (ws: WebSocket) => void): Promise<() => Promise<void>> => {
+    const server = new WebSocketServer({ host: HOST, port })
+    server.on('connection', onConnect)
+    await once(server, 'listening')
+    return () => new Promise((resolve) => server.close(() => resolve()))
+  }
+
+  it('keeps dialing after the other end hangs up before saying hello', async () => {
+    const { a, bCfg } = await pair()
+    let hits = 0
+    const close = await fakePeer(bCfg.port, (ws) => {
+      hits++
+      ws.close()
+    })
+    a.start()
+    try {
+      await until(() => hits >= 2, 3000)
+    } finally {
+      await close()
+    }
+  })
+
+  it('backs off instead of redialing four times a second when the peer keeps refusing', async () => {
+    const { a, bCfg } = await pair()
+    let hits = 0
+    const hello = { t: 'hello', v: 6, id: randomUUID(), name: 'Other', app: '0.2.0', features: [], key: 'k'.repeat(43), nonce: 'n'.repeat(43), pinned: '' }
+    const close = await fakePeer(bCfg.port, (ws) => {
+      hits++
+      ws.send(JSON.stringify(hello))
+    })
+    a.on('identity-mismatch', () => {})
+    a.start()
+    await new Promise((r) => setTimeout(r, 1800))
+    await close()
+    expect(hits).toBeLessThanOrEqual(3)
   })
 })
 

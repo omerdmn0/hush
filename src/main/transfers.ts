@@ -1,7 +1,7 @@
 import { CHUNK_BYTES, decodeChunk, encodeChunk, type Frame } from '../shared/protocol'
 import type { HushEvent, ImageTransfer } from '../shared/types'
 import { AUTO_DOWNLOAD_BYTES, type HushDb, type StoredMessage } from './db'
-import { blobOf, type ImageStore } from './images'
+import { blobOf, type BlobMeta, type ImageStore } from './images'
 import type { PeerLink } from './link'
 
 /** Re-request a download if no chunk arrives for this long. */
@@ -30,6 +30,7 @@ export class Transfers {
   private finishing = new Set<string>()
   /** Big files the user asked for (others download by themselves). */
   private requested = new Set<string>()
+  private disposed = false
 
   constructor(
     private readonly db: HushDb,
@@ -58,6 +59,7 @@ export class Transfers {
 
   /** Hush is closing: no more timers. */
   dispose(): void {
+    this.disposed = true
     clearTimeout(this.stallTimer)
     this.uploads.clear()
   }
@@ -103,6 +105,8 @@ export class Transfers {
     clearTimeout(this.stallTimer)
     if (this.current) this.queue.unshift(this.current)
     this.current = null
+    // The other side resumes these if it still wants them; until then they aren't "sending".
+    for (const id of this.uploads.keys()) this.progress(id, 'up', 'failed', 0, true)
     this.uploads.clear()
   }
 
@@ -118,6 +122,8 @@ export class Transfers {
     const offset = this.store.partSize(id)
     const m = this.db.getMessage(id)
     const blob = m ? blobOf(m) : null
+    // Everything arrived before Hush stopped; it only still has to be checked.
+    if (blob && offset >= blob.size) return this.finish(id, blob)
     if (blob) this.progress(id, 'down', 'active', offset / blob.size, true)
     void this.link.send({ t: 'blob-req', id, offset })
     this.armStall(id)
@@ -136,20 +142,38 @@ export class Transfers {
     const m = this.db.getMessage(chunk.id)
     const meta = m ? blobOf(m) : null
     if (!meta) return
-    const size = this.store.appendPart(chunk.id, chunk.offset, chunk.data, meta)
+    let size: number
+    try {
+      size = this.store.appendPart(chunk.id, chunk.offset, chunk.data, meta)
+    } catch {
+      // Can't write (disk full?): this download fails, nothing else has to.
+      clearTimeout(this.stallTimer)
+      this.current = null
+      this.fail(chunk.id)
+      this.pump()
+      return
+    }
     if (size < 0) return // out of order (e.g. a cancelled stream); the stall timer re-requests
     this.armStall(chunk.id)
     if (size < meta.size) {
       this.progress(chunk.id, 'down', 'active', size / meta.size)
       return
     }
+    this.finish(chunk.id, meta)
+  }
+
+  /** All bytes are here: check them and move the file into place (async for big files). */
+  private finish(id: string, meta: BlobMeta): void {
     clearTimeout(this.stallTimer)
-    const id = chunk.id
     this.current = null
     this.finishing.add(id)
     void this.store.finalize(id, meta).then((ok) => {
+      if (this.disposed) return // the database is closed by now; the next start picks this up
       this.finishing.delete(id)
-      if (ok) {
+      const m = this.db.getMessage(id)
+      if (!m || !blobOf(m)) {
+        this.store.remove(id) // deleted while it was being checked
+      } else if (ok) {
         this.attempts.delete(id)
         this.requested.delete(id)
         this.progress(id, 'down', 'done', 1, true)
@@ -184,7 +208,11 @@ export class Transfers {
       this.pump()
       return
     }
-    void this.serve(frame.id, frame.offset)
+    void this.serve(frame.id, frame.offset).catch(() => {
+      // The stored file can't be read: say so, or the other side waits forever.
+      this.progress(frame.id, 'up', 'failed', 0, true)
+      void this.link.send({ t: 'blob-err', id: frame.id })
+    })
   }
 
   // ---------- sending ----------

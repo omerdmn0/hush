@@ -17,6 +17,8 @@ const TYPING_REFRESH_MS = 3000
 /** Stop "typing" after this long without keystrokes. */
 const TYPING_IDLE_MS = 4000
 const MAX_ATTACHMENTS = 10
+/** What was being written, kept while the composer is away (the Settings screen replaces it). */
+let draft = ''
 
 /** Writing a reply to a message, or editing one of your own. */
 export interface ComposerMode {
@@ -64,7 +66,7 @@ export function Composer({
   inputRef?: Ref<HTMLTextAreaElement>
   handleRef?: Ref<ComposerHandle>
 }): ReactNode {
-  const [text, setText] = useState('')
+  const [text, setText] = useState(draft)
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [attachments, setAttachments] = useState<PreparedImage[]>([])
   /** Non-image files (and images too big or odd to preview), sent as files. */
@@ -78,6 +80,9 @@ export function Composer({
   const filePicker = useRef<HTMLInputElement>(null)
   const typing = useRef({ on: false, lastSent: 0, idle: undefined as ReturnType<typeof setTimeout> | undefined })
   const editing = mode?.kind === 'edit' ? mode.message : null
+  useEffect(() => {
+    if (!editing) draft = text
+  }, [text, editing])
 
   // Entering edit mode puts the message's text in the box; reply mode just focuses it.
   const modeKey = mode ? `${mode.kind}:${mode.message.id}` : ''
@@ -237,16 +242,30 @@ export function Composer({
   }, [recording])
   const recordingRef = useRef(recording)
   recordingRef.current = recording
-  useEffect(() => () => recordingRef.current?.cancel(), [])
+  const gone = useRef(false)
+  useEffect(() => {
+    gone.current = false
+    return () => {
+      gone.current = true
+      recordingRef.current?.cancel()
+    }
+  }, [])
 
+  const startingToRecord = useRef(false)
   const startRecording = async (): Promise<void> => {
+    if (startingToRecord.current) return // a second click would leave a microphone open
+    startingToRecord.current = true
     setError(null)
     try {
       setRecordedMs(0)
       // At 5 minutes it stops and sends by itself.
-      setRecording(await recordVoice(micId, () => void finishRecording(true)))
+      const rec = await recordVoice(micId, () => void finishRecording(true))
+      if (gone.current) rec.cancel()
+      else setRecording(rec)
     } catch {
       setError("Can't use your microphone. Check it's plugged in and allowed, then pick it in Settings → Audio.")
+    } finally {
+      startingToRecord.current = false
     }
   }
   const finishRecording = async (send: boolean): Promise<void> => {
@@ -303,7 +322,7 @@ export function Composer({
               ) : (
                 <>
                   Replying to <b className="font-semibold">{mode.message.from === 'me' ? 'yourself' : peerName}</b>
-                  <span className="text-text-muted">: {mode.message.text || (mode.message.image ? 'Photo' : '')}</span>
+                  <span className="text-text-muted">: {mode.message.text || (mode.message.image ? 'Photo' : mode.message.file?.voice ? 'Voice note' : (mode.message.file?.name ?? ''))}</span>
                 </>
               )}
             </span>

@@ -5,6 +5,9 @@ const MAX_BODY = 140
 export interface IncomingSummary {
   text: string
   hasImage: boolean
+  /** Name of the attached file, if any. */
+  file?: string
+  voice?: boolean
 }
 
 /** Notify only when enabled and the user can't already see the chat. */
@@ -18,8 +21,11 @@ function clip(s: string): string {
 }
 
 function describe(m: IncomingSummary): string {
-  if (m.hasImage) return m.text ? `Image: ${clip(m.text)}` : 'Sent an image'
-  return clip(m.text)
+  const text = clip(m.text)
+  if (m.hasImage) return text ? `Image: ${text}` : 'Sent an image'
+  if (m.voice) return 'Sent a voice note'
+  if (m.file) return text ? `${clip(m.file)}: ${text}` : `Sent a file: ${clip(m.file)}`
+  return text || 'New message'
 }
 
 /**

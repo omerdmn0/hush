@@ -38,6 +38,17 @@ describe('applyEvents', () => {
     expect(applyEvents(PEER, [b, a], ME).reactions).toEqual([])
   })
 
+  it('keeps the newest edit even if the clock went backwards between edits', () => {
+    const first: EventRecord = { authorId: ME, seq: 1, sentAt: 500, kind: 'edit', data: 'first' }
+    const second: EventRecord = { authorId: ME, seq: 2, sentAt: 100, kind: 'edit', data: 'second' }
+    expect(applyEvents(ME, [second, first], ME).text).toBe('second')
+  })
+
+  it('an edit can empty a caption', () => {
+    const state = applyEvents(ME, [{ authorId: ME, seq: 1, sentAt: 1, kind: 'edit', data: '' }], ME)
+    expect(state.text).toBe('')
+  })
+
   it('rejects junk reactions', () => {
     expect(applyEvents(PEER, [ev(ME, 'react', '+hello'), ev(ME, 'react', '+ 👍'), ev(ME, 'react', '👍')], ME).reactions).toEqual([])
     for (const ok of ['👍', '👍🏽', '👨‍👩‍👧', '🇹🇷', '❤️']) expect(isReactionEmoji(ok)).toBe(true)

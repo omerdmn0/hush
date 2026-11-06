@@ -2,6 +2,7 @@ import type { CallEndReason, CallSignal } from '../../../shared/protocol'
 import type { CallDirection, CallRecord } from '../../../shared/types'
 import {
   candidateAllowed,
+  CONNECT_TIMEOUT_MS,
   ENDED_VISIBLE_MS,
   endedText,
   offersScreen,
@@ -144,7 +145,7 @@ export class CallController {
     this.ringer.stop()
     clearTimeout(this.ringTimer)
     const offer = this.remoteOffer
-    this.set({ phase: 'connecting' })
+    this.connecting()
     if (!(await this.openMic(id))) {
       if (!this.current(id)) return
       void this.deps.send({ t: 'call-end', id, reason: 'failed' })
@@ -188,6 +189,7 @@ export class CallController {
     if (!this.local || !this.pc) return
     const next = await getMic(deviceId).catch(() => null)
     if (!next) return
+    if (!this.local || !this.pc) return next.getTracks().forEach((t) => t.stop()) // the call ended meanwhile
     const track = next.getAudioTracks()[0]
     track.enabled = !this.view.muted
     const sender = this.pc.getSenders().find((s) => s.track?.kind === 'audio')
@@ -250,7 +252,7 @@ export class CallController {
         if (this.view.phase !== 'outgoing' || !this.pc) return
         this.ringer.stop()
         clearTimeout(this.ringTimer)
-        this.set({ phase: 'connecting' })
+        this.connecting()
         await this.pc.setRemoteDescription({ type: 'answer', sdp: withStereoScreenAudio(s.sdp) })
         await this.flushIce()
         break
@@ -298,6 +300,13 @@ export class CallController {
   }
 
   // ---------- internals ----------
+
+  /** The call was answered; audio has to come up within CONNECT_TIMEOUT_MS. */
+  private connecting(): void {
+    this.set({ phase: 'connecting' })
+    clearTimeout(this.graceTimer)
+    this.graceTimer = setTimeout(() => this.view.phase === 'connecting' && this.endCall('failed'), CONNECT_TIMEOUT_MS)
+  }
 
   private newRecord(id: string, direction: CallDirection): void {
     this.record = { id, direction, startedAt: Date.now(), connectedAt: null, endedAt: null, outcome: 'ongoing' }

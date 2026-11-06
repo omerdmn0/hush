@@ -392,7 +392,6 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     const current = this.active
     if (!current) {
       this.active = conn
-      this.backoff = BACKOFF_MIN_MS
       clearTimeout(this.dialTimer)
       this.beginAuth(conn)
     } else if (this.prefer(conn, current)) {
@@ -433,6 +432,7 @@ export class PeerLink extends EventEmitter<LinkEvents> {
       return
     }
     conn.authed = true
+    this.backoff = BACKOFF_MIN_MS
     this.emit('up', peer)
   }
 
@@ -446,8 +446,12 @@ export class PeerLink extends EventEmitter<LinkEvents> {
 
   private onClose(conn: Conn): void {
     clearTimeout(conn.helloTimer)
-    this.conns.delete(conn)
-    if (this.active !== conn) return
+    if (!this.conns.delete(conn)) return // dropped on purpose (reset, stop); whoever did that redials
+    if (this.active !== conn) {
+      // It hung up before saying hello, so nothing else would dial again.
+      if (conn.outgoing && !this.active) this.retryLater()
+      return
+    }
     const fallback = [...this.conns].find((c) => c.peer !== null && c.ws.readyState === WebSocket.OPEN)
     if (fallback) {
       this.active = fallback
@@ -457,7 +461,10 @@ export class PeerLink extends EventEmitter<LinkEvents> {
     }
     this.active = null
     this.emit('down')
-    if (!this.stopped) this.scheduleDial(250)
+    // A working connection dropped: reconnect at once. One that never got that far was refused
+    // (e.g. a changed identity), so don't hammer the other side.
+    if (conn.authed) this.scheduleDial(250)
+    else this.retryLater()
   }
 
   private beat(): void {

@@ -135,6 +135,15 @@ if (!app.requestSingleInstanceLock()) {
     quitting = true
     app.quit()
   }
+  /**
+   * Starts Hush again after this copy exits. The user is at the window, so it must not come back
+   * hidden even if this copy was started at login. An AppImage has to be started from its own
+   * file: the folder it runs from disappears when it exits.
+   */
+  const relaunch = (): void => {
+    const args = process.argv.slice(1).filter((a) => a !== HIDDEN_FLAG)
+    app.relaunch(process.env.APPIMAGE ? { execPath: process.env.APPIMAGE, args } : { args })
+  }
 
   /** Set once the data is unlocked and Hush is running. */
   let core: { showWindow: () => void; shutdown: () => Promise<void>; close: () => void } | null = null
@@ -239,7 +248,7 @@ if (!app.requestSingleInstanceLock()) {
           renameSync(join(userData, name), join(aside, name))
         }
       }
-      app.relaunch()
+      relaunch()
     }
     app.exit(0)
   }
@@ -273,6 +282,7 @@ if (!app.requestSingleInstanceLock()) {
       avatars.encryptExisting()
       db.setSetting('keyCheck', cipher.seal('hush'))
     }
+    db.sealAttachmentDetails()
     if (restored) db.setSetting(AWAITING_SYNC, true) // see ChatService.assertCanWrite
     let identityKey = db.getSecret<string>('identityKey')
     if (!identityKey) {
@@ -291,7 +301,7 @@ if (!app.requestSingleInstanceLock()) {
     const startHidden = process.argv.includes(HIDDEN_FLAG)
 
     let settings: Settings = {
-      displayName: userInfo().username,
+      displayName: userInfo().username.slice(0, 40), // longer names are refused by the other app
       peerIp: '',
       notifications: true,
       notificationPreview: false,
@@ -361,7 +371,8 @@ if (!app.requestSingleInstanceLock()) {
         void pushPrivacy()
       }
       if (e.type === 'message' && e.message.from === 'peer') {
-        notifier.message({ text: e.message.text, hasImage: !!e.message.image })
+        // A message already deleted (arriving through sync) has nothing to announce.
+        if (!e.message.deleted) notifier.message({ text: e.message.text, hasImage: !!e.message.image, file: e.message.file?.name, voice: !!e.message.file?.voice })
         scheduleUnread()
       } else if (e.type === 'status') {
         scheduleUnread()
@@ -753,7 +764,7 @@ if (!app.requestSingleInstanceLock()) {
         rmSync(staging, { recursive: true, force: true })
         return (e as Error).message
       }
-      app.relaunch()
+      relaunch()
       quitApp()
       return null
     })
@@ -771,7 +782,7 @@ if (!app.requestSingleInstanceLock()) {
     }
     const saveAutoBackup = (patch: Partial<AutoBackup>): void => {
       autoBackup = { ...autoBackup, ...patch }
-      db.setSetting('autoBackup', autoBackup)
+      if (!closing) db.setSetting('autoBackup', autoBackup) // a backup can end while Hush closes
     }
     let autoRunning = false
     const runAutoBackupIfDue = async (): Promise<void> => {
@@ -834,7 +845,7 @@ if (!app.requestSingleInstanceLock()) {
       // Become the old device again: restart so every part of Hush uses the old id.
       db.setSetting('selfId', previous.id)
       db.setSetting(`seqFloor:${previous.id}`, previous.seq)
-      app.relaunch()
+      relaunch()
       quitApp()
       return null
     })
@@ -958,6 +969,8 @@ if (!app.requestSingleInstanceLock()) {
         // and stop listening to the window.
         closing = true
         clearTimeout(unreadTimer)
+        void link.stop() // already stopped, unless shutdown ran out of time: nothing may arrive now
+        notifier.dispose()
         chat.dispose()
         pairing.dispose()
         ipcMain.removeAllListeners()
@@ -985,6 +998,10 @@ if (!app.requestSingleInstanceLock()) {
     const key = await obtainKey(keyring)
     startCore(key, keyring, restored)
     lockWindow?.destroy()
+  }).catch((e: unknown) => {
+    // Without this Hush would keep running with no window and no way to tell why.
+    dialog.showErrorBox('Hush couldn’t start', (e as Error).message)
+    app.exit(1)
   })
 
   // Real quit (power button, tray "Quit Hush", Ctrl+Q, or the OS shutting down):

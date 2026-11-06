@@ -640,7 +640,7 @@ describe('ChatService — message actions', () => {
     await b.stop()
     await until(() => a.link.peer === null)
     const queued = await a.chat.send('not sent yet')
-    expect(() => a.chat.deleteForMe(queued.id)).toThrow(/Not sent yet/)
+    expect(() => a.chat.deleteForMe(queued.id)).toThrow(/Not delivered yet/)
   })
 })
 
@@ -737,5 +737,208 @@ describe('ChatService — files and voice notes', () => {
     await until(() => b.chat.getMessages([m.id])[0].deleted === true)
     expect([existsSync(voiceFile(a)), existsSync(voiceFile(b))]).toEqual([false, false])
     await expect(a.chat.sendFileBytes(randomBytes(10), 'v.webm', '', undefined, { durationMs: 6 * 60_000, peaks })).rejects.toThrow()
+  })
+})
+
+describe('ChatService — robustness', () => {
+  const view = (s: Side, id: string) => s.chat.getMessages([id])[0]
+  const raw = (s: Side) => (s.db as unknown as { db: Database.Database }).db
+
+  it('finishes a download that was complete when Hush stopped (before it was checked)', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const bytes = png(64, 48, true)
+    const m = await a.chat.sendImage(outgoing(bytes), '')
+    await until(() => existsSync(fullFile(b, m.id)))
+    await b.stop()
+    // Quit while the finished download was being checked: the part file holds everything.
+    rmSync(fullFile(b, m.id))
+    b.store.appendPart(m.id, 0, bytes, { mime: 'image/png', size: bytes.length, sha256: '' })
+
+    b.start()
+    await until(() => existsSync(fullFile(b, m.id)), 3000)
+    expect(transfer(b, m.id, 'done')).toBe(true)
+  })
+
+  it('an edit can remove the caption of a picture, on both computers', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const m = await a.chat.sendImage(outgoing(png(16, 12)), 'old caption')
+    await until(() => b.db.getMessage(m.id) !== undefined)
+    await a.chat.edit(m.id, '')
+    await until(() => view(b, m.id).text === '')
+    expect(view(a, m.id).text).toBe('')
+    expect(view(a, m.id).deleted).toBeUndefined()
+    expect(view(a, m.id).image).toBeDefined()
+    expect(a.chat.search('caption').results).toEqual([])
+  })
+
+  it('only counts real messages in "N queued messages delivered"', async () => {
+    const [a, b] = await sides()
+    a.start()
+    const m = await a.chat.send('hello')
+    await a.chat.react(m.id, '👍', true)
+    await a.chat.edit(m.id, 'hello!')
+    b.start()
+    await until(() => a.events.some((e) => e.type === 'flushed'))
+    expect(a.events.filter((e) => e.type === 'flushed')).toEqual([expect.objectContaining({ count: 1 })])
+  })
+
+  it('refuses "delete for me" while the other side may not have the message yet', async () => {
+    const [a] = await sides()
+    a.start()
+    const m = await a.chat.send('on its way')
+    a.sql(`UPDATE messages SET status = 'sent' WHERE id = ?`, m.id)
+    expect(() => a.chat.deleteForMe(m.id)).toThrow()
+    expect(view(a, m.id).text).toBe('on its way')
+  })
+
+  it('reading the newest message clears the older unread ones too', async () => {
+    const [a, b] = await sides()
+    a.start()
+    const sent = [await a.chat.send('one'), await a.chat.send('two'), await a.chat.send('three')]
+    b.start()
+    await until(() => b.count() === 3)
+    b.chat.markRead([sent[2].id]) // only the newest page of history is on screen
+    expect(b.db.unreadCount(b.id)).toBe(0)
+    await until(() => a.db.getMessage(sent[0].id)?.status === 'read')
+  })
+
+  it('a picture deleted while its download was being checked leaves nothing on disk', async () => {
+    const [a, b] = await sides()
+    b.start()
+    a.start()
+    await online(a, b)
+    const finalize = b.store.finalize.bind(b.store)
+    b.store.finalize = async (id, meta) => {
+      b.db.wipe(id) // the delete arrives here
+      return finalize(id, meta)
+    }
+    const m = await a.chat.sendImage(outgoing(png(16, 12)), '')
+    await until(() => b.db.getMessage(m.id)?.image === null)
+    await settle()
+    expect(existsSync(fullFile(b, m.id))).toBe(false)
+  })
+
+  it('a file check finishing after Hush closed leaves the database alone', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    let release: (ok: boolean) => void = () => {}
+    b.store.finalize = () => new Promise((resolve) => (release = resolve))
+    const m = await a.chat.sendImage(outgoing(png(16, 12)), '')
+    await until(() => b.store.partSize(m.id) > 0 && transfer(b, m.id, 'active'))
+    await settle(100)
+    b.chat.dispose()
+    const getMessage = b.db.getMessage.bind(b.db)
+    let reads = 0
+    b.db.getMessage = (id) => (reads++, getMessage(id))
+    release(true)
+    await settle(50)
+    expect(reads).toBe(0)
+  })
+
+  it('an upload cut off by a disconnect stops showing as in progress', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    // A slow network: the write of chunk 6 is still waiting when the connection goes.
+    const send = a.link.sendBinary.bind(a.link)
+    let chunks = 0
+    a.link.sendBinary = (data) => (++chunks > 5 ? new Promise(() => {}) : send(data))
+    await a.chat.sendImage(outgoing(png(400, 300, true)), '')
+    await until(() => chunks > 5)
+    await b.stop()
+    await until(() => a.link.peer === null)
+    await settle(100)
+    const ups = a.events.flatMap((e) => (e.type === 'transfer' && e.transfer.direction === 'up' ? [e.transfer.state] : []))
+    expect(ups.at(-1)).not.toBe('active')
+  })
+
+  it('tells the peer when a stored file can’t be read, instead of leaving it waiting', async () => {
+    const [a, b] = await sides()
+    a.start()
+    const m = await a.chat.sendImage(outgoing(png(64, 48, true)), '')
+    const damaged = readFileSync(fullFile(a, m.id))
+    damaged[damaged.length - 1] ^= 0xff
+    writeFileSync(fullFile(a, m.id), damaged)
+    b.start()
+    await until(() => transfer(b, m.id, 'failed'), 3000)
+  })
+
+  it('survives a full disk during a download and reports it as failed', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    b.store.appendPart = () => {
+      throw new Error('ENOSPC: no space left on device')
+    }
+    const m = await a.chat.sendImage(outgoing(png(64, 48, true)), '')
+    await until(() => transfer(b, m.id, 'failed'), 3000)
+    expect(b.link.peer).not.toBeNull()
+  })
+
+  it('keeps going after a message that clashes with one it already has', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const first = await b.chat.send('first')
+    await until(() => a.db.getMessage(first.id) !== undefined)
+    const clash = randomUUID()
+    await b.link.send({ t: 'msg', id: clash, author: b.id, seq: 1, body: 'same number', sentAt: Date.now() })
+    const next = await b.chat.send('next')
+    await until(() => a.db.getMessage(next.id) !== undefined)
+    expect(a.db.getMessage(clash)).toBeUndefined()
+  })
+
+  it('never stores file names or picture hashes in the clear', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const f = await a.chat.sendFileBytes(new Uint8Array([1, 2, 3]), 'secret-plan.pdf', '')
+    const img = await a.chat.sendImage(outgoing(png(16, 12)), '')
+    await until(() => b.db.getMessage(img.id) !== undefined)
+    for (const s of [a, b]) {
+      const rows = JSON.stringify(raw(s).prepare('SELECT file, image FROM messages').all())
+      expect(rows).not.toContain('secret-plan')
+      expect(rows).not.toContain('sha256')
+      expect(s.db.getMessage(f.id)?.file?.name).toBe('secret-plan.pdf')
+    }
+  })
+
+  it('seals file details stored before they were encrypted, once', async () => {
+    const [a] = await sides()
+    a.start()
+    const f = await a.chat.sendFileBytes(new Uint8Array([1, 2, 3]), 'old-file.pdf', '')
+    const stored = a.db.getMessage(f.id)!.file!
+    raw(a).prepare('UPDATE messages SET file = ? WHERE id = ?').run(JSON.stringify(stored), f.id)
+    expect(a.db.getMessage(f.id)?.file?.name).toBe('old-file.pdf') // still readable
+    expect(a.db.sealAttachmentDetails()).toBe(1)
+    expect(a.db.sealAttachmentDetails()).toBe(0)
+    expect(JSON.stringify(raw(a).prepare('SELECT file FROM messages').all())).not.toContain('old-file')
+    expect(a.db.attachmentMessages().map((m) => m.file?.name)).toEqual(['old-file.pdf'])
+  })
+
+  it('a preview the sender accepts always fits what the receiver accepts', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const big = Buffer.concat([Buffer.from(png(16, 12)), Buffer.alloc(151_000)])
+    await a.chat.sendImage({ ...outgoing(png(16, 12)), thumb: new Uint8Array(big) }, '').then(
+      async (m) => {
+        await until(() => b.db.getMessage(m.id) !== undefined, 2000)
+      },
+      () => {} // refused up front is fine; accepted and then never delivered is not
+    )
   })
 })

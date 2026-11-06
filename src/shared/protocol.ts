@@ -56,6 +56,8 @@ export const MAX_IMAGE_BYTES = 25 * 1024 * 1024
 const MAX_IMAGE_SIDE = 20_000
 /** Inline preview (base64 WebP/JPEG/PNG) must stay well inside one frame. */
 const MAX_THUMB_BASE64 = 200_000
+/** Latest time a Date can hold: anything beyond it would throw while the message is shown. */
+const MAX_DATE_MS = 8.64e15
 const MAX_SDP = 32_000
 const MAX_CANDIDATE = 1_024
 export const CALL_END_REASONS = ['hangup', 'declined', 'busy', 'cancelled', 'timeout', 'failed'] as const
@@ -337,8 +339,7 @@ function parseRaw(raw: string): Frame | null {
         // An empty chat message is one that was deleted (its text and picture were wiped).
         typeof f.body === 'string' &&
         f.body.length <= MAX_TEXT_LENGTH &&
-        Number.isSafeInteger(f.sentAt) &&
-        (f.sentAt as number) > 0
+        isInt(f.sentAt, 1, MAX_DATE_MS)
       if (!ok) return null
       const msg: Extract<Frame, { t: 'msg' }> = { t: 'msg', id: f.id as string, author: f.author as string, seq: f.seq as number, body: f.body as string, sentAt: f.sentAt as number }
       if (image) msg.image = image
@@ -350,7 +351,7 @@ function parseRaw(raw: string): Frame | null {
       return msg
     }
     case 'blob-req':
-      return isUuid(f.id) && isInt(f.offset, 0, MAX_IMAGE_BYTES) ? { t: 'blob-req', id: f.id, offset: f.offset } : null
+      return isUuid(f.id) && isInt(f.offset, 0, MAX_FILE_BYTES) ? { t: 'blob-req', id: f.id, offset: f.offset } : null
     case 'blob-err':
       return isUuid(f.id) ? { t: 'blob-err', id: f.id } : null
     case 'call':

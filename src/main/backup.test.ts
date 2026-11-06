@@ -211,3 +211,47 @@ describe('upgrading data stored before encryption', () => {
     expect(avatars.readForDisplay('self')?.toString()).toBe('PLAIN AVATAR')
   })
 })
+
+describe('backup edge cases', () => {
+  it('prunes the oldest backups of a day, not the numbered newer ones', () => {
+    const names = ['', '-2', '-3', '-10'].map((n) => `Hush-backup-2026-01-01${n}.hushbackup`)
+    for (const n of names) writeFileSync(join(dir, n), 'x')
+    pruneBackups(dir, 3)
+    expect(readdirSync(dir).sort()).toEqual([names[3], names[1], names[2]].sort())
+  })
+
+  it('a restore replaces all attachments, even when the backup holds none', () => {
+    mkdirSync(join(dir, 'images'))
+    writeFileSync(join(dir, 'images', 'old.png'), 'encrypted with the old key')
+    mkdirSync(join(dir, STAGING))
+    writeFileSync(join(dir, STAGING, 'hush.db'), 'db')
+    markStagedRestoreReady(dir)
+    expect(applyStagedRestore(dir)).toBe(true)
+    expect(existsSync(join(dir, 'images', 'old.png'))).toBe(false)
+  })
+
+  async function smallBackup(): Promise<string> {
+    const file = join(dir, 'b.hushbackup')
+    const data = join(dir, 'data')
+    mkdirSync(data)
+    writeFileSync(join(data, 'avatar-self.img'), Buffer.alloc(300_000, 7))
+    const source = { snapshotDb: async (p: string) => writeFileSync(p, 'db'), dataKey: newDataKey(), dir: data, app: '1.0.0' }
+    await writeBackup(source, backupKeyFromPassword('password1'), false, file)
+    return file
+  }
+
+  it('explains a truncated backup in plain words', async () => {
+    const file = await smallBackup()
+    const whole = readFileSync(file)
+    writeFileSync(file, whole.subarray(0, whole.length - 5000))
+    expect(() => extractBackup(file, 'password1', join(dir, 'out'))).toThrow(/damaged/)
+  })
+
+  it('explains a backup with a broken header in plain words', () => {
+    const file = join(dir, 'bad.hushbackup')
+    const len = Buffer.alloc(4)
+    len.writeUInt32BE(5)
+    writeFileSync(file, Buffer.concat([Buffer.from('HUSHBAK1'), len, Buffer.from('{nope')]))
+    expect(() => extractBackup(file, 'password1', join(dir, 'out'))).toThrow(/damaged/)
+  })
+})

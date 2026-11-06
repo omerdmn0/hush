@@ -7,6 +7,8 @@ import type { CallDirection, CallOutcome, CallRecord } from '../../../shared/typ
 export const RING_TIMEOUT_MS = 45_000
 /** If audio drops ("disconnected") and doesn't recover within this time, the call ends. */
 export const RECONNECT_GRACE_MS = 10_000
+/** Answered, but no audio path found after this long: give up instead of "connecting" forever. */
+export const CONNECT_TIMEOUT_MS = 30_000
 /** How long the "Call ended" status stays visible. */
 export const ENDED_VISIBLE_MS = 3_500
 

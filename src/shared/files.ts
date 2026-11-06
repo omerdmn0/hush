@@ -11,8 +11,9 @@ const RISKY = new Set([
 ])
 
 export function fileExtension(name: string): string {
-  const i = name.lastIndexOf('.')
-  return i > 0 ? name.slice(i + 1).toLowerCase() : ''
+  const clean = name.replace(/[. ]+$/, '') // Windows drops these when saving: "setup.exe." is setup.exe
+  const i = clean.lastIndexOf('.')
+  return i > 0 ? clean.slice(i + 1).toLowerCase() : ''
 }
 
 export function isRiskyFile(name: string): boolean {
@@ -48,8 +49,8 @@ export function cleanFileName(raw: string): string {
   let name = raw.replace(/[/\\]/g, '_').replace(/\p{Cc}/gu, '').trim()
   if (name === '' || name === '.' || name === '..') name = 'file'
   if (name.length > 255) {
-    const ext = fileExtension(name)
-    name = name.slice(0, 255 - (ext ? ext.length + 1 : 0)) + (ext ? `.${ext}` : '')
+    const ext = fileExtension(name).slice(0, 32)
+    name = name.slice(0, 255 - (ext ? ext.length + 1 : 0)).trimEnd() + (ext ? `.${ext}` : '')
   }
   return name
 }

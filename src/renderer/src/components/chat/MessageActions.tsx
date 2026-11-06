@@ -177,8 +177,8 @@ export function DeleteDialog({ message, peerName, onClose }: { message: ChatMess
   const [error, setError] = useState<string | null>(null)
   const mine = message?.from === 'me'
   const forEveryone = mine && !message?.deleted
-  // Not sent yet: it can only be taken back for both of you.
-  const forMe = !(mine && message?.status === 'queued')
+  // Not delivered yet: it can only be taken back for both of you.
+  const forMe = !(mine && (message?.status === 'queued' || message?.status === 'sent'))
   const run = async (mode: 'everyone' | 'me'): Promise<void> => {
     if (!message) return
     try {

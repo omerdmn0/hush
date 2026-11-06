@@ -128,6 +128,18 @@ function Bubble({
     )
   }
 
+  if (m.unsupported) {
+    return (
+      <div className={cn('cut max-w-full px-3 pt-2 pb-1.5 text-sm text-text-muted italic', shape, '[--fill-c:transparent] opacity-80')}>
+        <span className="inline-flex items-center gap-1.5">
+          <CircleAlert aria-hidden="true" className="size-3.5" />
+          Update Hush to see this message
+        </span>
+        <Meta m={m} showStatus={false} />
+      </div>
+    )
+  }
+
   if (m.file?.voice) return <VoiceBubble m={m} mine={mine} shape={shape} quote={quote} showStatus={showStatus} transfer={images.transfers[m.id]} onRetry={images.onRetry} />
   if (m.file) return <FileBubble m={m} mine={mine} shape={shape} quote={quote} showStatus={showStatus} images={images} />
 

@@ -33,8 +33,8 @@ const SYNC_PAGE = 200
 const ACK_BATCH_MS = 50
 /** "N queued messages delivered" is reported once deliveries go quiet for this long. */
 const FLUSH_QUIET_MS = 600
-/** Inline previews larger than this are refused (they must fit in one frame as base64). */
-const MAX_THUMB_BYTES = 150 * 1024
+/** Inline previews larger than this are refused (as base64 they must pass MAX_THUMB_BASE64). */
+const MAX_THUMB_BYTES = 150_000
 const PREVIEW_TYPES = new Set<string>(['image/webp', 'image/jpeg', 'image/png'])
 
 /** Setting: a backup was restored and the peer hasn't synced with us since. */
@@ -79,7 +79,8 @@ export class ChatService {
     this.transfers = new Transfers(db, store, link, emit, opts.chunkBytes)
     link.on('up', (peer) => this.onUp(peer))
     link.on('down', () => this.onDown())
-    link.on('frame', (frame, peer) => void this.onFrame(frame, peer))
+    // One frame that can't be applied (e.g. it clashes with what's stored) must not stop the rest.
+    link.on('frame', (frame, peer) => void this.onFrame(frame, peer).catch((e: unknown) => console.error(`Couldn't apply a '${frame.t}' frame:`, (e as Error).message)))
   }
 
   peerState(): PeerState {
@@ -285,10 +286,13 @@ export class ChatService {
   markRead(ids: string[]): void {
     const changed = this.db.advanceStatusFromOthers(ids, 'read', this.selfId)
     if (changed.length === 0) return
+    // The receipt covers everything before it, including history not loaded on screen yet.
+    const peerId = this.db.getSetting<string>('peerId')
+    if (peerId) changed.push(...this.db.advanceUpTo(peerId, this.db.readSeq(peerId), 'read'))
     this.emit({ type: 'status', updates: changed.map((id) => ({ id, status: 'read' })) })
-    const peerId = this.link.peer?.id
     // Offline: the watermark travels in the next sync frame instead.
-    if (peerId) void this.link.send({ t: 'read', author: peerId, upTo: this.db.readSeq(peerId) })
+    const online = this.link.peer?.id
+    if (online) void this.link.send({ t: 'read', author: online, upTo: this.db.readSeq(online) })
   }
 
   setTyping(on: boolean): void {
@@ -530,7 +534,7 @@ export class ChatService {
     const m = isUuid(id) ? this.db.getMessage(id) : undefined
     if (!m || m.ref) throw new Error('Message not found')
     // Not delivered yet: erasing it here would send an empty message later.
-    if (m.authorId === this.selfId && m.status === 'queued') throw new Error('Not sent yet — delete it for everyone instead')
+    if (m.authorId === this.selfId && (m.status === 'queued' || m.status === 'sent')) throw new Error('Not delivered yet — delete it for everyone instead')
     this.db.hide(m.id)
     this.store.remove(m.id)
     this.transfers.cancel(m.id)

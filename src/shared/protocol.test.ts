@@ -150,3 +150,21 @@ describe('file messages', () => {
     expect(parseFrame(msg(file(), 'message'))).toBeNull() // only file messages carry a file
   })
 })
+
+describe('limits that have to agree', () => {
+  const id = '11111111-1111-4111-8111-111111111111'
+
+  it('lets a download resume anywhere in a 1 GB file', () => {
+    for (const offset of [0, 25 * 1024 * 1024 + 1, 900 * 1024 * 1024, 1024 ** 3]) {
+      expect(parseFrame(JSON.stringify({ t: 'blob-req', id, offset }))).toEqual({ t: 'blob-req', id, offset })
+    }
+    expect(parseFrame(JSON.stringify({ t: 'blob-req', id, offset: 1024 ** 3 + 1 }))).toBeNull()
+  })
+
+  it('refuses a time no Date can hold (it would crash the message list)', () => {
+    const frame = (sentAt: number): string => JSON.stringify({ t: 'msg', id, author: id, seq: 1, body: 'x', sentAt })
+    expect(parseFrame(frame(8.64e15))).not.toBeNull()
+    expect(parseFrame(frame(8.64e15 + 1))).toBeNull()
+    expect(parseFrame(frame(Number.MAX_SAFE_INTEGER))).toBeNull()
+  })
+})

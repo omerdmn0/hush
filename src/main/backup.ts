@@ -12,6 +12,7 @@ import { deriveKey, EncryptedFileReader, EncryptedFileWriter, newKdfParams, type
  */
 
 const MAGIC = Buffer.from('HUSHBAK1')
+const DAMAGED = 'This backup file is damaged.'
 const COPY_CHUNK = 1024 * 1024
 
 export interface BackupHeader {
@@ -127,10 +128,14 @@ export function readBackupHeader(file: string): { header: BackupHeader; offset: 
     readSync(fd, head, 0, 12, 0)
     if (!head.subarray(0, 8).equals(MAGIC)) throw new Error('This is not a Hush backup file.')
     const len = head.readUInt32BE(8)
-    if (len > 64 * 1024) throw new Error('This backup file is damaged.')
+    if (len > 64 * 1024) throw new Error(DAMAGED)
     const json = Buffer.alloc(len)
     readSync(fd, json, 0, len, 12)
-    return { header: JSON.parse(json.toString('utf8')) as BackupHeader, offset: 12 + len }
+    try {
+      return { header: JSON.parse(json.toString('utf8')) as BackupHeader, offset: 12 + len }
+    } catch {
+      throw new Error(DAMAGED)
+    }
   } finally {
     closeSync(fd)
   }
@@ -143,10 +148,9 @@ export function readBackupHeader(file: string): { header: BackupHeader; offset: 
  */
 export function extractBackup(file: string, password: string, targetDir: string): { dataKey: Buffer; header: BackupHeader; files: number } {
   const { header, offset } = readBackupHeader(file)
-  const key = deriveKey(password, header.kdf)
   let reader: EncryptedFileReader
   try {
-    reader = new EncryptedFileReader(key, file, offset)
+    reader = new EncryptedFileReader(deriveKey(password, header.kdf), file, offset)
     reader.read(0, 1) // authenticates the first chunk
   } catch {
     throw new Error('Wrong backup password (or the file is damaged).')
@@ -156,8 +160,13 @@ export function extractBackup(file: string, password: string, targetDir: string)
   let files = 0
   let pos = 0
   const take = (n: number): Buffer => {
-    const b = reader.read(pos, n)
-    if (b.length !== n) throw new Error('This backup file is damaged.')
+    let b: Buffer
+    try {
+      b = reader.read(pos, n)
+    } catch {
+      throw new Error(DAMAGED) // cut short or altered: the encryption notices
+    }
+    if (b.length !== n) throw new Error(DAMAGED)
     pos += n
     return b
   }
@@ -167,7 +176,7 @@ export function extractBackup(file: string, password: string, targetDir: string)
       const name = take(nameLen).toString('utf8')
       const size = Number(take(8).readBigUInt64BE(0))
       const dest = normalize(join(targetDir, name))
-      if (!dest.startsWith(normalize(targetDir) + sep) || name.includes('..')) throw new Error('This backup file is damaged.')
+      if (!dest.startsWith(normalize(targetDir) + sep) || name.includes('..')) throw new Error(DAMAGED)
       if (name === 'vault.key') {
         dataKey = take(size)
       } else {
@@ -194,9 +203,14 @@ export function extractBackup(file: string, password: string, targetDir: string)
 
 /** Keeps the newest `keep` automatic backups in `folder`. */
 export function pruneBackups(folder: string, keep: number): void {
+  // Oldest first: by date, then by the number a second backup on one day gets.
+  const parsed = (n: string): RegExpExecArray | null => /^Hush-backup-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.hushbackup$/.exec(n)
   const ours = readdirSync(folder)
-    .filter((n) => /^Hush-backup-\d{4}-\d{2}-\d{2}(-\d+)?\.hushbackup$/.test(n))
-    .sort()
+    .filter((n) => parsed(n))
+    .sort((a, b) => {
+      const [x, y] = [parsed(a)!, parsed(b)!]
+      return x[1].localeCompare(y[1]) || Number(x[2] ?? 1) - Number(y[2] ?? 1)
+    })
   for (const name of ours.slice(0, Math.max(0, ours.length - keep))) rmSync(join(folder, name), { force: true })
 }
 
@@ -215,7 +229,7 @@ export function backupFileName(date: Date, folder: string): string {
 
 export const STAGING = 'restore-staging'
 /** Files of the current data that a restore replaces even if the backup doesn't contain them. */
-const REPLACED = ['hush.db-wal', 'hush.db-shm', 'avatar-self.img', 'avatar-peer.img']
+const REPLACED = ['hush.db-wal', 'hush.db-shm', 'avatar-self.img', 'avatar-peer.img', 'images']
 
 export function markStagedRestoreReady(dir: string): void {
   writeFileSync(join(dir, STAGING, '.ready'), '')
@@ -226,7 +240,7 @@ export function applyStagedRestore(dir: string): boolean {
   const staged = join(dir, STAGING)
   if (!existsSync(staged)) return false
   if (existsSync(join(staged, '.ready'))) {
-    for (const name of REPLACED) rmSync(join(dir, name), { force: true })
+    for (const name of REPLACED) rmSync(join(dir, name), { recursive: true, force: true })
     renameSync(join(staged, '.ready'), join(staged, '.applying'))
   }
   if (!existsSync(join(staged, '.applying'))) {

@@ -34,18 +34,16 @@ export function reactionData(emoji: string, on: boolean): string {
  * their own sequence order; reactions toggle per person, so both can react with several emoji.
  */
 export function applyEvents(targetAuthor: string, events: readonly EventRecord[], selfId: string): EventState {
-  const ordered = [...events].sort((a, b) => (a.authorId === b.authorId ? (a.seq ?? 0) - (b.seq ?? 0) : a.sentAt - b.sentAt))
+  const ordered = [...events].sort((a, b) => (a.authorId === b.authorId ? (a.seq ?? 0) - (b.seq ?? 0) : a.authorId < b.authorId ? -1 : 1))
   const state: EventState = { deleted: false, reactions: [] }
   const byPerson = new Map<string, Map<string, number>>() // author → emoji → when added
-  let lastEdit = -1
 
   for (const e of ordered) {
     if (e.kind === 'delete' && e.authorId === targetAuthor) {
       state.deleted = true
-    } else if (e.kind === 'edit' && e.authorId === targetAuthor && e.data && e.data.length <= MAX_TEXT_LENGTH && e.sentAt >= lastEdit) {
-      state.text = e.data
+    } else if (e.kind === 'edit' && e.authorId === targetAuthor && typeof e.data === 'string' && e.data.length <= MAX_TEXT_LENGTH) {
+      state.text = e.data // may be empty: a caption can be removed
       state.editedAt = e.sentAt
-      lastEdit = e.sentAt
     } else if (e.kind === 'react' && e.data && (e.data[0] === '+' || e.data[0] === '-')) {
       const emoji = e.data.slice(1)
       if (!isReactionEmoji(emoji)) continue

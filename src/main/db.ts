@@ -214,6 +214,23 @@ export class HushDb {
     return n
   }
 
+  /**
+   * File names and picture details used to be stored in plain text. Seals any that still are.
+   * Runs on every start, once the key is known to be the right one. Returns how many rows changed.
+   */
+  sealAttachmentDetails(): number {
+    const rows = this.db.prepare(`SELECT id, image, file FROM messages WHERE image IS NOT NULL OR file IS NOT NULL`).all() as Pick<Row, 'id' | 'image' | 'file'>[]
+    const plain = (v: string | null): v is string => v !== null && !isSealedField(v)
+    const todo = rows.filter((r) => plain(r.image) || plain(r.file))
+    if (todo.length === 0) return 0
+    const upd = this.db.prepare('UPDATE messages SET image = ?, file = ? WHERE id = ?')
+    this.db.transaction(() => {
+      for (const r of todo) upd.run(plain(r.image) ? this.cipher.seal(r.image) : r.image, plain(r.file) ? this.cipher.seal(r.file) : r.file, r.id)
+    })()
+    this.db.pragma('wal_checkpoint(TRUNCATE)') // don't leave the plain text behind in the log
+    return todo.length
+  }
+
   setSetting(key: string, value: unknown): void {
     this.db
       .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
@@ -263,12 +280,12 @@ export class HushDb {
         m.sentAt,
         receivedAt,
         m.status,
-        m.image ? JSON.stringify(m.image) : null,
+        m.image ? this.cipher.seal(JSON.stringify(m.image)) : null,
         m.kind ?? 'message',
         m.ref ?? null,
         m.data == null ? null : this.cipher.seal(m.data),
         m.replyTo ?? null,
-        m.file ? JSON.stringify(m.file) : null
+        m.file ? this.cipher.seal(JSON.stringify(m.file)) : null
       )
     if (r.changes === 1) return true
     if (m.seq !== null) {
@@ -410,10 +427,10 @@ export class HushDb {
     return rows.map((r) => this.toStored(r))
   }
 
-  /** Ids of this author's messages currently in one of the given statuses. */
+  /** Ids of this author's chat messages (not events) currently in one of the given statuses. */
   idsWithStatus(authorId: string, statuses: MessageStatus[]): string[] {
     const rows = this.db
-      .prepare(`SELECT id FROM messages WHERE author_id = ? AND status IN (${statuses.map(() => '?').join(',')})`)
+      .prepare(`SELECT id FROM messages WHERE author_id = ? AND ref IS NULL AND status IN (${statuses.map(() => '?').join(',')})`)
       .all(authorId, ...statuses) as { id: string }[]
     return rows.map((r) => r.id)
   }
@@ -470,8 +487,8 @@ export class HushDb {
       .all() as { id: string; image: string | null; file: string | null }[]
     return rows.map((r) => ({
       id: r.id,
-      image: r.image ? (JSON.parse(r.image) as ImageMeta) : null,
-      file: r.file ? (JSON.parse(r.file) as FileMeta) : null
+      image: r.image ? (JSON.parse(this.cipher.open(r.image)) as ImageMeta) : null,
+      file: r.file ? (JSON.parse(this.cipher.open(r.file)) as FileMeta) : null
     }))
   }
 
@@ -505,12 +522,12 @@ function toStored(r: Row, open: (s: string) => string): StoredMessage {
     body: open(r.body),
     sentAt: r.sent_at,
     status: r.status,
-    image: r.image ? (JSON.parse(r.image) as ImageMeta) : null,
+    image: r.image ? (JSON.parse(open(r.image)) as ImageMeta) : null,
     kind: r.kind,
     ref: r.ref,
     data: r.data === null ? null : open(r.data),
     replyTo: r.reply_to,
-    file: r.file ? (JSON.parse(r.file) as FileMeta) : null
+    file: r.file ? (JSON.parse(open(r.file)) as FileMeta) : null
   }
 }
 

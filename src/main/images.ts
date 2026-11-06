@@ -107,8 +107,8 @@ export class ImageStore {
     const dest = this.fullPath(id, { size: 0, sha256: '', mime: '', file: 'file' })
     const tmp = dest + '.tmp'
     const hash = createHash('sha256')
-    const w = new EncryptedFileWriter(this.key, tmp)
     const fh = await openAsync(src, 'r')
+    const w = new EncryptedFileWriter(this.key, tmp)
     let size = 0
     try {
       const buf = Buffer.alloc(STEP)

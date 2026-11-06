@@ -24,6 +24,14 @@ describe('notification rules', () => {
     expect(messageNotification('Mira', [{ text: 'x'.repeat(500), hasImage: false }], true).body).toHaveLength(140)
   })
 
+  it('says what arrived when a message has no text', () => {
+    const body = (m: Parameters<typeof messageNotification>[1][number]): string => messageNotification('Mira', [m], true).body
+    expect(body({ text: '', hasImage: false, file: 'plan.pdf' })).toBe('Sent a file: plan.pdf')
+    expect(body({ text: 'see this', hasImage: false, file: 'plan.pdf' })).toBe('plan.pdf: see this')
+    expect(body({ text: '', hasImage: false, voice: true })).toBe('Sent a voice note')
+    expect(body({ text: '', hasImage: false })).toBe('New message')
+  })
+
   it('hides message text when previews are off', () => {
     const one = messageNotification('Mira', [{ text: 'my secret', hasImage: false }], false)
     expect(one).toEqual({ title: 'Hush', body: 'New message from Mira' })
