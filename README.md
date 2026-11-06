@@ -82,10 +82,8 @@ Then start **Hush** from your applications menu.
 chmod +x Hush-x.y.z-x86_64.AppImage
 ./Hush-x.y.z-x86_64.AppImage
 ```
-AppImages need FUSE 2. If it says *“AppImages require FUSE to run”*, install it
-(`sudo apt install libfuse2t64` on Ubuntu 24.04+, `sudo apt install libfuse2` on older Ubuntu/Debian,
-`sudo pacman -S fuse2` on Arch) — or run it with `--appimage-extract-and-run`. On Ubuntu 24.04+
-the `.deb` is the smoother choice.
+No extra packages are needed. On Ubuntu and Debian the `.deb` is the smoother choice: it adds Hush
+to your applications menu.
 
 ### 5. Connect and pair
 

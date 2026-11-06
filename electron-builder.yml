@@ -71,5 +71,9 @@ linux:
 appImage:
   artifactName: Hush-${version}-x86_64.${ext}
 
+# The static AppImage runtime: runs without FUSE 2, which many distributions no longer ship.
+toolsets:
+  appimage: '1.0.3'
+
 deb:
   artifactName: hush_${version}_amd64.${ext}

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session, shell } from 'electron'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -137,12 +137,19 @@ if (!app.requestSingleInstanceLock()) {
   }
   /**
    * Starts Hush again after this copy exits. The user is at the window, so it must not come back
-   * hidden even if this copy was started at login. An AppImage has to be started from its own
-   * file: the folder it runs from disappears when it exits.
+   * hidden even if this copy was started at login.
    */
   const relaunch = (): void => {
     const args = process.argv.slice(1).filter((a) => a !== HIDDEN_FLAG)
-    app.relaunch(process.env.APPIMAGE ? { execPath: process.env.APPIMAGE, args } : { args })
+    const image = process.env.APPIMAGE
+    if (!image) return app.relaunch({ args })
+    // app.relaunch can't work in an AppImage: its helper runs from the AppImage's mount, which
+    // disappears when Hush exits. So wait from outside it, then start the AppImage file itself.
+    spawn('/bin/sh', ['-c', 'while kill -0 "$0" 2>/dev/null; do sleep 0.2; done; exec "$@"', String(process.pid), image, ...args], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, LD_LIBRARY_PATH: undefined } // AppImage's library path would break the system's shell
+    }).unref()
   }
 
   /** Set once the data is unlocked and Hush is running. */
