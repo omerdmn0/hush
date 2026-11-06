@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
+import { Virtuoso, type ListProps, type VirtuosoHandle } from 'react-virtuoso'
 import type { ChatMessage } from '../../../../shared/types'
 import { ArrowDown, CircleCheck, Phone, PhoneIncoming, PhoneMissed, PhoneOff, PhoneOutgoing } from 'lucide-react'
 import type { CallRecord } from '../../../../shared/types'
@@ -104,14 +104,29 @@ export function MessageList({
   const [awayFrom, setAwayFrom] = useState<string | null>(null)
   const lastId = useRef<string | undefined>(undefined)
   lastId.current = messages[messages.length - 1]?.id
+  const lastTop = useRef(0)
+  // When the person last touched the list. It also moves by itself (rows being measured, history
+  // loading), so a move upwards only means "leaving the bottom" if they caused it.
+  const touched = useRef({ at: 0, held: false })
+  const touch = (): void => {
+    touched.current.at = performance.now()
+  }
   const onScroll = (): void => {
     const el = scroller.current
     if (!el) return
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
-    const away = el.scrollHeight - el.scrollTop - el.clientHeight > 300
+    const fromEnd = el.scrollHeight - el.scrollTop - el.clientHeight
+    const byUser = touched.current.held || performance.now() - touched.current.at < 400
+    // While rows are being replaced the list is empty for a moment, which isn't "at the bottom".
+    if (fromEnd < 48 && el.scrollHeight > el.clientHeight) stick.current = true
+    else if (el.scrollTop < lastTop.current && byUser) stick.current = false
+    // Measuring a row can nudge the list up without changing its size: stay at the end.
+    if (stick.current && !byUser && fromEnd > 1) el.scrollTop = el.scrollHeight
+    lastTop.current = el.scrollTop
+    const away = fromEnd > 300
     setAwayFrom((prev) => (away ? (prev ?? lastId.current ?? null) : null))
   }
-  const newSince = awayFrom ? messages.length - 1 - messages.findIndex((m) => m.id === awayFrom) : 0
+  const awayIndex = awayFrom ? messages.findIndex((m) => m.id === awayFrom) : -1 // gone if it was deleted
+  const newSince = awayIndex < 0 ? 0 : messages.length - 1 - awayIndex
   const jumpToLatest = (): void => {
     stick.current = true
     setAwayFrom(null)
@@ -131,7 +146,21 @@ export function MessageList({
   return (
     // role=log without live announcements: virtualization adds/removes rows while scrolling,
     // so new-message announcements go through the app's single status region instead.
-    <div ref={wrapper} role="log" aria-live="off" aria-label={`Messages with ${peerName}`} className="relative min-h-0 flex-1">
+    <div
+      ref={wrapper}
+      role="log"
+      aria-live="off"
+      aria-label={`Messages with ${peerName}`}
+      className="relative min-h-0 flex-1"
+      onWheel={touch}
+      onTouchMove={touch}
+      onKeyDown={touch}
+      onPointerDown={() => (touched.current.held = true)} // includes dragging the scrollbar
+      onPointerUp={() => (touched.current.held = false)}
+      onPointerMove={(e) => {
+        if (e.buttons === 0) touched.current.held = false // some scrollbar drags end without a pointerup
+      }}
+    >
       <Virtuoso<TimelineItem, ListContext>
         ref={list}
         className="h-full"
@@ -141,13 +170,12 @@ export function MessageList({
           scroller.current?.addEventListener('scroll', onScroll, { passive: true })
         }}
         data={items}
-        context={{ typing, peerName, hasMore, loadingOlder }}
+        context={{ typing, peerName, hasMore, loadingOlder, onRowsResized: pinToBottom }}
         firstItemIndex={firstIndex.current}
         startReached={() => hasMore && onLoadOlder()}
         computeItemKey={(_, item) => item.key}
         initialTopMostItemIndex={{ index: 'LAST', align: 'end' }}
         alignToBottom
-        followOutput={() => (stick.current ? 'smooth' : false)}
         increaseViewportBy={{ top: 400, bottom: 200 }}
         itemContent={(_, item) => (
           <Column>
@@ -194,10 +222,39 @@ interface ListContext {
   peerName: string
   hasMore: boolean
   loadingOlder: boolean
+  onRowsResized: () => void
+}
+
+/**
+ * The rows, watched for size changes: this is what keeps the list at the bottom. Virtuoso's own
+ * followOutput can't: it only reacts when the number of rows changes, but a new message usually
+ * joins the last group, and reactions, edits and notes make that group taller too. It also aims
+ * by estimated row heights, which are far off for groups of very different sizes.
+ */
+function Rows({ context, ref, ...props }: ListProps & { context?: ListContext }): ReactNode {
+  const pin = useRef(context?.onRowsResized)
+  pin.current = context?.onRowsResized
+  const observer = useRef<ResizeObserver | null>(null)
+  const setRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      observer.current?.disconnect()
+      observer.current = null
+      if (el) {
+        observer.current = new ResizeObserver(() => pin.current?.())
+        // border-box: a row that isn't drawn yet only adds padding, which content-box wouldn't see.
+        observer.current.observe(el, { box: 'border-box' })
+      }
+      if (typeof ref === 'function') ref(el)
+      else if (ref) ref.current = el
+    },
+    [ref]
+  )
+  return <div {...props} ref={setRef} />
 }
 
 // Stable component identities, so Virtuoso doesn't remount header/footer on every render.
 const COMPONENTS = {
+  List: Rows,
   Header: ({ context }: { context?: ListContext }): ReactNode =>
     context?.loadingOlder || !context?.hasMore ? (
       <Column>
