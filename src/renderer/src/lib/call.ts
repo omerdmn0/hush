@@ -4,10 +4,12 @@ import {
   candidateAllowed,
   ENDED_VISIBLE_MS,
   endedText,
+  offersScreen,
   outcomeFor,
   RECONNECT_GRACE_MS,
   RING_TIMEOUT_MS,
   yieldToIncoming,
+  withStereoScreenAudio,
   type EndedBy
 } from './callLogic'
 import { Ringer } from './ringtone'
@@ -23,9 +25,21 @@ export interface CallView {
   muted: boolean
   /** Shown while phase === 'ended'. */
   endedText: string | null
+  /** We're sharing our screen. */
+  sharing: { audio: boolean } | null
+  /** They're sharing theirs (see CallController.remoteScreen). */
+  peerSharing: { audio: boolean } | null
+  /** This call can carry a shared screen (both apps support it). */
+  canShare: boolean
 }
 
-const IDLE: CallView = { phase: 'idle', ringing: false, connectedAt: null, muted: false, endedText: null }
+const IDLE: CallView = { phase: 'idle', ringing: false, connectedAt: null, muted: false, endedText: null, sharing: null, peerSharing: null, canShare: false }
+
+/** What's being shared; `stop` releases the capture. */
+export interface ScreenCapture {
+  stream: MediaStream
+  stop: () => void
+}
 
 export interface CallDeps {
   send: (signal: CallSignal) => Promise<boolean>
@@ -36,6 +50,8 @@ export interface CallDeps {
   anyNetwork: () => boolean
   /** Saves a call-history entry. */
   logCall: (record: CallRecord) => void
+  /** Their Hush can receive a shared screen. */
+  peerCanShare: () => boolean
 }
 
 /**
@@ -57,6 +73,9 @@ export class CallController {
   private record: CallRecord | null = null
   private readonly ringer = new Ringer()
   readonly audio: HTMLAudioElement
+  private screen: ScreenCapture | null = null
+  /** Their shared screen (and its audio); only meaningful while view.peerSharing is set. */
+  remoteScreen: MediaStream | null = null
 
   constructor(private readonly deps: CallDeps) {
     this.audio = new Audio()
@@ -99,6 +118,14 @@ export class CallController {
       return
     }
     const pc = this.createPc(id)
+    // Screen video + audio slots are negotiated now and switched on later with replaceTrack, so
+    // sharing never renegotiates mid-call. An older Hush would mishandle them, so ask first.
+    if (this.deps.peerCanShare()) {
+      const shared = new MediaStream() // one stream, so picture and sound stay in sync
+      pc.addTransceiver('video', { direction: 'sendrecv', streams: [shared] })
+      pc.addTransceiver('audio', { direction: 'sendrecv', streams: [shared] })
+      this.set({ canShare: true })
+    }
     const offer = await pc.createOffer()
     if (!this.current(id)) return
     await pc.setLocalDescription(offer)
@@ -124,8 +151,16 @@ export class CallController {
       return this.finish('mic', 'system', false)
     }
     const pc = this.createPc(id)
-    await pc.setRemoteDescription({ type: 'offer', sdp: offer })
+    await pc.setRemoteDescription({ type: 'offer', sdp: withStereoScreenAudio(offer) })
     if (!this.current(id)) return
+    if (offersScreen(offer)) {
+      const shared = new MediaStream()
+      for (const t of pc.getTransceivers().slice(1)) {
+        t.direction = 'sendrecv'
+        t.sender.setStreams(shared)
+      }
+      this.set({ canShare: true })
+    }
     await this.flushIce()
     const answer = await pc.createAnswer()
     if (!this.current(id)) return
@@ -161,6 +196,38 @@ export class CallController {
     this.local = next
   }
 
+  /** Starts sending a captured screen (and its audio, if any) in the slots made at call start. */
+  async startShare(capture: ScreenCapture): Promise<void> {
+    const id = this.callId
+    const [, video, audio] = this.pc?.getTransceivers() ?? []
+    if (!id || !video || !audio || this.view.phase !== 'active' || this.screen) return capture.stop()
+    const videoTrack = capture.stream.getVideoTracks()[0]
+    const audioTrack = capture.stream.getAudioTracks()[0] ?? null
+    this.screen = capture
+    videoTrack.onended = () => void this.stopShare() // "Stop sharing" in the system's own UI
+    videoTrack.contentHint = 'detail'
+    await video.sender.replaceTrack(videoTrack)
+    await limit(video.sender, 8_000_000, 30)
+    if (audioTrack) {
+      audioTrack.contentHint = 'music'
+      await audio.sender.replaceTrack(audioTrack)
+      await limit(audio.sender, 128_000)
+    }
+    this.set({ sharing: { audio: !!audioTrack } })
+    void this.deps.send({ t: 'call-share', id, on: true, audio: !!audioTrack })
+  }
+
+  async stopShare(): Promise<void> {
+    const capture = this.screen
+    if (!capture) return
+    this.screen = null
+    const [, video, audio] = this.pc?.getTransceivers() ?? []
+    await Promise.all([video?.sender.replaceTrack(null), audio?.sender.replaceTrack(null)])
+    capture.stop()
+    this.set({ sharing: null })
+    if (this.callId) void this.deps.send({ t: 'call-share', id: this.callId, on: false, audio: false })
+  }
+
   async setSpeaker(deviceId: string): Promise<void> {
     await (this.audio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId?.(deviceId).catch(() => {})
   }
@@ -184,7 +251,7 @@ export class CallController {
         this.ringer.stop()
         clearTimeout(this.ringTimer)
         this.set({ phase: 'connecting' })
-        await this.pc.setRemoteDescription({ type: 'answer', sdp: s.sdp })
+        await this.pc.setRemoteDescription({ type: 'answer', sdp: withStereoScreenAudio(s.sdp) })
         await this.flushIce()
         break
       case 'call-ice': {
@@ -197,6 +264,9 @@ export class CallController {
       case 'call-end':
         this.finish(s.reason, 'peer', true)
         break
+      case 'call-share':
+        this.set({ peerSharing: s.on ? { audio: s.audio } : null })
+        break
     }
   }
 
@@ -208,7 +278,7 @@ export class CallController {
       this.callId = id
       this.remoteOffer = sdp
       this.newRecord(id, 'in')
-      this.set({ phase: 'incoming' })
+      this.set({ phase: 'incoming', canShare: false })
       void this.deps.send({ t: 'call-ringing', id })
       return this.accept()
     }
@@ -260,6 +330,12 @@ export class CallController {
       void this.deps.send({ t: 'call-ice', id, candidate: e.candidate.candidate, mid: e.candidate.sdpMid, line: e.candidate.sdpMLineIndex })
     }
     pc.ontrack = (e) => {
+      // The first slot is the voice; the others carry the shared screen.
+      if (pc.getTransceivers().indexOf(e.transceiver) > 0) {
+        this.remoteScreen ??= new MediaStream()
+        this.remoteScreen.addTrack(e.track)
+        return
+      }
       this.audio.srcObject = e.streams[0] ?? new MediaStream([e.track])
       void this.setSpeaker(this.deps.speakerId())
       void this.audio.play().catch(() => {})
@@ -319,6 +395,9 @@ export class CallController {
     this.ringer.stop()
     clearTimeout(this.ringTimer)
     clearTimeout(this.graceTimer)
+    this.screen?.stop()
+    this.screen = null
+    this.remoteScreen = null
     this.pc?.close()
     this.pc = null
     this.local?.getTracks().forEach((t) => t.stop())
@@ -342,6 +421,15 @@ export class CallController {
     this.reset()
     this.listeners.clear()
   }
+}
+
+async function limit(sender: RTCRtpSender, maxBitrate: number, maxFramerate?: number): Promise<void> {
+  const p = sender.getParameters()
+  const encoding = p.encodings?.[0]
+  if (!encoding) return
+  encoding.maxBitrate = maxBitrate
+  if (maxFramerate) encoding.maxFramerate = maxFramerate
+  await sender.setParameters(p).catch(() => {})
 }
 
 export function getMic(deviceId: string): Promise<MediaStream> {

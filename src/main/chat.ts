@@ -88,7 +88,8 @@ export class ChatService {
       presence: this.link.peer ? 'online' : 'offline',
       lastSeen: this.db.getSetting<number>('peerLastSeen') ?? null,
       appVersion: this.db.getSetting<string>('peerApp') ?? null,
-      catchingUp: !!this.db.getSetting<boolean>(AWAITING_SYNC)
+      catchingUp: !!this.db.getSetting<boolean>(AWAITING_SYNC),
+      canShare: this.link.peer?.features.includes('screen') ?? false
     }
   }
 

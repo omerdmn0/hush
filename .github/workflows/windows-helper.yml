@@ -1,0 +1,25 @@
+# Compiles the Windows screen-audio helper whenever it changes. It can't be compiled on Linux,
+# so this is the check that it builds at all. It does NOT test it: the runner has no real audio,
+# so the probe step is informational. Real testing needs a Windows PC (see README).
+name: Windows audio helper
+
+on:
+  push:
+    paths:
+      - native/windows/**
+      - .github/workflows/windows-helper.yml
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile
+        shell: cmd
+        run: native\windows\build.cmd
+      - name: Probe (informational)
+        continue-on-error: true
+        shell: pwsh
+        run: native\windows\out\hush-audio-capture.exe --exclude-pid $PID --probe

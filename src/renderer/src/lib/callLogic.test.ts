@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { callLogText, candidateAllowed, endedText, formatDuration, outcomeFor, yieldToIncoming } from './callLogic'
+import { callLogText, candidateAllowed, endedText, formatDuration, offersScreen, outcomeFor, withStereoScreenAudio, yieldToIncoming } from './callLogic'
 
 const cand = (addr: string, type = 'host'): string => `candidate:842163049 1 udp 1677729535 ${addr} 50404 typ ${type} generation 0`
 
@@ -60,5 +60,24 @@ describe('call history', () => {
     expect(callLogText({ ...base, direction: 'in', outcome: 'missed', connectedAt: null }, 'Mira')).toBe('Missed call from Mira')
     expect(callLogText({ ...base, outcome: 'declined', connectedAt: null }, 'Mira')).toBe('Mira declined your call')
     expect(callLogText({ ...base, outcome: 'no-answer', connectedAt: null }, 'Mira')).toBe("Mira didn't answer")
+  })
+})
+
+describe('screen audio in the SDP', () => {
+  const m = (kind: string, fmtp = ''): string => `m=${kind} 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n${fmtp}`
+  const sdp = 'v=0\r\n' + m('audio', 'a=fmtp:111 minptime=10;useinbandfec=1\r\n') + 'm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' + m('audio', 'a=fmtp:111 minptime=10;useinbandfec=1\r\n')
+
+  it('makes only the screen audio line stereo', () => {
+    const out = withStereoScreenAudio(sdp)
+    expect(out.match(/stereo=1;sprop-stereo=1;maxaveragebitrate=128000\r\n/g)).toHaveLength(1)
+    expect(out.split('m=audio')[1]).not.toContain('stereo=1') // the voice stays as it is
+    expect(out.split('m=audio')[2]).toContain('useinbandfec=1;stereo=1')
+  })
+
+  it('leaves calls without screen slots alone', () => {
+    const voice = 'v=0\r\n' + m('audio', 'a=fmtp:111 minptime=10\r\n')
+    expect(withStereoScreenAudio(voice)).toBe(voice)
+    expect(offersScreen(voice)).toBe(false)
+    expect(offersScreen(sdp)).toBe(true)
   })
 })

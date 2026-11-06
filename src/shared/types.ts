@@ -169,7 +169,47 @@ export interface PeerState {
    * messages can't collide with ones it already has from before the backup.
    */
   catchingUp: boolean
+  /** Their Hush can receive a shared screen (false while offline or on an older version). */
+  canShare: boolean
 }
+
+/** A screen or window that can be shared. */
+export interface ScreenSource {
+  id: string
+  name: string
+  /** Small preview (data: URL). */
+  thumb: string
+}
+
+/** An app that is playing sound right now (Linux; can be shared on its own). */
+export interface AudioApp {
+  key: string
+  name: string
+}
+
+/** How screen audio works on this computer. Work in progress — see README. */
+export type ScreenAudioSupport =
+  /** PipeWire: every app except Hush, or chosen apps. */
+  | { kind: 'linux'; apps: AudioApp[] }
+  /** Windows: everything except Hush, through the helper program. Not tested yet. */
+  | { kind: 'windows' }
+  | { kind: 'none'; reason: string }
+
+export interface ShareOptions {
+  /** null: the system asks which screen to share (Linux on Wayland). */
+  sources: ScreenSource[] | null
+  audio: ScreenAudioSupport
+}
+
+/** 'all' = everything except Hush; otherwise the `key` of an AudioApp. */
+export type ScreenAudioTarget = string
+
+export type ScreenAudioStarted =
+  /** Capture it as a microphone with this label. */
+  | { ok: true; deviceLabel: string }
+  /** Raw audio arrives through onScreenPcm (s16le, stereo, 48 kHz). */
+  | { ok: true; pcm: true }
+  | { ok: false; error: string }
 
 export interface NetState {
   /** This computer's Tailscale IPv4, or null when Tailscale isn't running. */
@@ -291,6 +331,15 @@ export interface HushApi {
   saveAttachment(id: string): Promise<{ saved: string } | { cancelled: true } | { error: string }>
   /** Shows a file Hush just saved in the file manager. */
   showInFolder(path: string): void
+  /** What can be shared, and how screen audio works on this computer. */
+  shareOptions(): Promise<ShareOptions>
+  /** The screen or window the next capture should use (null: the system asks). */
+  shareChoose(sourceId: string | null): Promise<void>
+  /** Starts capturing screen audio, without Hush's own sound. */
+  screenAudioStart(target: ScreenAudioTarget): Promise<ScreenAudioStarted>
+  screenAudioStop(): void
+  /** Raw screen audio (Windows). Returns an unsubscribe function. */
+  onScreenPcm(listener: (pcm: Uint8Array) => void): () => void
   /** Messages whose current text contains every word of the query, newest first (up to 50). */
   search(query: string): Promise<{ results: SearchResult[]; more: boolean }>
   /** Try downloading a failed image again. */
@@ -346,6 +395,11 @@ export const IPC = {
   react: 'hush:react',
   openLink: 'hush:open-link',
   search: 'hush:search',
+  shareOptions: 'hush:share-options',
+  shareChoose: 'hush:share-choose',
+  screenAudioStart: 'hush:screen-audio-start',
+  screenAudioStop: 'hush:screen-audio-stop',
+  screenPcm: 'hush:screen-pcm',
   sendFilePath: 'hush:send-file-path',
   sendFileBytes: 'hush:send-file-bytes',
   downloadFile: 'hush:download-file',

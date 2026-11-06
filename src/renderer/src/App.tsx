@@ -13,11 +13,14 @@ import { deliveredText, MessageList } from '@/components/chat/MessageList'
 import { Composer, type ComposerHandle, type ComposerMode } from '@/components/chat/Composer'
 import { DeleteDialog, type MessageActions } from '@/components/chat/MessageActions'
 import { SearchPanel } from '@/components/chat/SearchPanel'
+import { ScreenView } from '@/components/chat/ScreenView'
+import { ShareDialog } from '@/components/chat/ShareDialog'
 import { Lightbox } from '@/components/chat/Lightbox'
 import type { ImageActions } from '@/components/chat/MessageGroup'
 import { EmptyChat, FirstRun } from '@/components/chat/EmptyStates'
 import { SettingsScreen, type SectionId } from '@/components/settings/SettingsScreen'
 import { formatLastSeen } from '@/lib/format'
+import { captureScreen, type ShareChoice } from '@/lib/screenShare'
 import { isNewer } from '@/lib/version'
 import type { CallView } from '@/lib/call'
 import { useAudioDevices } from '@/lib/useAudioDevices'
@@ -103,8 +106,24 @@ export default function App(): ReactNode {
     peerOnline: peer?.presence === 'online',
     micId: snapshot?.settings.micId ?? '',
     speakerId: snapshot?.settings.speakerId ?? '',
-    devPairing: snapshot?.devPairing ?? false
+    devPairing: snapshot?.devPairing ?? false,
+    peerCanShare: snapshot?.peer.canShare ?? false
   })
+  const [shareOpen, setShareOpen] = useState(false)
+  const [shareNotice, setShareNotice] = useState<string | null>(null)
+  const startShare = (choice: ShareChoice): void => {
+    setShareOpen(false)
+    setShareNotice(null)
+    captureScreen(choice)
+      .then(async (capture) => {
+        await call.startShare(capture)
+        if (capture.audioError) setShareNotice(`Sharing without sound: ${capture.audioError}`)
+      })
+      .catch((e: unknown) => {
+        // Pressing Cancel in the system's prompt isn't an error.
+        if ((e as Error).name !== 'NotAllowedError') setShareNotice("Couldn't share your screen.")
+      })
+  }
   const { mics } = useAudioDevices()
   const callAction: CallAction = {
     enabled: peer?.presence === 'online' && !call.busy,
@@ -289,7 +308,13 @@ export default function App(): ReactNode {
                 }}
                 onToggleMute={() => call.toggleMute()}
                 onHangUp={() => call.hangUp()}
+                onShare={() => setShareOpen(true)}
+                onStopShare={() => (setShareNotice(null), void call.stopShare())}
+                shareNotice={shareNotice}
               />
+            )}
+            {peer && callView.peerSharing && call.remoteScreen && (
+              <ScreenView stream={call.remoteScreen} peerName={peer.name} audio={callView.peerSharing.audio} speakerId={snapshot.settings.speakerId} />
             )}
             {!peer ? (
               <FirstRun ownIp={snapshot.net.ownIp} onOpenSettings={openConnection} />
@@ -350,6 +375,7 @@ export default function App(): ReactNode {
           </main>
         </>
       )}
+      <ShareDialog open={shareOpen} peerName={peer?.name ?? 'Peer'} onClose={() => setShareOpen(false)} onStart={startShare} />
       <DeleteDialog message={deleting} peerName={peer?.name ?? 'Peer'} onClose={() => setDeleting(null)} />
       <QuitDialog open={quitOpen} onOpenChange={setQuitOpen} inCall={call.busy} peerName={peer?.name ?? 'Peer'} />
       <IncomingCall

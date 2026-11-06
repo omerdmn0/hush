@@ -34,7 +34,7 @@ export const PROTOCOL_VERSION = 6
 /** Oldest protocol this app still talks to. */
 export const MIN_PROTOCOL = 6
 /** Features this app supports (announced in hello). */
-export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover', 'replies', 'files'] as const
+export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover', 'replies', 'files', 'screen'] as const
 /** Message kinds that act on another message (they carry `ref`). */
 export const EVENT_KINDS = ['edit', 'delete', 'react'] as const
 /** Event payload: an edit carries a whole message's text. */
@@ -137,6 +137,8 @@ export type Frame =
   | { t: 'call-answer'; id: string; sdp: string }
   | { t: 'call-ice'; id: string; candidate: string; mid: string | null; line: number | null }
   | { t: 'call-end'; id: string; reason: CallEndReason }
+  /** Screen sharing started or stopped; `audio` says whether screen audio comes with it. */
+  | { t: 'call-share'; id: string; on: boolean; audio: boolean }
   /** Sender's profile picture as base64 PNG/JPEG/WebP, or null when removed. */
   | { t: 'avatar'; data: string | null }
   /** Sent once per connection by both sides; see the sync model above. */
@@ -259,6 +261,7 @@ function lowercaseIds(f: Frame): Frame {
     case 'call-answer':
     case 'call-ice':
     case 'call-end':
+    case 'call-share':
       return { ...f, id: lc(f.id) }
     default:
       return f
@@ -385,6 +388,8 @@ function parseRaw(raw: string): Frame | null {
       return isUuid(f.author) && isSeq(f.upTo, 0) ? { t: 'read', author: f.author, upTo: f.upTo } : null
     case 'typing':
       return typeof f.on === 'boolean' ? { t: 'typing', on: f.on } : null
+    case 'call-share':
+      return isUuid(f.id) && typeof f.on === 'boolean' && typeof f.audio === 'boolean' ? { t: 'call-share', id: f.id, on: f.on, audio: f.audio } : null
     case 'recover-req':
       return { t: 'recover-req' }
     case 'recover':
@@ -438,6 +443,6 @@ export function sniffImage(bytes: Uint8Array): ImageMime | null {
   return null
 }
 
-export type CallSignal = Extract<Frame, { t: 'call' | 'call-ringing' | 'call-answer' | 'call-ice' | 'call-end' }>
+export type CallSignal = Extract<Frame, { t: 'call' | 'call-ringing' | 'call-answer' | 'call-ice' | 'call-end' | 'call-share' }>
 
 export const isCallSignal = (f: Frame): f is CallSignal => f.t === 'call' || f.t.startsWith('call-')

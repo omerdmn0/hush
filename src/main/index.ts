@@ -1,8 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session, shell } from 'electron'
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session, shell } from 'electron'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import { mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import icon from '../../resources/icon.png?asset'
 import trayIcon from '../../resources/tray.png?asset'
 import trayUnreadIcon from '../../resources/tray-unread.png?asset'
@@ -10,7 +11,7 @@ import badgeIcon from '../../resources/badge.png?asset'
 import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame, sniffImage } from '../shared/protocol'
 import { isRiskyFile } from '../shared/files'
 import { isTailscaleIp } from '../shared/ip'
-import { IPC, type AutoBackup, type BackupResult, type CallRecord, type HistoryCursor, type HushEvent, type LockInfo, type NetState, type OutgoingImage, type PrivacyState, type Settings } from '../shared/types'
+import { IPC, type AutoBackup, type BackupResult, type CallRecord, type HistoryCursor, type HushEvent, type LockInfo, type NetState, type OutgoingImage, type PrivacyState, type ScreenAudioStarted, type ScreenAudioSupport, type Settings, type ShareOptions } from '../shared/types'
 import { applyStartAtLogin, HIDDEN_FLAG } from './autostart'
 import { Avatars } from './avatars'
 import {
@@ -35,6 +36,8 @@ import { PeerLink } from './link'
 import { Notifier } from './notifier'
 import { titleWithUnread } from './notifyLogic'
 import { findTailscaleIp } from './tailscale'
+import { LinuxScreenAudio, SOURCE_LABEL, type Run } from './screenAudioLinux'
+import { WindowsScreenAudio, type HelperCommand } from './screenAudioWindows'
 import { HushTray } from './tray'
 import { fieldCipher } from './vault'
 
@@ -46,6 +49,7 @@ import { fieldCipher } from './vault'
 //   HUSH_PEER       peer address that bypasses the Tailscale-range check
 //   HUSH_PORT       listen port      HUSH_PEER_PORT  port to dial
 //   HUSH_FAKE_MEDIA fake microphone for testing calls
+//   HUSH_SCREEN_AUDIO_HELPER  a .js stand-in for the Windows audio helper, to test that path on Linux
 // ---------------------------------------------------------------------------
 const dev = !app.isPackaged
 const env = (k: string): string | undefined => (dev ? process.env[k] || undefined : undefined)
@@ -835,6 +839,79 @@ if (!app.requestSingleInstanceLock()) {
       return null
     })
 
+    // ---------- screen sharing ----------
+
+    // Which screen or window the next getDisplayMedia() gets (chosen in Hush's own dialog).
+    let chosenSource: string | null = null
+    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+      desktopCapturer
+        .getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
+        .then((sources) => {
+          // On Wayland the system's own prompt has already narrowed this down to the choice.
+          const source = chosenSource === null ? sources[0] : sources.find((s) => s.id === chosenSource)
+          callback(source ? { video: source } : {})
+        })
+        .catch(() => callback({}))
+    })
+
+    const fakeHelper = env('HUSH_SCREEN_AUDIO_HELPER')
+    const helperPath = process.platform === 'win32' ? join(process.resourcesPath, 'hush-audio-capture.exe') : null
+    const helperCommand = (pid: number): HelperCommand =>
+      fakeHelper
+        ? { file: process.execPath, args: [fakeHelper, String(pid)], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }
+        : { file: helperPath!, args: ['--exclude-pid', String(pid)] }
+    const windowsAudio = fakeHelper || helperPath ? new WindowsScreenAudio(helperCommand, (pcm) => mainWindow?.webContents.send(IPC.screenPcm, pcm)) : null
+    // AppImage's library path would break the system's own tools.
+    const run: Run = (cmd, args) =>
+      new Promise((resolve, reject) =>
+        execFile(cmd, args, { maxBuffer: 64 * 1024 * 1024, timeout: 5000, env: { ...process.env, LD_LIBRARY_PATH: undefined } }, (e, out) => (e ? reject(e) : resolve(out)))
+      )
+    const linuxAudio = process.platform === 'linux' && !fakeHelper ? new LinuxScreenAudio(run, () => new Set(app.getAppMetrics().map((m) => m.pid))) : null
+    void linuxAudio?.removeLeftovers().catch(() => {}) // from a crash during an earlier share
+
+    const screenAudioSupport = async (): Promise<ScreenAudioSupport> => {
+      if (windowsAudio) {
+        return fakeHelper || existsSync(helperPath!) ? { kind: 'windows' } : { kind: 'none', reason: 'The audio helper is missing from this build.' }
+      }
+      if (!linuxAudio) return { kind: 'none', reason: 'Not available on this system.' }
+      const problem = await linuxAudio.problem()
+      return problem ? { kind: 'none', reason: problem } : { kind: 'linux', apps: await linuxAudio.apps().catch(() => []) }
+    }
+
+    ipcMain.handle(IPC.shareOptions, async (): Promise<ShareOptions> => {
+      // On Wayland apps can't list screens; the system shows its own prompt instead.
+      const wayland = process.platform === 'linux' && !!process.env.WAYLAND_DISPLAY
+      const sources = wayland ? null : await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 320, height: 180 } })
+      return {
+        sources: sources?.map((s) => ({ id: s.id, name: s.name, thumb: s.thumbnail.toDataURL() })) ?? null,
+        audio: await screenAudioSupport()
+      }
+    })
+
+    ipcMain.handle(IPC.shareChoose, (_e, id: unknown) => {
+      chosenSource = typeof id === 'string' ? id : null
+    })
+
+    ipcMain.handle(IPC.screenAudioStart, async (_e, target: unknown): Promise<ScreenAudioStarted> => {
+      if (typeof target !== 'string' || target.length > 200) return { ok: false, error: 'Invalid choice' }
+      try {
+        if (windowsAudio) {
+          await windowsAudio.start(process.pid)
+          return { ok: true, pcm: true }
+        }
+        if (!linuxAudio) return { ok: false, error: 'Not available on this system.' }
+        await linuxAudio.start(target)
+        return { ok: true, deviceLabel: SOURCE_LABEL }
+      } catch (e) {
+        return { ok: false, error: (e as Error).message }
+      }
+    })
+
+    ipcMain.on(IPC.screenAudioStop, () => {
+      windowsAudio?.stop()
+      void linuxAudio?.stop()
+    })
+
     // ---------- start ----------
 
     protocol.handle('hush-img', (req) => {
@@ -870,6 +947,8 @@ if (!app.requestSingleInstanceLock()) {
         clearInterval(ipPoll)
         clearInterval(backupTimer)
         clearTimeout(firstBackupCheck)
+        windowsAudio?.stop()
+        await linuxAudio?.stop()
         for (const id of calls.openCalls()) await link.send({ t: 'call-end', id, reason: 'hangup' })
         await link.stop()
       },
@@ -896,8 +975,9 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     if (app.isPackaged) Menu.setApplicationMenu(null)
 
-    // Microphone (calls), notifications and clipboard writes are the only permissions Hush needs.
-    const allowed = new Set(['media', 'notifications', 'clipboard-sanitized-write'])
+    // Microphone and screen (calls), notifications, clipboard writes and fullscreen (a shared
+    // screen) are the only permissions Hush needs.
+    const allowed = new Set(['media', 'display-capture', 'notifications', 'clipboard-sanitized-write', 'fullscreen'])
     session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(allowed.has(permission)))
 
     const restored = applyStagedRestore(userData) // a restore chosen last time is swapped in before anything opens

@@ -141,6 +141,11 @@ can bring your history back.
   press ■ to send or *Cancel* (Esc). They play right in the chat.
 - **Voice calls:** the phone button in the sidebar or header. Mute, switch microphone and hang up
   from the call bar. Missed calls appear in the chat with a **Call back** button.
+- **Screen sharing (during a call):** the 🖥 button in the call bar. Pick a screen or window (on
+  Wayland your system asks instead); the other person sees it above the chat and can make it full
+  screen. Your picture only, never a webcam. Either of you can share.
+- **Screen audio — ⚠️ work in progress.** Off by default; see
+  [*Screen audio*](#screen-audio-work-in-progress) below. If it fails, the picture still goes out.
 - **Closing the window keeps Hush running in the tray**, so messages and calls still reach you.
   To quit completely, use the **power button** next to Settings, **Ctrl+Q**, or the tray menu's
   *Quit Hush*. Starting Hush again brings the window back (that's also how you reopen it on Linux
@@ -167,6 +172,20 @@ can bring your history back.
 
 ---
 
+## Screen audio (work in progress)
+
+Sends what your computer is playing along with the shared screen, without the call itself, so the
+other person doesn't hear their own voice back. It has its own volume slider on their side.
+
+| Sharing from | How | State |
+|---|---|---|
+| **Linux** (PipeWire) | Hush adds a temporary virtual device (`Hush-screen-audio`) and links apps into it. You keep hearing them as normal. Choose *Everything except Hush* or one app that's playing. | Sound path tested on one Linux machine. Not yet tested between two real computers, or with real screen capture on Wayland. |
+| **Windows** | A small helper program (`hush-audio-capture.exe`) asks Windows for everything except Hush. | **Untested.** It compiles, and everything around it was tested with a stand-in, but the helper has never run on a real Windows PC. Needs a recent Windows 10 or 11. May simply not work. |
+
+Linux with plain PulseAudio instead of PipeWire can't use it; the screen is shared without sound.
+
+---
+
 ## Troubleshooting
 
 | What you see | What to do |
@@ -183,6 +202,8 @@ can bring your history back.
 | **Call says “Couldn't connect audio”** | Both need Tailscale connected (calls only use Tailscale addresses). Check Windows Firewall allowed Hush. Try again after `tailscale ping` works. |
 | **“Can't use your microphone”** | Check the microphone is plugged in and allowed for apps (Windows: Settings → Privacy → Microphone). Pick it in Settings → Audio and use *Test microphone*. |
 | **Image stuck on “Couldn't download”** | The sender's copy may be missing; press **Retry** while you're both online. |
+| **“Sharing without sound: …”** | Screen audio didn't start (see the reason). The picture is still going out. It's a work in progress, so please note what it said. |
+| **Share screen does nothing on Linux (Wayland)** | Your desktop's screen-share portal must be running (`xdg-desktop-portal` plus the one for your desktop, e.g. `xdg-desktop-portal-hyprland`). |
 | **No tray icon on Linux** | Your desktop has no tray (e.g. GNOME). Install the *AppIndicator* extension, or just start Hush again to bring the window back. |
 
 ---
@@ -275,6 +296,9 @@ These development overrides are ignored in installed builds.
   On Linux, Hush passes `--password-store=gnome-libsecret` outside KDE (Electron otherwise uses a
   fixed key on desktops it doesn't recognise), and only trusts output marked `v11` (keyring-held
   key): `basic_text`, or `v10` data from an unreachable keyring, count as no keychain.
+- Screen sharing: the call's offer includes a video and a second audio slot from the start (only if
+  the peer advertises `screen`), switched on later with `replaceTrack`, so there's no mid-call
+  renegotiation. `call-share` tells the other side. The second audio slot is stereo Opus.
 - Recovery: an app that sees its peer return under a new device id remembers the old one. The new
   install asks for it (`recover-req`), adopts it, and the normal sync sends back the peer's own
   messages too (whenever a `sync` shows the peer holds fewer of its own messages than we do).

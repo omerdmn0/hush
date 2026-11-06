@@ -7,6 +7,7 @@ interface Options {
   micId: string
   speakerId: string
   devPairing: boolean
+  peerCanShare: boolean
 }
 
 /** One CallController for the app, fed with signaling events and current settings. */
@@ -21,7 +22,8 @@ export function useCall(opts: Options): { view: CallView; call: CallController }
         micId: () => latest.current.micId,
         speakerId: () => latest.current.speakerId,
         anyNetwork: () => latest.current.devPairing,
-        logCall: (record) => window.hush.logCall(record)
+        logCall: (record) => window.hush.logCall(record),
+        peerCanShare: () => latest.current.peerCanShare
       })
   )
   const view = useSyncExternalStore(

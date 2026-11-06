@@ -58,6 +58,13 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npx electron-vite build
+
+      # Screen audio helper (work in progress), packaged via electron-builder.yml.
+      - name: Build Windows audio helper
+        if: matrix.name == 'Windows'
+        shell: cmd
+        run: native\windows\build.cmd
+
       - run: npx electron-builder ${{ matrix.target }} --publish never
 
       - uses: actions/upload-artifact@v7

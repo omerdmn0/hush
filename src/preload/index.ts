@@ -14,6 +14,15 @@ const api: HushApi = {
   react: (id, emoji, on) => ipcRenderer.invoke(IPC.react, id, emoji, on),
   openLink: (url) => ipcRenderer.send(IPC.openLink, url),
   search: (query) => ipcRenderer.invoke(IPC.search, query),
+  shareOptions: () => ipcRenderer.invoke(IPC.shareOptions),
+  shareChoose: (sourceId) => ipcRenderer.invoke(IPC.shareChoose, sourceId),
+  screenAudioStart: (target) => ipcRenderer.invoke(IPC.screenAudioStart, target),
+  screenAudioStop: () => ipcRenderer.send(IPC.screenAudioStop),
+  onScreenPcm: (listener) => {
+    const handler = (_e: IpcRendererEvent, pcm: Uint8Array): void => listener(pcm)
+    ipcRenderer.on(IPC.screenPcm, handler)
+    return () => ipcRenderer.removeListener(IPC.screenPcm, handler)
+  },
   // The page never handles file paths: only a File the user picked or dropped can be sent, and
   // its path is looked up here. Pasted data has no path and is sent from memory instead.
   sendFile: async (file, caption, replyTo) => {

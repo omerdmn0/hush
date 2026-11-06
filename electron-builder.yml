@@ -36,6 +36,11 @@ win:
     - target: nsis
       arch: [x64]
   icon: build/icon.ico
+  # Screen audio helper (work in progress), compiled by release.yml. It can't run from inside
+  # the app archive, so it sits next to it in resources/.
+  extraResources:
+    - from: native/windows/out/hush-audio-capture.exe
+      to: hush-audio-capture.exe
 
 nsis:
   # Per-user install: no administrator rights needed.

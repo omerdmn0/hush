@@ -59,6 +59,22 @@ export function endedText(reason: CallEndReason | 'offline' | 'mic' | 'lost', by
 }
 
 /** 00:12:43 */
+/**
+ * Lets the third m-line of a call (screen audio) carry stereo music rather than mono speech.
+ * Applied to the SDP received from the other app: it tells our encoder what they accept.
+ */
+export function withStereoScreenAudio(sdp: string): string {
+  const sections = sdp.split(/(?=^m=)/m)
+  const screenAudio = sections[3]
+  const pt = screenAudio?.match(/a=rtpmap:(\d+) opus\/48000/i)?.[1]
+  if (!pt) return sdp
+  sections[3] = screenAudio.replace(new RegExp(`^(a=fmtp:${pt} .*?)(\\r?)$`, 'm'), '$1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000$2')
+  return sections.join('')
+}
+
+/** The offer has the screen video and screen audio lines (the caller's Hush can share). */
+export const offersScreen = (sdp: string): boolean => (sdp.match(/^m=/gm)?.length ?? 0) >= 3
+
 export function formatDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
   return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map((n) => String(n).padStart(2, '0')).join(':')

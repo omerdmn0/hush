@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { LoaderCircle, Mic, MicOff, PhoneOff } from 'lucide-react'
+import { LoaderCircle, Mic, MicOff, MonitorOff, MonitorUp, PhoneOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import type { CallView } from '@/lib/call'
@@ -17,7 +17,10 @@ export function CallBar({
   micId,
   onMicChange,
   onToggleMute,
-  onHangUp
+  onHangUp,
+  onShare,
+  onStopShare,
+  shareNotice
 }: {
   view: CallView
   peerName: string
@@ -26,6 +29,10 @@ export function CallBar({
   onMicChange: (deviceId: string) => void
   onToggleMute: () => void
   onHangUp: () => void
+  onShare: () => void
+  onStopShare: () => void
+  /** Why a share has no sound, or failed. */
+  shareNotice: string | null
 }): ReactNode {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -101,6 +108,18 @@ export function CallBar({
             <Button variant="icon" size="icon" aria-pressed={view.muted} aria-label={view.muted ? 'Unmute microphone' : 'Mute microphone'} onClick={onToggleMute}>
               {view.muted ? <MicOff className="size-5" /> : <Mic className="size-5" />}
             </Button>
+            {view.sharing ? (
+              <Button variant="secondary" className="flex-none" onClick={onStopShare}>
+                <MonitorOff />
+                Stop sharing
+              </Button>
+            ) : (
+              view.canShare && (
+                <Button variant="icon" size="icon" aria-label="Share your screen" onClick={onShare}>
+                  <MonitorUp className="size-5" />
+                </Button>
+              )
+            )}
           </>
         )}
         {!ended && (
@@ -110,6 +129,11 @@ export function CallBar({
           </Button>
         )}
       </div>
+      {live && shareNotice && (
+        <p role="status" className="m-0 mt-1 px-1 text-xs text-queued">
+          {shareNotice}
+        </p>
+      )}
     </div>
   )
 }
