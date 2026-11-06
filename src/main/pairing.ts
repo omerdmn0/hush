@@ -91,7 +91,8 @@ export class PairingService extends EventEmitter<{ change: [PairingState] }> {
       this.error = `The code has ${CODE_LENGTH} characters.`
     } else {
       this.error = null
-      await this.link.sendPairing({ t: 'pair-proof', mac: pairingProof(code, this.peer.key, this.myKey) })
+      const sent = await this.link.sendPairing({ t: 'pair-proof', mac: pairingProof(code, this.peer.key, this.myKey) })
+      if (!sent) this.error = 'That didn’t reach the other app — try again.'
     }
     this.publish()
   }

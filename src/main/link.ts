@@ -350,7 +350,9 @@ export class PeerLink extends EventEmitter<LinkEvents> {
           return
         case 'pair-proof':
         case 'pair-result':
-          if (this.active === conn && !conn.authed) this.emit('pair-frame', frame, conn.peer)
+          // Any connection that said hello: a duplicate being closed can still carry a code that
+          // was already on its way. PairingService checks who it's from, and the code proves it.
+          if (!conn.authed) this.emit('pair-frame', frame, conn.peer)
           return
       }
       if (!conn.authed) return // nothing else before identity is proven

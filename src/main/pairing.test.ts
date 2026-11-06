@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
-import { Identity } from './identity'
+import { WebSocket } from 'ws'
+import { PROTOCOL_VERSION } from '../shared/protocol'
+import { Identity, normalizeCode, pairingProof } from './identity'
 import { PeerLink } from './link'
 import { CODE_TTL_MS, MAX_ATTEMPTS, PairingService } from './pairing'
 import { freePort } from './testPorts'
@@ -94,5 +96,35 @@ describe('PairingService', () => {
     await b.pairing.submitCode(code)
     await until(() => (b.pairing.state().error ?? '').startsWith('Wrong code'))
     expect(a.pairing.state().theyEnteredMyCode).toBe(false)
+  })
+
+  it('accepts a code sent on the duplicate connection that is being dropped', async () => {
+    // Both apps dial each other, so for a moment there are two connections while they agree on
+    // one. A code sent in that moment used to be dropped silently, and Verify did nothing.
+    const [port, unused] = [await freePort(), await freePort()]
+    const a = app('Alice', port, unused)
+    a.link.start()
+    await until(() => a.link.isListening)
+    const peer = new Identity(Identity.generate())
+    const id = randomUUID()
+    const connect = async (): Promise<WebSocket> => {
+      const ws = new WebSocket(`ws://${HOST}:${port}`)
+      ws.on('error', () => {})
+      cleanups.push(() => ws.terminate())
+      await new Promise((r) => ws.once('open', r))
+      ws.send(JSON.stringify({ t: 'hello', v: PROTOCOL_VERSION, id, name: 'Bob', app: '0.2.0', features: [], key: peer.publicKey, nonce: randomUUID(), pinned: '' }))
+      return ws
+    }
+    const first = await connect()
+    await until(() => a.pairing.state().code !== null)
+    first.pause() // doesn't see Alice closing it, like a frame already on its way
+    let switches = 0
+    a.link.on('pairing', () => switches++)
+    await connect() // Alice keeps this newer one and starts closing the first
+    await until(() => switches > 0)
+
+    const mac = pairingProof(normalizeCode(a.pairing.state().code!), a.identity.publicKey, peer.publicKey)
+    first.send(JSON.stringify({ t: 'pair-proof', mac }))
+    await until(() => a.pairing.state().theyEnteredMyCode, 1500)
   })
 })
