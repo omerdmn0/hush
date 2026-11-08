@@ -74,6 +74,12 @@ export function useHush(): HushState {
           setSnapshot((s) => s && { ...s, channels: e.channels })
           if (!e.channels.some((c) => c.id === channelRef.current)) void switchChannel(GENERAL_CHANNEL)
           break
+        case 'unread':
+          setSnapshot((s) => s && { ...s, unread: e.byChannel })
+          break
+        case 'open-channel':
+          void switchChannel(e.channel)
+          break
         case 'event': {
           // An edit, deletion or reaction: re-read that message and any loaded replies quoting it.
           const ids = [e.target, ...messagesRef.current.filter((m) => m.replyTo?.id === e.target).map((m) => m.id)]
@@ -154,6 +160,7 @@ export function useHush(): HushState {
         return [...page.messages, ...live.filter((m) => !ids.has(m.id))]
       })
       setHasMore(page.hasMore)
+      if (snap.openChannel) void switchChannel(snap.openChannel)
     })
     return () => {
       alive = false

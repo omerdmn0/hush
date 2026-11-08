@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { CallBar } from '@/components/chat/CallBar'
 import { IncomingCall } from '@/components/chat/IncomingCall'
 import { deliveredText, MessageList } from '@/components/chat/MessageList'
-import { Composer, type ComposerHandle, type ComposerMode } from '@/components/chat/Composer'
+import { Composer, pruneDrafts, type ComposerHandle, type ComposerMode } from '@/components/chat/Composer'
 import { DeleteDialog, type MessageActions } from '@/components/chat/MessageActions'
 import { SearchPanel } from '@/components/chat/SearchPanel'
 import { ScreenView } from '@/components/chat/ScreenView'
@@ -222,6 +222,10 @@ export default function App(): ReactNode {
     if (jumpRequest?.channel !== channel) setJumpRequest(null)
   }
   const canWrite = !!snapshot && snapshot.pairing.status === 'paired' && !snapshot.peer.catchingUp
+  const channelList = snapshot?.channels
+  useEffect(() => {
+    if (channelList) pruneDrafts(new Set(channelList.map((c) => c.id)))
+  }, [channelList])
   const messageActions: Omit<MessageActions, 'onJump' | 'highlightId'> = useMemo(
     () => ({
       onReply: (m) => setComposerMode({ kind: 'reply', message: m }),
@@ -296,6 +300,7 @@ export default function App(): ReactNode {
           <Sidebar
             peer={peer}
             channels={paired ? snapshot.channels : null}
+            unread={snapshot.unread}
             activeChannel={channel}
             onSelectChannel={(id) => void switchChannel(id)}
             onNewChannel={() => setNewChannelOpen(true)}

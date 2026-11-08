@@ -20,6 +20,11 @@ const MAX_ATTACHMENTS = 10
 /** What was being written in each channel, kept while it's not on screen. Never written to disk. */
 const drafts = new Map<string, string>()
 
+/** Forgets what was being written in channels that no longer exist. */
+export function pruneDrafts(live: Set<string>): void {
+  for (const channel of drafts.keys()) if (!live.has(channel)) drafts.delete(channel)
+}
+
 /** Writing a reply to a message, or editing one of your own. */
 export interface ComposerMode {
   kind: 'reply' | 'edit'

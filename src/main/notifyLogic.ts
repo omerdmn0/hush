@@ -34,12 +34,21 @@ function describe(m: IncomingSummary): string {
  * One notification for a burst of messages (e.g. several arriving after a sync).
  * Without `showText` it only says who wrote — nothing private appears on screen or lock screen.
  */
-export function messageNotification(peerName: string, burst: IncomingSummary[], showText: boolean): { title: string; body: string } {
+export function messageNotification(
+  peerName: string,
+  burst: IncomingSummary[],
+  showText: boolean,
+  channelName: (id: string) => string | undefined = () => undefined
+): { title: string; body: string } {
   if (!showText) {
     return { title: 'Hush', body: burst.length === 1 ? `New message from ${peerName}` : `${burst.length} new messages from ${peerName}` }
   }
-  if (burst.length === 1) return { title: peerName, body: describe(burst[0]) }
-  return { title: peerName, body: `${burst.length} new messages — ${describe(burst[burst.length - 1])}` }
+  // Named only when the whole burst is from one channel, and only with previews on.
+  const first = burst[0].channel
+  const name = first && burst.every((m) => m.channel === first) ? channelName(first) : undefined
+  const title = name ? `${peerName} · #${name}` : peerName
+  if (burst.length === 1) return { title, body: describe(burst[0]) }
+  return { title, body: `${burst.length} new messages — ${describe(burst[burst.length - 1])}` }
 }
 
 /** "Hush", "Hush (3)", capped at 99+. */

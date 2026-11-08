@@ -1,8 +1,9 @@
 import type { ReactNode, Ref } from 'react'
-import { Hash, Phone, Plus, Power, Settings, ShieldCheck } from 'lucide-react'
+import { Phone, Plus, Power, Settings, ShieldCheck } from 'lucide-react'
 import type { ChannelInfo } from '../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ChannelRow } from '@/components/ChannelRow'
 import { Avatar, HudLabel, Logo, StatusTag } from '@/components/common'
 import type { CallAction, PeerView } from '@/lib/view'
 import { cn } from '@/lib/utils'
@@ -13,6 +14,7 @@ const HIDE_WHEN_SHORT = '[@media(max-height:719px)]:hidden'
 export function Sidebar({
   peer,
   channels,
+  unread,
   activeChannel,
   onSelectChannel,
   onNewChannel,
@@ -29,6 +31,8 @@ export function Sidebar({
   peer: PeerView | null
   /** Null until paired: there's nothing to organise before then. */
   channels: ChannelInfo[] | null
+  /** Unread messages per channel id. */
+  unread: Record<string, number>
   activeChannel: string
   onSelectChannel: (id: string) => void
   onNewChannel: () => void
@@ -80,15 +84,7 @@ export function Sidebar({
           </div>
           <nav aria-label="Channels" className="mb-3 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3">
             {channels.map((c) => (
-              <button
-                key={c.id}
-                aria-current={c.id === activeChannel ? 'true' : undefined}
-                onClick={() => onSelectChannel(c.id)}
-                className="flex h-[34px] flex-none items-center gap-2 rounded-sm border-l-2 border-transparent px-3 text-left text-sm font-medium text-text-muted hover:bg-hover hover:text-text aria-[current=true]:border-cyan aria-[current=true]:bg-cyan-subtle aria-[current=true]:text-text"
-              >
-                <Hash aria-hidden="true" className="size-3.5 flex-none opacity-60" />
-                <span className="truncate">{c.name}</span>
-              </button>
+              <ChannelRow key={c.id} channel={c} active={c.id === activeChannel} unread={unread[c.id] ?? 0} canManage={!newChannelBlocked} onSelect={() => onSelectChannel(c.id)} />
             ))}
           </nav>
         </>

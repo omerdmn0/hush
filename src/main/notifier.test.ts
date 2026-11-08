@@ -19,6 +19,18 @@ describe('Notifier', () => {
     expect(peerName).not.toHaveBeenCalled()
   })
 
+  it('stays silent for a muted channel', () => {
+    vi.useFakeTimers()
+    const peerName = vi.fn(() => 'Mira')
+    const n = new Notifier({ enabled: () => true, preview: () => true, focused: () => false, peerName, icon: '', onClick: () => {}, muted: (c) => c === 'c1' })
+    n.message({ text: 'quiet', hasImage: false, channel: 'c1' })
+    vi.advanceTimersByTime(5000)
+    expect(peerName).not.toHaveBeenCalled()
+    n.message({ text: 'loud', hasImage: false })
+    vi.advanceTimersByTime(5000)
+    expect(peerName).toHaveBeenCalledTimes(1)
+  })
+
   it('forgets waiting messages from a channel that was just erased', () => {
     vi.useFakeTimers()
     const peerName = vi.fn(() => 'Mira')

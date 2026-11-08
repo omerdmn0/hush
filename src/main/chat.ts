@@ -42,6 +42,8 @@ const PREVIEW_TYPES = new Set<string>(['image/webp', 'image/jpeg', 'image/png'])
 
 /** Setting: a backup was restored and the peer hasn't synced with us since. */
 export const AWAITING_SYNC = 'awaitingSync'
+/** Setting: channel ids silenced on this computer. */
+const MUTED_CHANNELS = 'mutedChannels'
 /** The in-memory search text is dropped after this long without a search. */
 const SEARCH_IDLE_MS = 10 * 60_000
 
@@ -639,7 +641,30 @@ export class ChatService {
   }
 
   listChannels(): ChannelInfo[] {
-    return [{ id: GENERAL_CHANNEL, name: 'General' }, ...[...this.channelMap()].map(([id, name]) => ({ id, name }))]
+    const muted = this.mutedChannels()
+    return [[GENERAL_CHANNEL, 'General'] as const, ...this.channelMap()].map(([id, name]) => ({ id, name, ...(muted.has(id) ? { muted: true } : {}) }))
+  }
+
+  /** Mutes are this computer's own preference: the other person is never told. */
+  private mutedChannels(): Set<string> {
+    return new Set(this.db.getSetting<string[]>(MUTED_CHANNELS) ?? [])
+  }
+
+  isMuted(channel: string): boolean {
+    return this.mutedChannels().has(channel)
+  }
+
+  private storeMute(id: string, on: boolean): void {
+    const muted = this.mutedChannels()
+    if (on) muted.add(id)
+    else muted.delete(id)
+    this.db.setSetting(MUTED_CHANNELS, [...muted])
+  }
+
+  setChannelMuted(id: string, on: boolean): void {
+    if (id !== GENERAL_CHANNEL && !this.channelMap().has(id)) throw new Error('That channel is gone')
+    this.storeMute(id, on)
+    this.emit({ type: 'channels', channels: this.listChannels() })
   }
 
   private channelsChanged(erased?: string): void {
@@ -714,6 +739,7 @@ export class ChatService {
     if (!erased) return
     this.transfers.cancelMany(erased.files)
     for (const r of erased.rows) this.flushWatch.delete(r)
+    this.storeMute(id, false)
     this.db.checkpoint()
     this.channelsChanged(id)
   }

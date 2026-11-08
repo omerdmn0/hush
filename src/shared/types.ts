@@ -86,6 +86,8 @@ export interface ChatMessage {
 export interface ChannelInfo {
   id: string
   name: string
+  /** No desktop notifications from it on this computer; never told to the other person. */
+  muted?: boolean
 }
 
 export interface ChatFile {
@@ -285,6 +287,10 @@ export interface Snapshot {
   peer: PeerState
   /** General first, then the rest, oldest first. */
   channels: ChannelInfo[]
+  /** Unread messages per channel id; channels with none are left out. */
+  unread: Record<string, number>
+  /** A notification was clicked before this window was ready: open this channel. */
+  openChannel?: string
   net: NetState
   /**
    * Dev pairing mode (two copies over loopback): calls may use any network interface instead of
@@ -316,6 +322,10 @@ export type HushEvent =
   | { type: 'transfer'; transfer: ImageTransfer }
   /** The channel list changed; `erased` is a channel just deleted for good. */
   | { type: 'channels'; channels: ChannelInfo[]; erased?: string }
+  /** Unread messages per channel id; channels with none are left out. */
+  | { type: 'unread'; byChannel: Record<string, number> }
+  /** A notification was clicked: show this channel. */
+  | { type: 'open-channel'; channel: string }
   /** An edit/delete/reaction for message `target` arrived or was made (UI re-reads it). */
   | { type: 'event'; target: string }
   | { type: 'avatars'; avatars: AvatarUrls }
@@ -342,6 +352,10 @@ export interface HushApi {
   /** `replyTo`: the message this one answers. */
   sendMessage(text: string, replyTo?: string, channel?: string): Promise<ChatMessage>
   createChannel(name: string): Promise<ChannelInfo>
+  renameChannel(id: string, name: string): Promise<void>
+  /** Permanently erases the channel and everything in it, on both computers. */
+  deleteChannel(id: string): Promise<void>
+  setChannelMuted(id: string, muted: boolean): void
   sendImage(image: OutgoingImage, caption: string, replyTo?: string, channel?: string): Promise<ChatMessage>
   /** Current state of these messages (after an edit, deletion or reaction); missing = gone. */
   getMessages(ids: string[]): Promise<ChatMessage[]>
@@ -429,6 +443,9 @@ export const IPC = {
   listMessages: 'hush:list-messages',
   sendMessage: 'hush:send-message',
   createChannel: 'hush:create-channel',
+  renameChannel: 'hush:rename-channel',
+  deleteChannel: 'hush:delete-channel',
+  setChannelMuted: 'hush:set-channel-muted',
   getMessages: 'hush:get-messages',
   editMessage: 'hush:edit-message',
   deleteMessage: 'hush:delete-message',

@@ -1094,6 +1094,56 @@ describe('ChatService — channels', () => {
     expect(b.db.getMessage(img.id)?.image).toBeNull()
   })
 
+  it('renames on both computers, and the same name wins on both when both rename offline', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    await b.chat.renameChannel(c.id, 'Work')
+    await until(() => a.chat.listChannels()[1].name === 'Work')
+    await a.stop()
+    await b.stop()
+    await a.chat.renameChannel(c.id, 'From Alice')
+    await settle(5)
+    await b.chat.renameChannel(c.id, 'From Bob')
+    await reconnect(a, b)
+    await caughtUp(a, b)
+    await caughtUp(b, a)
+    expect(a.chat.listChannels()).toEqual(b.chat.listChannels())
+    expect(a.chat.listChannels()[1].name).toBe('From Bob')
+    await expect(a.chat.renameChannel('', 'General two')).rejects.toThrow('gone') // General is fixed
+    await expect(a.chat.deleteChannel('')).rejects.toThrow('gone')
+    await expect(a.chat.renameChannel(c.id, 'General')).rejects.toThrow('already')
+  })
+
+  it('keeps a mute on this computer only, and forgets it when the channel is deleted', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    const sent: Frame[] = []
+    const send = a.link.send.bind(a.link)
+    a.link.send = (f: Frame) => {
+      sent.push(f)
+      return send(f)
+    }
+    a.chat.setChannelMuted(c.id, true)
+    a.chat.setChannelMuted('', true)
+    expect(sent).toEqual([])
+    expect(a.chat.isMuted(c.id)).toBe(true)
+    expect(a.chat.listChannels().map((x) => x.muted)).toEqual([true, true])
+    expect(b.chat.listChannels().map((x) => x.muted)).toEqual([undefined, undefined])
+    a.chat.setChannelMuted('', false)
+    expect(a.chat.isMuted('')).toBe(false)
+    expect(() => a.chat.setChannelMuted(randomUUID(), true)).toThrow('gone')
+
+    const m = await b.chat.send('still counted', undefined, c.id)
+    await until(() => !!a.db.getMessage(m.id))
+    expect(a.chat.unread().byChannel[c.id]).toBe(1) // muted channels still count as unread
+
+    await a.chat.deleteChannel(c.id)
+    expect(a.chat.isMuted(c.id)).toBe(false)
+    expect(a.db.getSetting('mutedChannels')).toEqual([])
+  })
+
   it('applies a delete once, even when it is delivered again', async () => {
     const [a, b] = await linked()
     const c = await a.chat.createChannel('Business')

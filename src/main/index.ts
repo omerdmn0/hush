@@ -341,24 +341,45 @@ if (!app.requestSingleInstanceLock()) {
 
     // ---------- core services ----------
 
+    let pendingChannel: string | undefined
+    const takePendingChannel = (): string | undefined => {
+      const channel = pendingChannel
+      pendingChannel = undefined
+      return channel
+    }
     const notifier = new Notifier({
       enabled: () => settings.notifications,
       preview: () => settings.notificationPreview,
       focused: userIsLooking,
       peerName: () => chat.peerState().name ?? 'Peer',
       icon,
-      onClick: showWindow,
+      onClick: (channel) => {
+        showWindow()
+        if (channel === undefined || !chat.listChannels().some((c) => c.id === channel)) return // deleted since
+        // A window still loading hasn't got its listeners yet: it picks this up from the snapshot.
+        if (mainWindow && !mainWindow.webContents.isLoading()) mainWindow.webContents.send(IPC.event, { type: 'open-channel', channel } satisfies HushEvent)
+        else pendingChannel = channel
+      },
+      muted: (channel) => chat.isMuted(channel),
+      channelName: (id) => chat.listChannels().find((c) => c.id === id)?.name,
       log: devPairing ? (line) => console.log(line) : undefined
     })
 
     let unread = 0
+    let sentCounts = ''
     let unreadTimer: ReturnType<typeof setTimeout> | undefined
     const updateTray = (): void => {
       const p = chat.peerState()
       tray?.update({ peerName: settings.peerIp || devPairing ? p.name : null, online: p.presence === 'online', unread, notifications: settings.notifications })
     }
     const refreshUnread = (): void => {
-      const n = chat.unread().total
+      const { total: n, byChannel } = chat.unread()
+      // Before the check below: counts can move between channels with the total unchanged.
+      const counts = JSON.stringify(byChannel)
+      if (counts !== sentCounts) {
+        sentCounts = counts
+        mainWindow?.webContents.send(IPC.event, { type: 'unread', byChannel } satisfies HushEvent)
+      }
       if (n === unread) return
       unread = n
       mainWindow?.setTitle(titleWithUnread(n) + (profile ? ` · ${profile}` : ''))
@@ -531,6 +552,8 @@ if (!app.requestSingleInstanceLock()) {
       privacy: await privacyState(),
       peer: chat.peerState(),
       channels: chat.listChannels(),
+      unread: chat.unread().byChannel,
+      openChannel: takePendingChannel(),
       net: { ...net },
       avatars: avatars.urls(),
       windowActive: userIsLooking(),
@@ -592,6 +615,20 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.createChannel, (_e, name: unknown) => {
       if (typeof name !== 'string') throw new Error('Invalid name')
       return chat.createChannel(name)
+    })
+
+    ipcMain.handle(IPC.renameChannel, (_e, id: unknown, name: unknown) => {
+      if (typeof id !== 'string' || typeof name !== 'string') throw new Error('Invalid name')
+      return chat.renameChannel(id, name)
+    })
+
+    ipcMain.handle(IPC.deleteChannel, (_e, id: unknown) => {
+      if (typeof id !== 'string') throw new Error('Invalid channel')
+      return chat.deleteChannel(id)
+    })
+
+    ipcMain.on(IPC.setChannelMuted, (_e, id: unknown, muted: unknown) => {
+      if (typeof id === 'string' && typeof muted === 'boolean') chat.setChannelMuted(id, muted)
     })
 
     ipcMain.handle(IPC.getMessages, (_e, ids: unknown) => {

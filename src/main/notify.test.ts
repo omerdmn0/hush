@@ -32,6 +32,19 @@ describe('notification rules', () => {
     expect(body({ text: '', hasImage: false })).toBe('New message')
   })
 
+
+  it('names the channel only with previews on, and only for a burst from one channel', () => {
+    const names = (id: string): string | undefined => ({ c1: 'Business', c2: 'Planning' })[id]
+    const one = { text: 'hi', hasImage: false, channel: 'c1' }
+    expect(messageNotification('Mira', [one], true, names).title).toBe('Mira · #Business')
+    expect(messageNotification('Mira', [one, one], true, names).title).toBe('Mira · #Business')
+    expect(messageNotification('Mira', [one, { ...one, channel: 'c2' }], true, names).title).toBe('Mira')
+    expect(messageNotification('Mira', [one, { text: 'x', hasImage: false }], true, names).title).toBe('Mira')
+    expect(messageNotification('Mira', [{ text: 'general', hasImage: false }], true, names).title).toBe('Mira')
+    const hidden = messageNotification('Mira', [one], false, names)
+    expect(`${hidden.title} ${hidden.body}`).not.toContain('Business')
+  })
+
   it('hides message text when previews are off', () => {
     const one = messageNotification('Mira', [{ text: 'my secret', hasImage: false }], false)
     expect(one).toEqual({ title: 'Hush', body: 'New message from Mira' })
