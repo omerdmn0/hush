@@ -77,11 +77,11 @@ export function MessageList({
     if (opensAt) highlightTimer.current = setTimeout(() => setHighlightId(null), 1600)
     return () => clearTimeout(highlightTimer.current)
   }, [])
-  const jumpTo = useCallback((id: string) => {
+  const jumpTo = useCallback((id: string, behavior: 'smooth' | 'auto' = 'smooth') => {
     const index = itemsRef.current.findIndex((it) => it.kind === 'group' && it.messages.some((m) => m.id === id))
     if (index < 0) return
     stick.current = false
-    list.current?.scrollToIndex({ index, align: 'center', behavior: 'smooth' })
+    list.current?.scrollToIndex({ index, align: 'center', behavior })
     setHighlightId(id)
     clearTimeout(highlightTimer.current)
     highlightTimer.current = setTimeout(() => setHighlightId(null), 1600)
@@ -92,8 +92,9 @@ export function MessageList({
     if (!jumpRequest || jumpRequest.n === handledJump.current) return
     if (!items.some((it) => it.kind === 'group' && it.messages.some((m) => m.id === jumpRequest.id))) return // not loaded yet
     handledJump.current = jumpRequest.n
-    // Let Virtuoso take in newly loaded history before scrolling.
-    requestAnimationFrame(() => jumpTo(jumpRequest.id))
+    // Let Virtuoso take in newly loaded history before scrolling. Not a smooth scroll: across
+    // rows it hasn't measured, that stops short or gets pulled back to the bottom.
+    requestAnimationFrame(() => jumpTo(jumpRequest.id, 'auto'))
   }, [jumpRequest, items, jumpTo])
 
   // Virtuoso keeps the scroll position on prepend when firstItemIndex drops by exactly the
