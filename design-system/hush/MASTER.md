@@ -163,6 +163,9 @@ All bundled locally with `@fontsource-variable/*` — **no runtime requests to G
 ### Sidebar
 - Wordmark `HUSH` + `P2P // PRIVATE` tag.
 - `// LINK` peer panel: bracketed avatar, name, status tag `[■ ONLINE]` / `[□ OFFLINE] last seen 13:11`, `NODE 100.x.x.x`, CALL button.
+- `// CHANNELS` list (`+` to add), between the peer panel and the footer; it takes the free height and scrolls. Under 720px window height the peer panel drops its avatar and the `NODE` / `LAST SEEN` lines to make room.
+- Channel row: 34px, `#` icon, name in Exo 2 (user text, never Orbitron), selected = cyan left edge + `--cyan-subtle` as in Settings nav. Right side shows the mute icon and unread count (`--cyan` fill; `--pressed` when muted), replaced by the `⋯` menu on hover or keyboard focus. The row's accessible name carries the count and muted state, so colour is never the only cue.
+- Deleting a channel uses the destructive dialog recipe: Cancel focused, hazard stripes on the confirm button only, and it says backups still contain the channel.
 - Footer note: shield icon + `Direct via Tailscale · no servers`.
 - Self row: avatar, name, `YOU`, settings button.
 

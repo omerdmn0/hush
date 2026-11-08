@@ -117,6 +117,18 @@ can bring your history back.
 - **Offline?** Write anyway — messages are queued (amber clock, *“Waiting for … to come online”*)
   and delivered automatically the next time you're both online. History syncs both ways, with
   nothing lost or duplicated.
+- **Channels:** separate text conversations between the two of you, listed in the sidebar, for
+  example one for chatting and one for business. Press **+** to make one; it appears on both
+  computers (both need a version of Hush with channels). Hover a channel or right-click it to
+  **Mute**, **Rename** or **Delete** it, and either of you can do this. **General** holds your
+  existing history and can't be renamed or deleted. Switching channels keeps what you've typed, but
+  attached files and a voice note in progress are discarded, so nothing goes to the wrong place.
+  Calls show up in General.
+- **Deleting a channel** permanently erases its messages, pictures and files on both computers. It
+  can't be undone. Backup files you've already made still contain it, and restoring one brings it
+  back until the two computers next sync.
+- **Muting a channel** silences its notifications on your computer only. It still shows its unread
+  count, and the other person isn't told.
 - **Message actions:** hover a message (or right-click it) for the toolbar — six quick reactions
   plus the full emoji picker (several each, click a reaction under the message to remove yours),
   **Reply**, and ⋯ for **Copy**, **Edit** and **Delete**. Press **↑** in an empty message box to
@@ -126,7 +138,7 @@ can bring your history back.
   your computer only. Neither can be undone.
 - **Links** (http/https) open in your browser. A **New messages** line marks what arrived while you
   were away, and **Jump to latest** appears when you've scrolled up (with a count of new ones).
-- **Search:** the 🔍 button or **Ctrl+F**. Finds messages containing all the words you type,
+- **Search:** the 🔍 button or **Ctrl+F**. Searches every channel. Finds messages containing all the words you type,
   ignoring capitals and accents (“seker” finds “Şeker”); click a result to jump there. Because
   your history is encrypted on disk, search works in memory only — nothing searchable is saved.
 - **Pictures and files:** drag them onto the chat, paste them (Ctrl+V), or use the 📎 button.
@@ -149,7 +161,8 @@ can bring your history back.
   *Quit Hush*. Starting Hush again brings the window back (that's also how you reopen it on Linux
   desktops without a tray, such as GNOME without the AppIndicator extension).
 - **Notifications** appear for messages and calls while Hush isn't focused. By default they only
-  say *“New message from …”*; Settings → Notifications can show the text, or turn them off.
+  say *“New message from …”*; Settings → Notifications can show the text (and which channel it's
+  in), or turn them off. Clicking one opens that channel.
 - **Settings → Audio** picks your microphone and speaker, with a microphone test.
 - **Starts with your computer:** the installed app starts quietly in the tray when you log in, so
   messages and calls reach you after a restart (Settings → Startup to turn it off). With an app
@@ -164,6 +177,7 @@ can bring your history back.
 - **Restore:** replaces everything on this computer with a backup and restarts. You stay paired.
   Anything newer than the backup comes back from the other computer the next time you're both
   online — until then, writing waits (*“Backup restored — you can write once … is online”*).
+  Update Hush before restoring: an older version can't open a backup made by a newer one.
 - **Recover history from …:** reinstalled without a backup? After pairing again, the other
   computer still has your whole conversation. *Recover* takes it back — including your own
   messages and pictures — and restarts. Only offered before you write anything on the new install.
@@ -227,9 +241,10 @@ Linux with plain PulseAudio instead of PipeWire can't use it; the screen is shar
   - Windows: `%APPDATA%\Hush` — Linux: `~/.config/Hush`
   - `hush.db` (messages, call history, settings), `images/` (pictures), `avatar-*.img`,
     `vault.json` (the encryption key, itself locked by the keychain or your app password)
-- **Encrypted on disk (AES-256-GCM):** message text, edits and reactions, every picture and
-  preview, profile pictures, and Hush's identity key. *Not* encrypted: when messages were sent,
-  names, settings and call history (times and durations) — the "who and when", not the "what".
+- **Encrypted on disk (AES-256-GCM):** message text, edits and reactions, channel names, every
+  picture and preview, profile pictures, and Hush's identity key. *Not* encrypted: when messages
+  were sent, which messages share a channel (a random ID, never its name), your display names,
+  settings and call history (times and durations) — the "who and when", not the "what".
 - **After an update that changes the database format,** Hush keeps `hush.db.before-upgrade` for a
   week in case something went wrong, then deletes it. It's encrypted the same way as `hush.db`.
 - **Backups** are encrypted with their own password (scrypt + AES-256-GCM).
@@ -293,6 +308,11 @@ These development overrides are ignored in installed builds.
   produce it). Every connection then proves the pinned key by signing the other side's nonce.
 - Edits, deletions and reactions are events in the same per-author sequence as messages, so the
   offline queue and sync carry them too.
+- Channels are a label on that one sequence (`channel`, a random UUID; absent means General), and
+  sync is never split by channel. Creating, renaming and deleting are synced rows too, with the name
+  sealed in `data`. Deleting wipes the channel's rows but keeps them, so sequence numbers stay
+  gap-free. Read receipts are per channel. Channels stay off until the peer advertises `channels`,
+  because an older app would drop the label and lose the message's place for good.
 - Messages are JSON frames identified by UUID and numbered per author (1, 2, 3…). On every
   connection both apps exchange one `sync` frame (“I have your messages up to N and have read up
   to R”) and send whatever the other is missing — that's the offline queue and history sync.
