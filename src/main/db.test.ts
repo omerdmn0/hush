@@ -151,6 +151,34 @@ describe('migration from stage b (v1)', () => {
   })
 })
 
+describe('query plans', () => {
+  const planFor = (sql: string, ...args: unknown[]): string => {
+    const raw = new Database(join(dir, 'hush.db'), { readonly: true })
+    const plan = raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as { detail: string }[]
+    raw.close()
+    return plan.map((p) => p.detail).join(' | ')
+  }
+
+  it('finds the next sequence number from the index', () => {
+    expect(planFor('SELECT COALESCE(MAX(seq), 0) FROM messages WHERE author_id = ? AND seq IS NOT NULL', ME)).toContain('messages_by_author_seq')
+  })
+
+  it('counts unread messages without scanning the history', () => {
+    expect(planFor(`SELECT COUNT(*) FROM messages WHERE author_id <> ? AND status <> 'read' AND ref IS NULL AND hidden = 0`, ME)).toContain('messages_not_read')
+  })
+
+  it('applies read receipts without scanning the history', () => {
+    expect(planFor(`UPDATE messages SET status = 'read' WHERE author_id = ? AND seq IS NOT NULL AND seq <= ? AND status <> 'read'`, ME, 5)).toContain('messages_not_read')
+  })
+
+  it('only changes messages that can still advance', () => {
+    const mine = [make(ME, 1, 1, 'read'), make(ME, 2, 2, 'delivered'), make(ME, 3, 3, 'sent')]
+    mine.forEach((m) => db.insertMessage(m))
+    expect(db.advanceUpTo(ME, 2, 'read')).toEqual([mine[1].id])
+    expect(db.getMessage(mine[2].id)?.status).toBe('sent')
+  })
+})
+
 describe('upgrade safety', () => {
   function oldDatabase(file: string): void {
     const raw = new Database(file)

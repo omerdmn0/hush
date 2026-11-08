@@ -25,7 +25,7 @@ export class PairingService extends EventEmitter<{ change: [PairingState] }> {
   private iEnteredTheirCode = false
   private mismatch: LinkPeer | null = null
   private error: string | null = null
-  private expiryTimer: ReturnType<typeof setInterval>
+  private expiryTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     private readonly link: PeerLink,
@@ -52,18 +52,10 @@ export class PairingService extends EventEmitter<{ change: [PairingState] }> {
       this.publish()
     })
     link.on('pair-frame', (frame, peer) => void this.onFrame(frame, peer))
-    // Codes expire; a fresh one appears while the pairing screen is up.
-    this.expiryTimer = setInterval(() => {
-      if (this.peer && this.codeExpiresAt !== null && this.now() > this.codeExpiresAt) {
-        this.newCode()
-        this.error = 'The code expired — a new one is shown.'
-        this.publish()
-      }
-    }, 1000)
   }
 
   dispose(): void {
-    clearInterval(this.expiryTimer)
+    clearTimeout(this.expiryTimer)
   }
 
   state(): PairingState {
@@ -163,6 +155,17 @@ export class PairingService extends EventEmitter<{ change: [PairingState] }> {
     this.code = newPairingCode()
     this.codeExpiresAt = this.now() + CODE_TTL_MS
     this.failed = 0
+    // Codes expire; a fresh one appears while the pairing screen is up.
+    clearTimeout(this.expiryTimer)
+    this.expiryTimer = setTimeout(() => this.onCodeExpired(), CODE_TTL_MS + 1000)
+  }
+
+  private onCodeExpired(): void {
+    if (this.peer && this.codeExpiresAt !== null && this.now() > this.codeExpiresAt) {
+      this.newCode()
+      this.error = 'The code expired — a new one is shown.'
+      this.publish()
+    }
   }
 
   private publish(): void {

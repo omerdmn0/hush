@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import { afterEach, describe, expect, it } from 'vitest'
+import { EventEmitter } from 'node:events'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocket } from 'ws'
 import { PROTOCOL_VERSION } from '../shared/protocol'
 import { Identity, normalizeCode, pairingProof } from './identity'
-import { PeerLink } from './link'
+import { PeerLink, type LinkPeer } from './link'
 import { CODE_TTL_MS, MAX_ATTEMPTS, PairingService } from './pairing'
 import { freePort } from './testPorts'
 
@@ -126,5 +127,33 @@ describe('PairingService', () => {
     const mac = pairingProof(normalizeCode(a.pairing.state().code!), a.identity.publicKey, peer.publicKey)
     first.send(JSON.stringify({ t: 'pair-proof', mac }))
     await until(() => a.pairing.state().theyEnteredMyCode, 1500)
+  })
+})
+
+describe('code expiry', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('shows a fresh code each time one expires on the pairing screen, and stops when the peer leaves', () => {
+    vi.useFakeTimers()
+    const link = new EventEmitter()
+    const key = () => new Identity(Identity.generate()).publicKey
+    const pairing = new PairingService(link as unknown as PeerLink, key(), { getPinned: () => null, setPinned: () => {} })
+    const peer: LinkPeer = { id: randomUUID(), name: 'Bob', key: key(), app: '0.1.0', features: [] }
+
+    link.emit('pairing', peer)
+    const first = pairing.state().code
+    vi.advanceTimersByTime(CODE_TTL_MS - 1000)
+    expect(pairing.state().code).toBe(first)
+    vi.advanceTimersByTime(2000)
+    const second = pairing.state().code
+    expect(second).not.toBe(first)
+    expect(pairing.state().error).toMatch(/expired/)
+    vi.advanceTimersByTime(CODE_TTL_MS + 1000)
+    expect(pairing.state().code).not.toBe(second)
+
+    link.emit('down')
+    vi.advanceTimersByTime(CODE_TTL_MS * 3)
+    expect(vi.getTimerCount()).toBe(0)
+    pairing.dispose()
   })
 })

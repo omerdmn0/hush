@@ -36,6 +36,8 @@ export interface StoredMessage {
 type Migration = (db: Database.Database) => void
 
 const UPGRADE_COPY_MS = 7 * 24 * 60 * 60 * 1000
+/** Kept in the database itself, so restoring an older backup checks its attachments again. */
+const ATTACHMENTS_SEALED = 'attachmentsSealed'
 
 const MIGRATIONS: Migration[] = [
   // v1 — stage b
@@ -144,6 +146,8 @@ export class HushDb {
     // Deleted rows are overwritten, so removed text doesn't linger in free pages.
     this.db.pragma('secure_delete = ON')
     this.migrate()
+    // Not a migration: an index doesn't change the format, so older versions can still open this.
+    this.db.exec(`CREATE INDEX IF NOT EXISTS messages_not_read ON messages (author_id, seq) WHERE status <> 'read'`)
     // A call still "ongoing" means Hush quit mid-call; close it off.
     this.db.exec(`UPDATE calls SET outcome = CASE WHEN connected_at IS NOT NULL THEN 'completed' ELSE 'failed' END WHERE outcome = 'ongoing'`)
   }
@@ -236,9 +240,11 @@ export class HushDb {
    * Runs on every start, once the key is known to be the right one. Returns how many rows changed.
    */
   sealAttachmentDetails(): number {
+    if (this.getSetting<boolean>(ATTACHMENTS_SEALED)) return 0
     const rows = this.db.prepare(`SELECT id, image, file FROM messages WHERE image IS NOT NULL OR file IS NOT NULL`).all() as Pick<Row, 'id' | 'image' | 'file'>[]
     const plain = (v: string | null): v is string => v !== null && !isSealedField(v)
     const todo = rows.filter((r) => plain(r.image) || plain(r.file))
+    this.setSetting(ATTACHMENTS_SEALED, true)
     if (todo.length === 0) return 0
     const upd = this.db.prepare('UPDATE messages SET image = ?, file = ? WHERE id = ?')
     this.db.transaction(() => {
@@ -268,7 +274,7 @@ export class HushDb {
     file: FileMeta | null = null
   ): StoredMessage {
     return this.db.transaction(() => {
-      const { top } = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ?').get(authorId) as { top: number }
+      const { top } = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ? AND seq IS NOT NULL').get(authorId) as { top: number }
       // After recovering history from the peer, numbering continues after the old messages
       // even before they have all arrived.
       const next = Math.max(top, this.getSetting<number>(`seqFloor:${authorId}`) ?? 0) + 1
@@ -400,7 +406,7 @@ export class HushDb {
     if (upTo <= 0) return []
     const rows = this.db
       .prepare(
-        `UPDATE messages SET status = ? WHERE author_id = ? AND seq IS NOT NULL AND seq <= ? AND ${RANK} < ? RETURNING id`
+        `UPDATE messages SET status = ? WHERE author_id = ? AND seq IS NOT NULL AND seq <= ? AND status <> 'read' AND ${RANK} < ? RETURNING id`
       )
       .all(status, authorId, upTo, RANK_OF[status]) as { id: string }[]
     return rows.map((r) => r.id)
@@ -434,7 +440,7 @@ export class HushDb {
   /** This author's messages with seq > afterSeq, oldest first. */
   /** Highest sequence number stored for an author (0 if none). */
   maxSeq(authorId: string): number {
-    return (this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ?').get(authorId) as { top: number }).top
+    return (this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ? AND seq IS NOT NULL').get(authorId) as { top: number }).top
   }
 
   messagesAfter(authorId: string, afterSeq: number, limit: number): StoredMessage[] {

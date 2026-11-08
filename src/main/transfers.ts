@@ -99,8 +99,8 @@ export class Transfers {
    */
   onUp(): void {
     if (this.current) this.request(this.current)
-    for (const { id } of this.db.attachmentMessages()) {
-      if ((this.attempts.get(id) ?? 0) < MAX_ATTEMPTS) this.want(id)
+    for (const m of this.db.attachmentMessages()) {
+      if (!this.store.hasFull(m.id, blobOf(m)) && (this.attempts.get(m.id) ?? 0) < MAX_ATTEMPTS) this.want(m.id)
     }
     this.pump()
   }
@@ -245,7 +245,8 @@ export class Transfers {
   private progress(id: string, direction: ImageTransfer['direction'], state: ImageTransfer['state'], progress: number, force = false): void {
     const now = Date.now()
     if (!force && now - (this.lastProgress.get(id) ?? 0) < PROGRESS_EVERY_MS) return
-    this.lastProgress.set(id, now)
+    if (state === 'active') this.lastProgress.set(id, now)
+    else this.lastProgress.delete(id)
     this.emit({ type: 'transfer', transfer: { id, direction, state, progress: Math.min(1, progress) } })
   }
 }
