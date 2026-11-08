@@ -36,9 +36,11 @@ export function formatLastSeen(ts: number, now: number = Date.now()): string {
   return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${formatTime(ts)}`
 }
 
+const FULL_DATE_TIME = new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'short', hourCycle: 'h23' })
+
 /** Full timestamp for tooltips, e.g. "Tuesday, 3 November 2026 at 21:04". */
 export function fullDateTime(ts: number): string {
-  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'short', hourCycle: 'h23' }).format(ts)
+  return FULL_DATE_TIME.format(ts)
 }
 
 /** First letter of a name for avatars, locale-aware (so "ömer" → "Ö", "irmak" → "İ" in Turkish). */

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatMessage } from '../../../shared/types'
 import { dayLabel, initial } from './format'
-import { buildTimeline, GROUP_WINDOW_MS, lastQueuedId } from './timeline'
+import { buildTimeline, GROUP_WINDOW_MS, lastQueuedId, reuseGroups } from './timeline'
 import { insertSorted } from './useHush'
 
 const at = (y: number, mo: number, d: number, h: number, mi: number, s = 0, ms = 0): number =>
@@ -120,5 +120,28 @@ describe('new messages line', () => {
     const b = msg('peer', at(2026, 11, 5, 17, 1))
     const items = buildTimeline([a, b], NOW, [], [], b.id)
     expect(items.map((i) => i.kind)).toEqual(['day', 'group', 'new', 'group'])
+  })
+})
+
+describe('reuseGroups', () => {
+  const groupsOf = (items: ReturnType<typeof buildTimeline>) => items.filter((i) => i.kind === 'group')
+
+  it('keeps unchanged groups and replaces only the one that changed', () => {
+    const t = at(2026, 11, 5, 9, 0)
+    const old = msg('peer', t)
+    const last = msg('me', t + 60_000)
+    const before = buildTimeline([old, last], NOW)
+    const after = reuseGroups(before, buildTimeline([old, last, msg('me', t + 120_000)], NOW))
+    expect(groupsOf(after)[0]).toBe(groupsOf(before)[0])
+    expect(groupsOf(after)[1]).not.toBe(groupsOf(before)[1])
+    expect((groupsOf(after)[1] as { messages: unknown[] }).messages).toHaveLength(2)
+  })
+
+  it('replaces a group when one of its messages changed', () => {
+    const t = at(2026, 11, 5, 9, 0)
+    const m = msg('me', t, 'sent')
+    const before = buildTimeline([m], NOW)
+    const after = reuseGroups(before, buildTimeline([{ ...m, status: 'read' }], NOW))
+    expect(groupsOf(after)[0]).not.toBe(groupsOf(before)[0])
   })
 })

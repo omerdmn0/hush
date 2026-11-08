@@ -7,12 +7,12 @@ import { Button } from '@/components/ui/button'
 import { Avatar } from '@/components/common'
 import { formatTime, fullDateTime } from '@/lib/format'
 import { thumbSize } from '@/lib/images'
+import { useTransfer } from '@/lib/transferStore'
 import { linkify } from '@/lib/linkify'
 import { cn } from '@/lib/utils'
 import { MessageToolbar, ReactionChips, type MessageActions } from './MessageActions'
 
 export interface ImageActions {
-  transfers: Record<string, ImageTransfer>
   onOpen: (m: ChatMessage) => void
   onRetry: (id: string) => void
   /** Start downloading a big file. */
@@ -102,7 +102,8 @@ function Bubble({
   isLast,
   images,
   peerName,
-  onJump
+  onJump,
+  animateFrom
 }: {
   m: ChatMessage
   mine: boolean
@@ -110,7 +111,10 @@ function Bubble({
   images: ImageActions
   peerName: string
   onJump: (id: string) => void
+  animateFrom: number
 }): ReactNode {
+  const t = useTransfer(m.id)
+  const rise = m.sentAt >= animateFrom ? 'animate-rise' : undefined
   // Status shown on the last bubble of a group and on anything not yet read (MASTER.md §6).
   const showStatus = mine && (isLast || m.status !== 'read')
   const shape = mine ? 'shape-mine' : 'shape-theirs'
@@ -140,18 +144,17 @@ function Bubble({
     )
   }
 
-  if (m.file?.voice) return <VoiceBubble m={m} mine={mine} shape={shape} quote={quote} showStatus={showStatus} transfer={images.transfers[m.id]} onRetry={images.onRetry} />
-  if (m.file) return <FileBubble m={m} mine={mine} shape={shape} quote={quote} showStatus={showStatus} images={images} />
+  if (m.file?.voice) return <VoiceBubble m={m} mine={mine} shape={shape} rise={rise} quote={quote} showStatus={showStatus} transfer={t} onRetry={images.onRetry} />
+  if (m.file) return <FileBubble m={m} mine={mine} shape={shape} rise={rise} quote={quote} showStatus={showStatus} images={images} t={t} />
 
   if (m.image) {
     const size = thumbSize(m.image.width, m.image.height)
-    const t = images.transfers[m.id]
     const failed = !mine && !m.image.ready && t?.state === 'failed'
     const receiving = !mine && !m.image.ready && !failed
     const sending = mine && t?.direction === 'up' && t.state === 'active'
     const pct = Math.round((t?.progress ?? 0) * 100)
     return (
-      <div className={cn('cut animate-rise max-w-full p-1', shape)}>
+      <div className={cn('cut max-w-full p-1', rise, shape)}>
         {quote && <div className="px-1 pt-1">{quote}</div>}
         {/* Size reserved from the stored dimensions, so loading never shifts the list. */}
         <div className="relative max-w-full" style={{ width: size.width, aspectRatio: `${size.width} / ${size.height}` }}>
@@ -198,7 +201,7 @@ function Bubble({
   }
 
   return (
-    <div className={cn('cut animate-rise max-w-full px-3 pt-2 pb-1.5 text-base leading-6 font-normal [overflow-wrap:anywhere] whitespace-pre-wrap', shape)}>
+    <div className={cn('cut max-w-full px-3 pt-2 pb-1.5 text-base leading-6 font-normal [overflow-wrap:anywhere] whitespace-pre-wrap', rise, shape)}>
       {quote}
       <MessageText text={m.text} />
       <Meta m={m} showStatus={showStatus} />
@@ -212,7 +215,8 @@ export const MessageGroup = memo(function MessageGroup({
   peerName,
   queuedNoteAfter,
   images,
-  actions
+  actions,
+  animateFrom
 }: {
   from: ChatMessage['from']
   messages: ChatMessage[]
@@ -221,6 +225,8 @@ export const MessageGroup = memo(function MessageGroup({
   queuedNoteAfter: string | null
   images: ImageActions
   actions: MessageActions
+  /** Messages sent from this moment on fade in. */
+  animateFrom: number
 }): ReactNode {
   const mine = from === 'me'
   const first = messages[0]
@@ -236,7 +242,7 @@ export const MessageGroup = memo(function MessageGroup({
         )}
         {messages.map((m, i) => (
           <div key={m.id} className={cn('flex w-full flex-col', mine ? 'items-end' : 'items-start')}>
-            <MessageRow m={m} mine={mine} isLast={i === messages.length - 1} images={images} actions={actions} peerName={peerName} />
+            <MessageRow m={m} mine={mine} isLast={i === messages.length - 1} images={images} actions={actions} peerName={peerName} animateFrom={animateFrom} />
             {m.id === queuedNoteAfter && (
               <div className="data mt-1.5 flex items-center gap-1.5 text-queued">
                 <Clock aria-hidden="true" className="size-3.5" />
@@ -251,13 +257,14 @@ export const MessageGroup = memo(function MessageGroup({
 })
 
 /** One message with its hover toolbar, right-click menu and reactions. */
-function MessageRow({
+const MessageRow = memo(function MessageRow({
   m,
   mine,
   isLast,
   images,
   actions,
-  peerName
+  peerName,
+  animateFrom
 }: {
   m: ChatMessage
   mine: boolean
@@ -265,6 +272,7 @@ function MessageRow({
   images: ImageActions
   actions: MessageActions
   peerName: string
+  animateFrom: number
 }): ReactNode {
   const [menuOpen, setMenuOpen] = useState(false)
   return (
@@ -282,37 +290,40 @@ function MessageRow({
       }}
     >
       <MessageToolbar m={m} mine={mine} actions={actions} menuOpen={menuOpen} onMenuOpenChange={setMenuOpen} />
-      <Bubble m={m} mine={mine} isLast={isLast} images={images} peerName={peerName} onJump={actions.onJump} />
+      <Bubble m={m} mine={mine} isLast={isLast} images={images} peerName={peerName} onJump={actions.onJump} animateFrom={animateFrom} />
       <ReactionChips m={m} mine={mine} actions={actions} peerName={peerName} />
     </div>
   )
-}
+})
 
 /** A file: name, size, and Save (it's never opened by Hush). Big ones download on request. */
 function FileBubble({
   m,
   mine,
   shape,
+  rise,
   quote,
   showStatus,
-  images
+  images,
+  t
 }: {
   m: ChatMessage
   mine: boolean
   shape: string
+  rise: string | undefined
   quote: ReactNode
   showStatus: boolean
   images: ImageActions
+  t: ImageTransfer | undefined
 }): ReactNode {
   const f = m.file!
-  const t = images.transfers[m.id]
   const pct = Math.round((t?.progress ?? 0) * 100)
   const failed = !mine && !f.ready && t?.state === 'failed'
   const receiving = !mine && !f.ready && !failed && (f.autoDownload || t?.state === 'active')
   const waiting = !mine && !f.ready && !failed && !receiving
   const sending = mine && t?.direction === 'up' && t.state === 'active'
   return (
-    <div className={cn('cut animate-rise max-w-full p-1', shape)}>
+    <div className={cn('cut max-w-full p-1', rise, shape)}>
       {quote && <div className="px-1 pt-1">{quote}</div>}
       <div className="flex w-[320px] max-w-full items-center gap-3 px-2 py-2">
         <FileText aria-hidden="true" className="size-8 flex-none text-cyan" />
@@ -371,6 +382,7 @@ function VoiceBubble({
   m,
   mine,
   shape,
+  rise,
   quote,
   showStatus,
   transfer,
@@ -379,6 +391,7 @@ function VoiceBubble({
   m: ChatMessage
   mine: boolean
   shape: string
+  rise: string | undefined
   quote: ReactNode
   showStatus: boolean
   transfer: ImageTransfer | undefined
@@ -399,7 +412,7 @@ function VoiceBubble({
     else el.pause()
   }
   return (
-    <div className={cn('cut animate-rise max-w-full p-1', shape)}>
+    <div className={cn('cut max-w-full p-1', rise, shape)}>
       {quote && <div className="px-1 pt-1">{quote}</div>}
       <div className="flex w-[300px] max-w-full items-center gap-2.5 px-2 py-1.5">
         {failed ? (

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CallRecord, ChatMessage, HushEvent, ImageTransfer, OutgoingImage, Settings, Snapshot } from '../../../shared/types'
+import type { CallRecord, ChatMessage, HushEvent, OutgoingImage, Settings, Snapshot } from '../../../shared/types'
 import type { DeliveryNotice } from './timeline'
+import { setTransfer } from './transferStore'
 
 const PAGE = 100
 /** Hide the typing indicator if no refresh arrives within this time. */
@@ -19,8 +20,6 @@ export interface HushState {
   /** The most recent flush, for the pop-up; null once it has been dismissed. */
   flush: DeliveryNotice | null
   dismissFlush: () => void
-  /** Image transfers in progress / finished / failed, by message id. */
-  transfers: Record<string, ImageTransfer>
   sendImage: (image: OutgoingImage, caption: string, replyTo?: string) => Promise<void>
   retryImage: (id: string) => void
   loadOlder: () => void
@@ -40,7 +39,6 @@ export function useHush(): HushState {
   const [peerTyping, setPeerTyping] = useState(false)
   const [notices, setNotices] = useState<DeliveryNotice[]>([])
   const [flush, setFlush] = useState<DeliveryNotice | null>(null)
-  const [transfers, setTransfers] = useState<Record<string, ImageTransfer>>({})
   const [calls, setCalls] = useState<CallRecord[]>([])
   const typingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loading = useRef(false)
@@ -87,7 +85,7 @@ export function useHush(): HushState {
           break
         case 'transfer': {
           const t = e.transfer
-          setTransfers((prev) => ({ ...prev, [t.id]: t }))
+          setTransfer(t)
           if (t.direction === 'down' && t.state === 'done') {
             setMessages((prev) =>
               prev.map((m) =>
@@ -216,7 +214,7 @@ export function useHush(): HushState {
   }, [])
 
   const retryImage = useCallback((id: string) => {
-    setTransfers((prev) => ({ ...prev, [id]: { id, direction: 'down', state: 'active', progress: 0 } }))
+    setTransfer({ id, direction: 'down', state: 'active', progress: 0 })
     window.hush.retryImage(id)
   }, [])
 
@@ -230,7 +228,6 @@ export function useHush(): HushState {
     notices,
     flush,
     dismissFlush,
-    transfers,
     sendImage,
     retryImage,
     loadOlder,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { CallController, type CallView } from './call'
 
 interface Options {
@@ -26,10 +26,8 @@ export function useCall(opts: Options): { view: CallView; call: CallController }
         peerCanShare: () => latest.current.peerCanShare
       })
   )
-  const view = useSyncExternalStore(
-    (fn) => call.subscribe(fn),
-    () => call.state
-  )
+  const subscribe = useCallback((fn: () => void) => call.subscribe(fn), [call])
+  const view = useSyncExternalStore(subscribe, () => call.state)
 
   useEffect(() => window.hush.onEvent((e) => e.type === 'call' && void call.onSignal(e.signal)), [call])
 

@@ -8,7 +8,7 @@ import { callLogText } from '@/lib/callLogic'
 import { cn } from '@/lib/utils'
 import type { CallAction } from '@/lib/view'
 import { formatTime } from '@/lib/format'
-import { buildTimeline, lastQueuedId, type DeliveryNotice, type TimelineItem } from '@/lib/timeline'
+import { buildTimeline, lastQueuedId, reuseGroups, type DeliveryNotice, type TimelineItem } from '@/lib/timeline'
 import { Avatar } from '@/components/common'
 import { MessageGroup, type ImageActions } from './MessageGroup'
 import type { MessageActions } from './MessageActions'
@@ -53,10 +53,15 @@ export function MessageList({
   /** Scroll to this message once it's loaded (search results); `n` makes repeats distinct. */
   jumpRequest: { id: string; n: number } | null
 }): ReactNode {
-  const items = useMemo(() => buildTimeline(messages, Date.now(), notices, calls, newMarkerId), [messages, notices, calls, newMarkerId])
+  const itemsRef = useRef<TimelineItem[]>([])
+  const items = useMemo(
+    () => reuseGroups(itemsRef.current, buildTimeline(messages, Date.now(), notices, calls, newMarkerId)),
+    [messages, notices, calls, newMarkerId]
+  )
   const list = useRef<VirtuosoHandle>(null)
-  const itemsRef = useRef(items)
   itemsRef.current = items
+  // Only messages that arrive from now on fade in, not every old row that scrolls into view.
+  const [animateFrom] = useState(Date.now)
 
   // Jump to the message a reply quotes, and flash it.
   const [highlightId, setHighlightId] = useState<string | null>(null)
@@ -96,10 +101,10 @@ export function MessageList({
   // call bar opening) don't fire scroll events, so they can't accidentally unstick the view.
   const stick = useRef(true)
 
-  const pinToBottom = (): void => {
+  const pinToBottom = useCallback((): void => {
     const el = scroller.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }
+  }, [])
   // Scrolled up: a "Jump to latest" button counts what arrived since.
   const [awayFrom, setAwayFrom] = useState<string | null>(null)
   const lastId = useRef<string | undefined>(undefined)
@@ -111,7 +116,7 @@ export function MessageList({
   const touch = (): void => {
     touched.current.at = performance.now()
   }
-  const onScroll = (): void => {
+  const onScroll = useCallback((): void => {
     const el = scroller.current
     if (!el) return
     const fromEnd = el.scrollHeight - el.scrollTop - el.clientHeight
@@ -124,7 +129,49 @@ export function MessageList({
     lastTop.current = el.scrollTop
     const away = fromEnd > 300
     setAwayFrom((prev) => (away ? (prev ?? lastId.current ?? null) : null))
-  }
+  }, [])
+  const scrollerRef = useCallback(
+    (el: HTMLElement | Window | null): void => {
+      scroller.current?.removeEventListener('scroll', onScroll)
+      scroller.current = el instanceof HTMLElement ? el : null
+      scroller.current?.addEventListener('scroll', onScroll, { passive: true })
+    },
+    [onScroll]
+  )
+  const context = useMemo(() => ({ typing, peerName, hasMore, loadingOlder, onRowsResized: pinToBottom }), [typing, peerName, hasMore, loadingOlder, pinToBottom])
+  const startReached = useCallback(() => {
+    if (hasMore) onLoadOlder()
+  }, [hasMore, onLoadOlder])
+  const itemContent = useCallback(
+    (_: number, item: TimelineItem): ReactNode => (
+      <Column>
+        {item.kind === 'day' ? (
+          <div className="rule pt-[22px] pb-1.5">
+            <span className="label">{item.label}</span>
+          </div>
+        ) : item.kind === 'notice' ? (
+          <NoticeLine notice={item.notice} peerName={peerName} />
+        ) : item.kind === 'call' ? (
+          <CallLine call={item.call} peerName={peerName} callAction={callAction} />
+        ) : item.kind === 'new' ? (
+          <div className="rule pt-[18px] [--rule-c:color-mix(in_srgb,var(--magenta)_55%,transparent)]">
+            <span className="label text-magenta">New messages</span>
+          </div>
+        ) : (
+          <MessageGroup
+            from={item.from}
+            messages={item.messages}
+            peerName={peerName}
+            queuedNoteAfter={item.messages.some((m) => m.id === noteAfter) ? noteAfter : null}
+            images={images}
+            actions={allActions}
+            animateFrom={animateFrom}
+          />
+        )}
+      </Column>
+    ),
+    [peerName, callAction, noteAfter, images, allActions, animateFrom]
+  )
   const awayIndex = awayFrom ? messages.findIndex((m) => m.id === awayFrom) : -1 // gone if it was deleted
   const newSince = awayIndex < 0 ? 0 : messages.length - 1 - awayIndex
   const jumpToLatest = (): void => {
@@ -164,45 +211,16 @@ export function MessageList({
       <Virtuoso<TimelineItem, ListContext>
         ref={list}
         className="h-full"
-        scrollerRef={(el) => {
-          scroller.current?.removeEventListener('scroll', onScroll)
-          scroller.current = el instanceof HTMLElement ? el : null
-          scroller.current?.addEventListener('scroll', onScroll, { passive: true })
-        }}
+        scrollerRef={scrollerRef}
         data={items}
-        context={{ typing, peerName, hasMore, loadingOlder, onRowsResized: pinToBottom }}
+        context={context}
         firstItemIndex={firstIndex.current}
-        startReached={() => hasMore && onLoadOlder()}
-        computeItemKey={(_, item) => item.key}
-        initialTopMostItemIndex={{ index: 'LAST', align: 'end' }}
+        startReached={startReached}
+        computeItemKey={itemKey}
+        initialTopMostItemIndex={START_AT_END}
         alignToBottom
-        increaseViewportBy={{ top: 400, bottom: 200 }}
-        itemContent={(_, item) => (
-          <Column>
-            {item.kind === 'day' ? (
-              <div className="rule pt-[22px] pb-1.5">
-                <span className="label">{item.label}</span>
-              </div>
-            ) : item.kind === 'notice' ? (
-              <NoticeLine notice={item.notice} peerName={peerName} />
-            ) : item.kind === 'call' ? (
-              <CallLine call={item.call} peerName={peerName} callAction={callAction} />
-            ) : item.kind === 'new' ? (
-              <div className="rule pt-[18px] [--rule-c:color-mix(in_srgb,var(--magenta)_55%,transparent)]">
-                <span className="label text-magenta">New messages</span>
-              </div>
-            ) : (
-              <MessageGroup
-                from={item.from}
-                messages={item.messages}
-                peerName={peerName}
-                queuedNoteAfter={noteAfter}
-                images={images}
-                actions={allActions}
-              />
-            )}
-          </Column>
-        )}
+        increaseViewportBy={OVERSCAN}
+        itemContent={itemContent}
         components={COMPONENTS}
       />
       {awayFrom !== null && (
@@ -216,6 +234,9 @@ export function MessageList({
 }
 
 const FIRST_INDEX = 1_000_000
+const START_AT_END = { index: 'LAST', align: 'end' } as const
+const OVERSCAN = { top: 400, bottom: 200 }
+const itemKey = (_: number, item: TimelineItem): string => item.key
 
 interface ListContext {
   typing: boolean

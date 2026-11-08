@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Image as ImageIcon, LoaderCircle, Search, X } from 'lucide-react'
 import type { SearchResult } from '../../../../shared/types'
 import { queryTerms, snippet } from '../../../../shared/search'
@@ -47,7 +47,10 @@ export function SearchPanel({
     }
   }, [query])
 
-  const terms = found ? queryTerms(found.query) : []
+  const rows = useMemo(() => {
+    const terms = found ? queryTerms(found.query) : []
+    return found?.results.map((r) => ({ r, s: snippet(r.text, terms) }))
+  }, [found])
   const status = !found
     ? 'Type to search your messages'
     : found.results.length === 0
@@ -94,8 +97,7 @@ export function SearchPanel({
         {status}
       </div>
       <ul className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-2 pt-0">
-        {found?.results.map((r) => {
-          const s = snippet(r.text, terms)
+        {rows?.map(({ r, s }) => {
           return (
             <li key={r.id}>
               <button

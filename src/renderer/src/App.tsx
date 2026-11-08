@@ -84,10 +84,12 @@ export default function App(): ReactNode {
       else if ('error' in r) setSaved((p) => ({ error: r.error, n: (p?.n ?? 0) + 1 }))
     })
   }, [])
-  const { transfers, retryImage } = hush
+  const oldestLoaded = messages[0]?.sentAt
+  const shownCalls = useMemo(() => visibleCalls(hush.calls, oldestLoaded, hush.hasMore), [hush.calls, oldestLoaded, hush.hasMore])
+  const { retryImage } = hush
   const imageActions: ImageActions = useMemo(
-    () => ({ transfers, onOpen: openViewer, onRetry: retryImage, onDownload: retryImage, onSave: saveAttachment }),
-    [transfers, openViewer, retryImage, saveAttachment]
+    () => ({ onOpen: openViewer, onRetry: retryImage, onDownload: retryImage, onSave: saveAttachment }),
+    [openViewer, retryImage, saveAttachment]
   )
 
   const peer: PeerView | null = useMemo(() => {
@@ -125,17 +127,21 @@ export default function App(): ReactNode {
       })
   }
   const { mics } = useAudioDevices()
-  const callAction: CallAction = {
-    enabled: peer?.presence === 'online' && !call.busy,
-    hint: !peer
-      ? 'No one linked yet'
-      : peer.presence !== 'online'
-        ? `${peer.name} is offline`
-        : call.busy
-          ? 'Already in a call'
-          : `Call ${peer.name}`,
-    onCall: () => void call.start()
-  }
+  const callBusy = call.busy
+  const callAction: CallAction = useMemo(
+    () => ({
+      enabled: peer?.presence === 'online' && !callBusy,
+      hint: !peer
+        ? 'No one linked yet'
+        : peer.presence !== 'online'
+          ? `${peer.name} is offline`
+          : callBusy
+            ? 'Already in a call'
+            : `Call ${peer.name}`,
+      onCall: () => void call.start()
+    }),
+    [peer?.presence, peer?.name, callBusy, call]
+  )
 
   // Read receipts: mark their messages read while the chat is actually on screen. Coming back
   // to the chat (or opening Hush) with unread messages puts a "New messages" line above them.
@@ -327,7 +333,7 @@ export default function App(): ReactNode {
               <MessageList
                 messages={messages}
                 notices={hush.notices}
-                calls={visibleCalls(hush.calls, messages, hush.hasMore)}
+                calls={shownCalls}
                 callAction={callAction}
                 peerName={peer.name}
                 typing={hush.peerTyping}
@@ -517,8 +523,7 @@ function callAnnouncement(v: CallView, peerName: string): string | null {
 }
 
 /** Calls older than the loaded part of history appear once paging reaches them. */
-function visibleCalls(calls: CallRecord[], messages: ChatMessage[], hasMore: boolean): CallRecord[] {
-  if (!hasMore || messages.length === 0) return calls
-  const oldest = messages[0].sentAt
+function visibleCalls(calls: CallRecord[], oldest: number | undefined, hasMore: boolean): CallRecord[] {
+  if (!hasMore || oldest === undefined) return calls
   return calls.filter((c) => c.startedAt >= oldest)
 }

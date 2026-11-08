@@ -74,6 +74,18 @@ export function buildTimeline(
   return items
 }
 
+/**
+ * Keeps the previous object for every group whose messages didn't change, so only the groups
+ * that really changed re-render.
+ */
+export function reuseGroups(previous: readonly TimelineItem[], next: TimelineItem[]): TimelineItem[] {
+  const old = new Map(previous.flatMap((it) => (it.kind === 'group' ? [[it.key, it] as const] : [])))
+  return next.map((it) => {
+    const before = it.kind === 'group' ? old.get(it.key) : undefined
+    return it.kind === 'group' && before && before.messages.length === it.messages.length && before.messages.every((m, i) => m === it.messages[i]) ? before : it
+  })
+}
+
 /** The most recent queued message of mine, under which the "waiting" note is shown. */
 export function lastQueuedId(messages: readonly ChatMessage[]): string | null {
   let latest: ChatMessage | null = null
