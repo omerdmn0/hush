@@ -193,7 +193,11 @@ export class CallController {
     const track = next.getAudioTracks()[0]
     track.enabled = !this.view.muted
     const sender = this.pc.getSenders().find((s) => s.track?.kind === 'audio')
-    await sender?.replaceTrack(track)
+    const replaced = await (sender?.replaceTrack(track) ?? Promise.resolve()).then(
+      () => true,
+      () => false
+    )
+    if (!replaced || !this.local || !this.pc) return next.getTracks().forEach((t) => t.stop())
     this.local.getTracks().forEach((t) => t.stop())
     this.local = next
   }

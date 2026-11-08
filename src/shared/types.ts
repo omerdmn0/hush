@@ -314,6 +314,8 @@ export type HushEvent =
   | { type: 'flushed'; count: number; at: number }
   | { type: 'privacy'; privacy: PrivacyState }
   | { type: 'update'; update: UpdateState }
+  /** The window went to the tray. */
+  | { type: 'hidden' }
 
 /** API the preload script exposes to the renderer as `window.hush`. */
 export interface HushApi {

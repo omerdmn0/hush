@@ -416,6 +416,7 @@ function MicTest({ micId, onPermission }: { micId: string; onPermission: () => v
   const [level, setLevel] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
+  useEffect(() => window.hush.onEvent((e) => e.type === 'hidden' && setTesting(false)), [])
   useEffect(() => {
     if (!testing) return
     let stream: MediaStream | null = null

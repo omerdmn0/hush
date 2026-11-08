@@ -214,6 +214,7 @@ export class Transfers {
       return
     }
     void this.serve(frame.id, frame.offset).catch(() => {
+      this.uploads.delete(frame.id)
       // The stored file can't be read: say so, or the other side waits forever.
       this.progress(frame.id, 'up', 'failed', 0, true)
       void this.link.send({ t: 'blob-err', id: frame.id })

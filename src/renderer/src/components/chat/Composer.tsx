@@ -250,6 +250,17 @@ export function Composer({
       recordingRef.current?.cancel()
     }
   }, [])
+  // Nobody can see the recording once Hush is in the tray, so the microphone must not stay on.
+  useEffect(
+    () =>
+      window.hush.onEvent((e) => {
+        if (e.type !== 'hidden' || !recordingRef.current) return
+        recordingRef.current.cancel()
+        setRecording(null)
+        setError('Hush was closed to the tray, so the voice note was discarded.')
+      }),
+    []
+  )
 
   const startingToRecord = useRef(false)
   const startRecording = async (): Promise<void> => {

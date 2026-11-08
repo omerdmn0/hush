@@ -447,6 +447,7 @@ if (!app.requestSingleInstanceLock()) {
         notifier.missedCall()
       }
     })
+    link.on('down', () => calls.linkDown())
     link.on('up', () => {
       if (net.error && net.listening) {
         net.error = null
@@ -497,6 +498,7 @@ if (!app.requestSingleInstanceLock()) {
         setImmediate(() => mainWindow?.webContents.send(IPC.event, { type: 'window', active: userIsLooking() } satisfies HushEvent))
       }
       for (const ev of ['focus', 'blur', 'show', 'hide', 'minimize', 'restore'] as const) mainWindow.on(ev as 'focus', reportActive)
+      mainWindow.on('hide', () => send({ type: 'hidden' }))
       // Closing the window keeps Hush running in the tray, so messages and calls still arrive.
       mainWindow.on('close', (e) => {
         if (quitting) return
