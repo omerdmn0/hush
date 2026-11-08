@@ -76,7 +76,7 @@ function fromRawAudio(): { track: MediaStreamTrack; stop: () => void } {
  */
 export async function captureScreen(choice: ShareChoice): Promise<ScreenCapture & { audioError: string | null }> {
   await window.hush.shareChoose(choice.sourceId)
-  const display = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30, max: 30 } }, audio: false })
+  const display = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30, max: 30 }, width: { max: 2560 }, height: { max: 1440 } }, audio: false })
   const stream = new MediaStream(display.getVideoTracks())
   const stops: (() => void)[] = [() => display.getTracks().forEach((t) => t.stop())]
   let audioError: string | null = null

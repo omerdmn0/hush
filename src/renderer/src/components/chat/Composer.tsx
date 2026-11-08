@@ -6,7 +6,7 @@ import type { ChatMessage, OutgoingImage } from '../../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { prepareImage, type PreparedImage } from '@/lib/images'
+import { prepareImage, toOutgoing, type PreparedImage } from '@/lib/images'
 import { formatClock, recordVoice, type VoiceNote, type VoiceRecording } from '@/lib/voice'
 import { cn } from '@/lib/utils'
 import { EmojiPanel } from './EmojiPanel'
@@ -217,7 +217,7 @@ export function Composer({
       // Each attachment is its own message; the text becomes the caption of the last one,
       // and a reply is attached to the first.
       for (const img of queue) {
-        await onSendImage(img.outgoing, ++n === total ? value : '', n === 1 ? replyTo : undefined)
+        await onSendImage(await toOutgoing(img), ++n === total ? value : '', n === 1 ? replyTo : undefined)
         URL.revokeObjectURL(img.previewUrl)
         setAttachments((prev) => prev.filter((a) => a.key !== img.key))
       }

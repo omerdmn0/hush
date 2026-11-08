@@ -132,7 +132,8 @@ if (!app.requestSingleInstanceLock()) {
     preload: join(__dirname, '../preload/index.js'),
     contextIsolation: true,
     sandbox: true,
-    nodeIntegration: false
+    nodeIntegration: false,
+    spellcheck: false // it would also fetch dictionaries from Google
   }
   const loadRenderer = (win: BrowserWindow, hash?: string): void => {
     if (dev && process.env['ELECTRON_RENDERER_URL']) void win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (hash ? `#${hash}` : ''))

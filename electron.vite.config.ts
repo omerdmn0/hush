@@ -7,6 +7,7 @@ export default defineConfig({
   main: {},
   preload: {},
   renderer: {
+    build: { minify: true },
     resolve: {
       alias: { '@': resolve('src/renderer/src') }
     },

@@ -32,11 +32,26 @@ export interface PreparedImage {
   name: string
   /** Object URL for the tray preview; revoke when done. */
   previewUrl: string
-  outgoing: OutgoingImage
+  file: File
+  outgoing: Omit<OutgoingImage, 'bytes'>
+}
+
+/** The image as sent. Its bytes are only read now, so waiting in the tray costs no memory. */
+export async function toOutgoing(image: PreparedImage): Promise<OutgoingImage> {
+  return { ...image.outgoing, bytes: new Uint8Array(await image.file.arrayBuffer()) }
+}
+
+let preparing: Promise<unknown> = Promise.resolve()
+
+/** One at a time: decoding a large photo takes about 100 MB while it runs. */
+export function prepareImage(file: File): Promise<PreparedImage> {
+  const prepared = preparing.then(() => prepare(file))
+  preparing = prepared.catch(() => {})
+  return prepared
 }
 
 /** Validates a picked/dropped/pasted file and makes the small WebP preview that travels inline. */
-export async function prepareImage(file: File): Promise<PreparedImage> {
+async function prepare(file: File): Promise<PreparedImage> {
   if (!(IMAGE_MIME as readonly string[]).includes(file.type)) throw new ImageError('unsupported', file.name)
   if (file.size > MAX_IMAGE_BYTES) throw new ImageError('too-large', file.name)
 
@@ -64,9 +79,9 @@ export async function prepareImage(file: File): Promise<PreparedImage> {
   return {
     key: crypto.randomUUID(),
     name: file.name || 'pasted image',
-    previewUrl: URL.createObjectURL(file),
+    previewUrl: URL.createObjectURL(thumb!),
+    file,
     outgoing: {
-      bytes: new Uint8Array(await file.arrayBuffer()),
       mime: file.type,
       width,
       height,
