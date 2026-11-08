@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Image as ImageIcon, LoaderCircle, Search, X } from 'lucide-react'
-import type { SearchResult } from '../../../../shared/types'
+import type { ChannelInfo, SearchResult } from '../../../../shared/types'
 import { queryTerms, snippet } from '../../../../shared/search'
 import { Button } from '@/components/ui/button'
 import { dayLabel, formatTime } from '@/lib/format'
@@ -14,10 +14,12 @@ const DEBOUNCE_MS = 150
  */
 export function SearchPanel({
   peerName,
+  channels,
   onPick,
   onClose
 }: {
   peerName: string
+  channels: ChannelInfo[]
   onPick: (r: SearchResult) => void
   onClose: () => void
 }): ReactNode {
@@ -111,6 +113,7 @@ export function SearchPanel({
                     {dayLabel(r.sentAt, now)} · {formatTime(r.sentAt)}
                   </span>
                   {r.hasImage && <ImageIcon role="img" aria-label="with a picture" className="size-3.5 text-text-muted" />}
+                  <span className="ml-auto max-w-[120px] flex-none truncate text-xs text-text-muted">#{channels.find((c) => c.id === (r.channel ?? ''))?.name}</span>
                 </span>
                 <span className="line-clamp-3 text-sm leading-5 [overflow-wrap:anywhere] text-text">
                   {s.cutStart && '…'}

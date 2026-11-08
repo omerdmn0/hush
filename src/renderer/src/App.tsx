@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { GENERAL_CHANNEL } from '../../shared/protocol'
 import type { CallRecord, ChatMessage, SearchResult } from '../../shared/types'
 import { Sidebar } from '@/components/Sidebar'
+import { NewChannelDialog } from '@/components/NewChannelDialog'
 import { QuitDialog } from '@/components/QuitDialog'
 import { PairingScreen } from '@/components/PairingScreen'
 import { AvatarContext } from '@/components/common'
@@ -22,15 +24,21 @@ import { SettingsScreen, type SectionId } from '@/components/settings/SettingsSc
 import { formatLastSeen } from '@/lib/format'
 import { captureScreen, type ShareChoice } from '@/lib/screenShare'
 import { isNewer } from '@/lib/version'
+import type { DeliveryNotice } from '@/lib/timeline'
 import type { CallView } from '@/lib/call'
 import { useAudioDevices } from '@/lib/useAudioDevices'
 import { useCall } from '@/lib/useCall'
 import { useHush } from '@/lib/useHush'
 import type { CallAction, PeerView } from '@/lib/view'
 
+/** Calls and delivery notices aren't part of any channel, so they appear in General only. */
+const NO_CALLS: CallRecord[] = []
+const NO_NOTICES: DeliveryNotice[] = []
+
 export default function App(): ReactNode {
   const hush = useHush()
-  const { snapshot, messages, markRead } = hush
+  const { snapshot, messages, markRead, channel } = hush
+  const inGeneral = channel === GENERAL_CHANNEL
   const [screen, setScreen] = useState<'chat' | 'settings'>('chat')
   const [settingsSection, setSettingsSection] = useState<SectionId>('profile')
   // Visible + focused, as reported by the main process (reliable even when hidden in the tray).
@@ -147,6 +155,7 @@ export default function App(): ReactNode {
   // to the chat (or opening Hush) with unread messages puts a "New messages" line above them.
   const [newMarker, setNewMarker] = useState<string | null>(null)
   const wasActive = useRef(false)
+  const markedChannel = useRef(channel)
   const loaded = snapshot !== null
   useEffect(() => {
     if (!loaded) return
@@ -155,17 +164,18 @@ export default function App(): ReactNode {
       return
     }
     const unread = messages.filter((m) => m.from === 'peer' && m.status !== 'read').map((m) => m.id)
-    if (!wasActive.current) {
+    if (!wasActive.current || markedChannel.current !== channel) {
       wasActive.current = true
+      markedChannel.current = channel
       setNewMarker(unread[0] ?? null)
     }
     if (unread.length) markRead(unread)
-  }, [loaded, messages, windowActive, screen, markRead])
+  }, [loaded, messages, windowActive, screen, markRead, channel])
 
   // Search (Ctrl+F or the header button); picking a result loads history up to it and scrolls there.
   const [searchOpen, setSearchOpen] = useState(false)
   const searchButton = useRef<HTMLButtonElement>(null)
-  const [jumpRequest, setJumpRequest] = useState<{ id: string; n: number } | null>(null)
+  const [jumpRequest, setJumpRequest] = useState<{ id: string; n: number; channel: string } | null>(null)
   const canSearch = screen === 'chat' && !!snapshot?.settings.peerIp && snapshot.pairing.status === 'paired'
   useEffect(() => {
     if (!canSearch) return
@@ -182,17 +192,35 @@ export default function App(): ReactNode {
     setSearchOpen(false)
     requestAnimationFrame(() => searchButton.current?.focus())
   }, [])
-  const { reveal } = hush
+  const { reveal, switchChannel } = hush
   const pickResult = useCallback(
     (r: SearchResult) => {
-      void reveal(r.id, r.sentAt).then((found) => found && setJumpRequest((prev) => ({ id: r.id, n: (prev?.n ?? 0) + 1 })))
+      const target = r.channel ?? GENERAL_CHANNEL
+      const request = (prev: { n: number } | null): { id: string; n: number; channel: string } => ({ id: r.id, n: (prev?.n ?? 0) + 1, channel: target })
+      if (target === channel) {
+        void reveal(r.id, r.sentAt).then((found) => found && setJumpRequest(request))
+      } else {
+        setJumpRequest(request) // in place first: the new channel's list opens on it
+        void switchChannel(target, r)
+      }
     },
-    [reveal]
+    [reveal, switchChannel, channel]
   )
+  const [newChannelOpen, setNewChannelOpen] = useState(false)
 
   // Reply / edit / delete / react
   const [composerMode, setComposerMode] = useState<ComposerMode | null>(null)
   const [deleting, setDeleting] = useState<ChatMessage | null>(null)
+  // Whatever was tied to the old channel's messages goes before anything renders against the new
+  // one. A search jump aimed at the new channel can land in the same update, so it stays.
+  const [shownChannel, setShownChannel] = useState(channel)
+  if (shownChannel !== channel) {
+    setShownChannel(channel)
+    setComposerMode(null)
+    setViewing(null)
+    setDeleting(null)
+    if (jumpRequest?.channel !== channel) setJumpRequest(null)
+  }
   const canWrite = !!snapshot && snapshot.pairing.status === 'paired' && !snapshot.peer.catchingUp
   const messageActions: Omit<MessageActions, 'onJump' | 'highlightId'> = useMemo(
     () => ({
@@ -214,9 +242,9 @@ export default function App(): ReactNode {
   const send = useCallback(
     async (text: string, replyTo?: string) => {
       setNewMarker(null)
-      await hush.send(text, replyTo)
+      await hush.send(text, replyTo, channel)
     },
-    [hush.send]
+    [hush.send, channel]
   )
 
   const openSettings = (section: SectionId = 'profile'): void => {
@@ -243,6 +271,9 @@ export default function App(): ReactNode {
     return <div className="scanlines h-full bg-app" aria-busy="true" />
   }
 
+  const paired = !!peer && snapshot.pairing.status === 'paired'
+  const channelName = snapshot.channels.find((c) => c.id === channel)?.name
+
   return (
     <AvatarContext.Provider value={snapshot.avatars}>
     <div className="scanlines flex h-full">
@@ -264,6 +295,13 @@ export default function App(): ReactNode {
         <>
           <Sidebar
             peer={peer}
+            channels={paired ? snapshot.channels : null}
+            activeChannel={channel}
+            onSelectChannel={(id) => void switchChannel(id)}
+            onNewChannel={() => setNewChannelOpen(true)}
+            newChannelBlocked={
+              !snapshot.peer.channelsReady ? 'Channels need both computers on the latest Hush' : !canWrite ? 'Hush is still catching up' : null
+            }
             myName={snapshot.settings.displayName}
             call={callAction}
             onOpenSettings={() => openSettings()}
@@ -297,12 +335,13 @@ export default function App(): ReactNode {
           >
             <ChatHeader
               peer={peer}
+              channelName={paired ? channelName : undefined}
               call={callAction}
               onSearch={canSearch ? () => setSearchOpen((o) => !o) : undefined}
               searchOpen={searchOpen}
               searchButtonRef={searchButton}
             />
-            {searchOpen && canSearch && peer && <SearchPanel peerName={peer.name} onPick={pickResult} onClose={closeSearch} />}
+            {searchOpen && canSearch && peer && <SearchPanel peerName={peer.name} channels={snapshot.channels} onPick={pickResult} onClose={closeSearch} />}
             {peer && (
               <CallBar
                 view={callView}
@@ -327,13 +366,14 @@ export default function App(): ReactNode {
               <FirstRun ownIp={snapshot.net.ownIp} onOpenSettings={openConnection} />
             ) : snapshot.pairing.status !== 'paired' ? (
               <PairingScreen pairing={snapshot.pairing} peerName={peer.name} />
-            ) : messages.length === 0 && hush.calls.length === 0 && !hush.peerTyping ? (
+            ) : messages.length === 0 && (!inGeneral || hush.calls.length === 0) && !hush.peerTyping ? (
               <EmptyChat peerName={peer.name} onSayHi={() => composer.current?.focus()} />
             ) : (
               <MessageList
+                key={`list:${channel}`}
                 messages={messages}
-                notices={hush.notices}
-                calls={shownCalls}
+                notices={inGeneral ? hush.notices : NO_NOTICES}
+                calls={inGeneral ? shownCalls : NO_CALLS}
                 callAction={callAction}
                 peerName={peer.name}
                 typing={hush.peerTyping}
@@ -350,6 +390,9 @@ export default function App(): ReactNode {
               <FlushToast key={hush.flush.id} text={deliveredText(hush.flush.count, peer.name)} onDone={hush.dismissFlush} />
             )}
             <Composer
+              key={`composer:${channel}`}
+              channel={channel}
+              channelName={inGeneral ? undefined : channelName}
               peerName={peer?.name ?? ''}
               disabled={!peer || snapshot.pairing.status !== 'paired' || snapshot.peer.catchingUp}
               disabledHint={
@@ -360,21 +403,21 @@ export default function App(): ReactNode {
                     : `Backup restored — you can write once ${peer.name} is online and Hush has caught up`
               }
               onSend={send}
-              onSendImage={hush.sendImage}
+              onSendImage={(image, caption, replyTo) => hush.sendImage(image, caption, replyTo, channel)}
               mode={composerMode}
               onCancelMode={() => setComposerMode(null)}
               onEdit={(id, text) => window.hush.editMessage(id, text)}
               onEditLast={editLast}
               onSendFile={async (file, caption, replyTo) => {
                 setNewMarker(null)
-                await window.hush.sendFile(file, caption, replyTo)
+                await window.hush.sendFile(file, caption, replyTo, channel)
               }}
               onSendVoice={async (note, replyTo) => {
                 setNewMarker(null)
-                await window.hush.sendVoice(note.bytes, note.durationMs, note.peaks, replyTo)
+                await window.hush.sendVoice(note.bytes, note.durationMs, note.peaks, replyTo, channel)
               }}
               micId={snapshot.settings.micId}
-              onTyping={(on) => window.hush.setTyping(on)}
+              onTyping={(on) => window.hush.setTyping(on, channel)}
               inputRef={composer}
               handleRef={composerHandle}
             />
@@ -385,6 +428,14 @@ export default function App(): ReactNode {
       <ShareDialog open={shareOpen} peerName={peer?.name ?? 'Peer'} onClose={() => setShareOpen(false)} onStart={startShare} />
       <DeleteDialog message={deleting} peerName={peer?.name ?? 'Peer'} onClose={() => setDeleting(null)} />
       <QuitDialog open={quitOpen} onOpenChange={setQuitOpen} inCall={call.busy} peerName={peer?.name ?? 'Peer'} />
+      <NewChannelDialog
+        open={newChannelOpen}
+        onOpenChange={setNewChannelOpen}
+        onCreated={(c) => {
+          setNewChannelOpen(false)
+          void switchChannel(c.id)
+        }}
+      />
       <IncomingCall
         open={callView.phase === 'incoming'}
         peerName={peer?.name ?? 'Peer'}
@@ -400,6 +451,7 @@ export default function App(): ReactNode {
       />
       {saved && <SavedNotice key={saved.n} path={saved.path} error={saved.error} onDone={() => setSaved(null)} />}
       <LiveAnnouncer
+        key={channel}
         peerName={peer?.name ?? ''}
         typing={hush.peerTyping}
         lastIncomingId={lastIncomingId(messages)}

@@ -17,8 +17,8 @@ const TYPING_REFRESH_MS = 3000
 /** Stop "typing" after this long without keystrokes. */
 const TYPING_IDLE_MS = 4000
 const MAX_ATTACHMENTS = 10
-/** What was being written, kept while the composer is away (the Settings screen replaces it). */
-let draft = ''
+/** What was being written in each channel, kept while it's not on screen. Never written to disk. */
+const drafts = new Map<string, string>()
 
 /** Writing a reply to a message, or editing one of your own. */
 export interface ComposerMode {
@@ -32,6 +32,8 @@ export interface ComposerHandle {
 }
 
 export function Composer({
+  channel,
+  channelName,
   peerName,
   disabled,
   disabledHint = 'Link someone in settings to start chatting',
@@ -48,6 +50,10 @@ export function Composer({
   onSendVoice,
   micId
 }: {
+  /** Fixed for the life of this composer: it's remounted when the channel changes. */
+  channel: string
+  /** Shown as the message box's target; absent in General, which says the person's name. */
+  channelName?: string
   peerName: string
   disabled: boolean
   disabledHint?: string
@@ -66,7 +72,7 @@ export function Composer({
   inputRef?: Ref<HTMLTextAreaElement>
   handleRef?: Ref<ComposerHandle>
 }): ReactNode {
-  const [text, setText] = useState(draft)
+  const [text, setText] = useState(() => drafts.get(channel) ?? '')
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [attachments, setAttachments] = useState<PreparedImage[]>([])
   /** Non-image files (and images too big or odd to preview), sent as files. */
@@ -81,8 +87,13 @@ export function Composer({
   const typing = useRef({ on: false, lastSent: 0, idle: undefined as ReturnType<typeof setTimeout> | undefined })
   const editing = mode?.kind === 'edit' ? mode.message : null
   useEffect(() => {
-    if (!editing) draft = text
-  }, [text, editing])
+    if (!editing) drafts.set(channel, text)
+  }, [text, editing, channel])
+  // A send can fail after the user has moved to another channel and this composer is gone.
+  const restoreText = (value: string): void => {
+    drafts.set(channel, value)
+    setText(value)
+  }
 
   // Entering edit mode puts the message's text in the box; reply mode just focuses it.
   const modeKey = mode ? `${mode.kind}:${mode.message.id}` : ''
@@ -122,7 +133,13 @@ export function Composer({
       onTyping(false)
     }
   }
-  useEffect(() => () => clearTimeout(typing.current.idle), [])
+  useEffect(
+    () => () => {
+      clearTimeout(typing.current.idle)
+      if (typing.current.on) onTyping(false) // otherwise they'd see "typing" until it times out
+    },
+    []
+  )
 
   const noteTyping = (value: string): void => {
     const t = typing.current
@@ -207,7 +224,7 @@ export function Composer({
     if (replyTo) onCancelMode()
     const fileQueue = files
     if (queue.length === 0 && fileQueue.length === 0) {
-      void onSend(value, replyTo).catch(() => setText(value)) // keep the text if sending failed
+      void onSend(value, replyTo).catch(() => restoreText(value)) // keep the text if sending failed
       return
     }
     setSending(true)
@@ -226,7 +243,7 @@ export function Composer({
         setFiles((prev) => prev.filter((x) => x.key !== f.key))
       }
     } catch (e) {
-      setText(value)
+      restoreText(value)
       const why = (e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
       setError(`Some attachments couldn't be sent (${why}). They're still in the tray — try again.`)
     } finally {
@@ -318,6 +335,7 @@ export function Composer({
     else if (inputRef) inputRef.current = el
   }
 
+  const target = channelName ? `#${channelName}` : peerName
   const trayVisible = attachments.length > 0 || files.length > 0 || preparing > 0
   const canRecord = !disabled && !editing && !sending && text.trim() === '' && attachments.length === 0 && files.length === 0
 
@@ -449,7 +467,7 @@ export function Composer({
           ) : (
             <>
             <label htmlFor="composer" className="sr-only">
-              Message {peerName}
+              Message {target}
             </label>
             <textarea
               id="composer"
@@ -466,7 +484,7 @@ export function Composer({
                     ? 'Edit your message'
                     : attachments.length
                       ? 'Add a caption (optional)'
-                      : `Message ${peerName}`
+                      : `Message ${target}`
               }
               onChange={(e) => update(e.target.value)}
               onBlur={stopTyping}

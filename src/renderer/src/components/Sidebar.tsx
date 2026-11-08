@@ -1,13 +1,22 @@
 import type { ReactNode, Ref } from 'react'
-import { Phone, Power, Settings, ShieldCheck } from 'lucide-react'
+import { Hash, Phone, Plus, Power, Settings, ShieldCheck } from 'lucide-react'
+import type { ChannelInfo } from '../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Avatar, HudLabel, Logo, StatusTag } from '@/components/common'
 import type { CallAction, PeerView } from '@/lib/view'
 import { cn } from '@/lib/utils'
 
+/** At short window heights the peer card gives up its avatar and details so channels have room. */
+const HIDE_WHEN_SHORT = '[@media(max-height:719px)]:hidden'
+
 export function Sidebar({
   peer,
+  channels,
+  activeChannel,
+  onSelectChannel,
+  onNewChannel,
+  newChannelBlocked,
   myName,
   call,
   onOpenSettings,
@@ -18,6 +27,13 @@ export function Sidebar({
   settingsButtonRef
 }: {
   peer: PeerView | null
+  /** Null until paired: there's nothing to organise before then. */
+  channels: ChannelInfo[] | null
+  activeChannel: string
+  onSelectChannel: (id: string) => void
+  onNewChannel: () => void
+  /** Why a channel can't be created right now; null if it can. */
+  newChannelBlocked: string | null
   myName: string
   call: CallAction
   onOpenSettings: () => void
@@ -42,7 +58,43 @@ export function Sidebar({
       <HudLabel className="px-4 pt-2 pb-1.5">Link</HudLabel>
       {peer ? <PeerCard peer={peer} call={call} paired={paired} /> : <NoPeerCard onOpenSettings={onLinkPeer} />}
 
-      <div className="flex-1" />
+      {channels ? (
+        <>
+          <div className="flex flex-none items-center justify-between pt-3 pr-3 pb-1 pl-4">
+            <HudLabel>Channels</HudLabel>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="icon"
+                  size="icon"
+                  className="size-7"
+                  aria-label={newChannelBlocked ? `New channel (${newChannelBlocked})` : 'New channel'}
+                  aria-disabled={!!newChannelBlocked}
+                  onClick={() => !newChannelBlocked && onNewChannel()}
+                >
+                  <Plus className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{newChannelBlocked ?? 'New channel'}</TooltipContent>
+            </Tooltip>
+          </div>
+          <nav aria-label="Channels" className="mb-3 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3">
+            {channels.map((c) => (
+              <button
+                key={c.id}
+                aria-current={c.id === activeChannel ? 'true' : undefined}
+                onClick={() => onSelectChannel(c.id)}
+                className="flex h-[34px] flex-none items-center gap-2 rounded-sm border-l-2 border-transparent px-3 text-left text-sm font-medium text-text-muted hover:bg-hover hover:text-text aria-[current=true]:border-cyan aria-[current=true]:bg-cyan-subtle aria-[current=true]:text-text"
+              >
+                <Hash aria-hidden="true" className="size-3.5 flex-none opacity-60" />
+                <span className="truncate">{c.name}</span>
+              </button>
+            ))}
+          </nav>
+        </>
+      ) : (
+        <div className="flex-1" />
+      )}
       {updateHint && (
         <div role="status" className="data mx-4 mb-3 border-l-2 border-queued pl-2 text-queued">
           {updateHint}
@@ -83,15 +135,15 @@ function PeerCard({ peer, call, paired }: { peer: PeerView; call: CallAction; pa
   const online = peer.presence === 'online'
   return (
     <div className="cut panel mx-3 flex flex-col items-center gap-1.5 px-4 pt-[18px] pb-4 text-center">
-      <div className="reticle">
+      <div className={cn('reticle', HIDE_WHEN_SHORT)}>
         <Avatar name={peer.name} who="peer" size={72} />
       </div>
       <div className="mt-1 max-w-full truncate text-lg leading-[26px] font-semibold">{peer.name}</div>
       <StatusTag online={online} />
-      <div className={cn('data', paired ? 'text-text-muted' : 'text-queued')}>
+      <div className={cn('data', paired ? cn('text-text-muted', HIDE_WHEN_SHORT) : 'text-queued')}>
         {!paired ? 'PAIRING NEEDED' : online ? 'LINK VERIFIED · P2P' : peer.lastSeen ? `LAST SEEN ${peer.lastSeen}` : 'NOT CONNECTED YET'}
       </div>
-      <div className="data text-text-muted">NODE {peer.ip}</div>
+      <div className={cn('data text-text-muted', HIDE_WHEN_SHORT)}>NODE {peer.ip}</div>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
@@ -114,7 +166,7 @@ function NoPeerCard({ onOpenSettings }: { onOpenSettings: () => void }): ReactNo
   return (
     <div className="cut panel mx-3 flex flex-col items-center gap-2 px-4 py-5 text-center">
       <div className="font-semibold">No one linked yet</div>
-      <p className="m-0 text-xs leading-4 text-text-muted">Add the other person's Tailscale IP to open your private channel.</p>
+      <p className="m-0 text-xs leading-4 text-text-muted">Add the other person's Tailscale IP to open your private link.</p>
       <Button variant="secondary" size="sm" className="mt-1" onClick={onOpenSettings}>
         Open settings
       </Button>

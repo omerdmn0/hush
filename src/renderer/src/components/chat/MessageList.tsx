@@ -63,10 +63,20 @@ export function MessageList({
   // Only messages that arrive from now on fade in, not every old row that scrolls into view.
   const [animateFrom] = useState(Date.now)
 
+  // A list opened for a search result in another channel starts on it. Scrolling there afterwards
+  // would race Virtuoso, which keeps moving a new list to its starting place while it settles.
+  const [opensAt] = useState(() => {
+    const index = jumpRequest ? items.findIndex((it) => it.kind === 'group' && it.messages.some((m) => m.id === jumpRequest.id)) : -1
+    return index < 0 ? null : { index, align: 'center' as const }
+  })
+
   // Jump to the message a reply quotes, and flash it.
-  const [highlightId, setHighlightId] = useState<string | null>(null)
+  const [highlightId, setHighlightId] = useState<string | null>(opensAt ? jumpRequest!.id : null)
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  useEffect(() => () => clearTimeout(highlightTimer.current), [])
+  useEffect(() => {
+    if (opensAt) highlightTimer.current = setTimeout(() => setHighlightId(null), 1600)
+    return () => clearTimeout(highlightTimer.current)
+  }, [])
   const jumpTo = useCallback((id: string) => {
     const index = itemsRef.current.findIndex((it) => it.kind === 'group' && it.messages.some((m) => m.id === id))
     if (index < 0) return
@@ -77,7 +87,7 @@ export function MessageList({
     highlightTimer.current = setTimeout(() => setHighlightId(null), 1600)
   }, [])
   const allActions: MessageActions = useMemo(() => ({ ...actions, onJump: jumpTo, highlightId }), [actions, jumpTo, highlightId])
-  const handledJump = useRef(0)
+  const handledJump = useRef(opensAt ? jumpRequest!.n : 0)
   useEffect(() => {
     if (!jumpRequest || jumpRequest.n === handledJump.current) return
     if (!items.some((it) => it.kind === 'group' && it.messages.some((m) => m.id === jumpRequest.id))) return // not loaded yet
@@ -99,7 +109,7 @@ export function MessageList({
   const wrapper = useRef<HTMLDivElement>(null)
   // "Stick to bottom" follows the user's own scrolling only. Layout changes (typing indicator,
   // call bar opening) don't fire scroll events, so they can't accidentally unstick the view.
-  const stick = useRef(true)
+  const stick = useRef(!opensAt)
 
   const pinToBottom = useCallback((): void => {
     const el = scroller.current
@@ -217,7 +227,7 @@ export function MessageList({
         firstItemIndex={firstIndex.current}
         startReached={startReached}
         computeItemKey={itemKey}
-        initialTopMostItemIndex={START_AT_END}
+        initialTopMostItemIndex={opensAt ?? START_AT_END}
         alignToBottom
         increaseViewportBy={OVERSCAN}
         itemContent={itemContent}

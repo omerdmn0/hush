@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { GENERAL_CHANNEL } from '../../../shared/protocol'
 import type { CallRecord, ChatMessage, HushEvent, OutgoingImage, Settings, Snapshot } from '../../../shared/types'
+import { PageGuard } from './pageGuard'
 import type { DeliveryNotice } from './timeline'
 import { setTransfer } from './transferStore'
 
@@ -9,6 +11,13 @@ const TYPING_TTL_MS = 6000
 
 export interface HushState {
   snapshot: Snapshot | null
+  /** The channel on screen. Hush opens on General each launch. */
+  channel: string
+  /**
+   * Shows that channel once its newest page, and history back to `until` if given, has loaded.
+   * False if another switch overtook it.
+   */
+  switchChannel: (id: string, until?: { id: string; sentAt: number }) => Promise<boolean>
   messages: ChatMessage[]
   hasMore: boolean
   loadingOlder: boolean
@@ -20,12 +29,12 @@ export interface HushState {
   /** The most recent flush, for the pop-up; null once it has been dismissed. */
   flush: DeliveryNotice | null
   dismissFlush: () => void
-  sendImage: (image: OutgoingImage, caption: string, replyTo?: string) => Promise<void>
+  sendImage: (image: OutgoingImage, caption: string, replyTo: string | undefined, channel: string) => Promise<void>
   retryImage: (id: string) => void
   loadOlder: () => void
   /** Loads older history until this message is in the list (for search). False if not found. */
   reveal: (id: string, sentAt: number) => Promise<boolean>
-  send: (text: string, replyTo?: string) => Promise<void>
+  send: (text: string, replyTo: string | undefined, channel: string) => Promise<void>
   markRead: (ids: string[]) => void
   updateSettings: (patch: Partial<Settings>) => Promise<void>
 }
@@ -33,6 +42,9 @@ export interface HushState {
 /** Renderer-side state, kept in sync with the main process through window.hush events. */
 export function useHush(): HushState {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
+  const [channel, setChannel] = useState<string>(GENERAL_CHANNEL)
+  const channelRef = useRef<string>(GENERAL_CHANNEL)
+  const guard = useRef(new PageGuard()).current
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [hasMore, setHasMore] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -54,7 +66,13 @@ export function useHush(): HushState {
     const onEvent = (e: HushEvent): void => {
       switch (e.type) {
         case 'message':
-          setMessages((prev) => insertSorted(prev, e.message, hasMoreRef.current))
+          // No need to hold on to messages for a channel being opened: main stores a message
+          // before announcing it, so it's either in that page or arrives after the page does.
+          if ((e.message.channel ?? GENERAL_CHANNEL) === channelRef.current) setMessages((prev) => insertSorted(prev, e.message, hasMoreRef.current))
+          break
+        case 'channels':
+          setSnapshot((s) => s && { ...s, channels: e.channels })
+          if (!e.channels.some((c) => c.id === channelRef.current)) void switchChannel(GENERAL_CHANNEL)
           break
         case 'event': {
           // An edit, deletion or reaction: re-read that message and any loaded replies quoting it.
@@ -107,6 +125,7 @@ export function useHush(): HushState {
           break
         }
         case 'typing':
+          if ((e.channel ?? GENERAL_CHANNEL) !== channelRef.current) break
           clearTimeout(typingTimer.current)
           setPeerTyping(e.on)
           if (e.on) typingTimer.current = setTimeout(() => setPeerTyping(false), TYPING_TTL_MS)
@@ -143,14 +162,40 @@ export function useHush(): HushState {
     }
   }, [])
 
+  // The old list stays up until the new page is ready, then everything changes in one update.
+  // The refs are set here too, so a reveal right after this sees the new channel.
+  const switchChannel = useCallback(async (id: string, until?: { id: string; sentAt: number }): Promise<boolean> => {
+    const newest = guard.beginSwitch()
+    if (id === channelRef.current) return true // also cancels a switch still on its way
+    const page = await window.hush.listMessages(undefined, PAGE, id)
+    if (!newest()) return false
+    const older = until ? await pageBackTo(until, id, page.messages[0], page.hasMore, newest) : { messages: [], more: page.hasMore }
+    if (!older) return false
+    const loaded = [...older.messages, ...page.messages]
+    guard.landed()
+    channelRef.current = id
+    messagesRef.current = loaded
+    hasMoreRef.current = older.more
+    loading.current = false
+    clearTimeout(typingTimer.current)
+    setChannel(id)
+    setMessages(loaded)
+    setHasMore(older.more)
+    setLoadingOlder(false)
+    setPeerTyping(false)
+    return true
+  }, [])
+
   const loadOlder = useCallback(() => {
     if (loading.current || !hasMore || messages.length === 0) return
     loading.current = true
     setLoadingOlder(true)
     const oldest = messages[0]
+    const sameList = guard.watchList()
     void window.hush
-      .listMessages({ sentAt: oldest.sentAt, id: oldest.id }, PAGE)
+      .listMessages({ sentAt: oldest.sentAt, id: oldest.id }, PAGE, channelRef.current)
       .then((page) => {
+        if (!sameList()) return
         setMessages((prev) => {
           const ids = new Set(prev.map((m) => m.id))
           return [...page.messages.filter((m) => !ids.has(m.id)), ...prev]
@@ -158,6 +203,7 @@ export function useHush(): HushState {
         setHasMore(page.hasMore)
       })
       .finally(() => {
+        if (!sameList()) return // the switch has already reset these
         loading.current = false
         setLoadingOlder(false)
       })
@@ -168,31 +214,27 @@ export function useHush(): HushState {
     if (loading.current) return false
     loading.current = true
     setLoadingOlder(true)
+    const sameList = guard.watchList()
     try {
-      const fetched: ChatMessage[] = []
-      let more = hasMoreRef.current
-      let cursor = messagesRef.current[0]
-      while (more && cursor && cursor.sentAt >= sentAt && !fetched.some((m) => m.id === id)) {
-        const page = await window.hush.listMessages({ sentAt: cursor.sentAt, id: cursor.id }, 500)
-        fetched.unshift(...page.messages)
-        more = page.hasMore
-        cursor = page.messages[0]
-      }
+      const older = await pageBackTo({ id, sentAt }, channelRef.current, messagesRef.current[0], hasMoreRef.current, sameList)
+      if (!older) return false
       setMessages((prev) => {
         const ids = new Set(prev.map((m) => m.id))
-        return [...fetched.filter((m) => !ids.has(m.id)), ...prev]
+        return [...older.messages.filter((m) => !ids.has(m.id)), ...prev]
       })
-      setHasMore(more)
-      return fetched.some((m) => m.id === id)
+      setHasMore(older.more)
+      return older.messages.some((m) => m.id === id)
     } finally {
-      loading.current = false
-      setLoadingOlder(false)
+      if (sameList()) {
+        loading.current = false
+        setLoadingOlder(false)
+      }
     }
   }, [])
 
-  const send = useCallback(async (text: string, replyTo?: string) => {
+  const send = useCallback(async (text: string, replyTo: string | undefined, target: string) => {
     // The main process echoes the new message back as a 'message' event.
-    await window.hush.sendMessage(text, replyTo)
+    await window.hush.sendMessage(text, replyTo, target)
   }, [])
 
   const markRead = useCallback((ids: string[]) => {
@@ -209,8 +251,8 @@ export function useHush(): HushState {
 
   const dismissFlush = useCallback(() => setFlush(null), [])
 
-  const sendImage = useCallback(async (image: OutgoingImage, caption: string, replyTo?: string) => {
-    await window.hush.sendImage(image, caption, replyTo)
+  const sendImage = useCallback(async (image: OutgoingImage, caption: string, replyTo: string | undefined, target: string) => {
+    await window.hush.sendImage(image, caption, replyTo, target)
   }, [])
 
   const retryImage = useCallback((id: string) => {
@@ -220,6 +262,8 @@ export function useHush(): HushState {
 
   return {
     snapshot,
+    channel,
+    switchChannel,
     messages,
     hasMore,
     loadingOlder,
@@ -236,6 +280,27 @@ export function useHush(): HushState {
     markRead,
     updateSettings
   }
+}
+
+/** Loads history older than `oldest` until `target` is in it. Null if `valid` stops holding. */
+async function pageBackTo(
+  target: { id: string; sentAt: number },
+  channel: string,
+  oldest: ChatMessage | undefined,
+  moreHistory: boolean,
+  valid: () => boolean
+): Promise<{ messages: ChatMessage[]; more: boolean } | null> {
+  const messages: ChatMessage[] = []
+  let more = moreHistory
+  let cursor = oldest
+  while (more && cursor && cursor.sentAt >= target.sentAt && !messages.some((m) => m.id === target.id)) {
+    const page = await window.hush.listMessages({ sentAt: cursor.sentAt, id: cursor.id }, 500, channel)
+    if (!valid()) return null
+    messages.unshift(...page.messages)
+    more = page.hasMore
+    cursor = page.messages[0]
+  }
+  return { messages, more }
 }
 
 /**

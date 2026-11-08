@@ -7,12 +7,15 @@ import type { CallAction, PeerView } from '@/lib/view'
 
 export function ChatHeader({
   peer,
+  channelName,
   call,
   onSearch,
   searchOpen,
   searchButtonRef
 }: {
   peer: PeerView | null
+  /** The channel on screen; absent until paired. */
+  channelName?: string
   call: CallAction
   /** Opens message search (absent when there's nothing to search). */
   onSearch?: () => void
@@ -24,7 +27,14 @@ export function ChatHeader({
     <header className="relative flex h-16 flex-none items-center gap-3 bg-app pr-4 pl-6 after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-[linear-gradient(90deg,var(--cyan),var(--edge)_45%,var(--edge))] after:opacity-80">
       {peer && <Avatar name={peer.name} who="peer" size={32} />}
       <div className="flex min-w-0 flex-col gap-0.5">
-        <HudLabel>Channel</HudLabel>
+        {channelName ? (
+          <div className="truncate text-xs leading-4 font-semibold text-cyan">
+            <span aria-hidden="true"># </span>
+            {channelName}
+          </div>
+        ) : (
+          <HudLabel>Link</HudLabel>
+        )}
         <h1 className="m-0 truncate text-lg leading-6 font-semibold">{peer?.name ?? 'Not linked'}</h1>
       </div>
       {peer && <StatusTag online={online} className="ml-2" />}

@@ -22,7 +22,7 @@ export function EmptyChat({ peerName, onSayHi }: { peerName: string; onSayHi: ()
   return (
     <Empty
       icon={<MessageCircle className="size-[30px]" />}
-      title="Channel is empty"
+      title="No messages yet"
       action={<Button onClick={onSayHi}>Say hi to {peerName}</Button>}
     >
       Your conversation with {peerName} lives only on your two computers.
@@ -42,7 +42,7 @@ export function FirstRun({ ownIp, onOpenSettings }: { ownIp: string | null | und
         <>Tailscale doesn't seem to be running on this computer. Start it, then add the other person's Tailscale IP.</>
       ) : (
         <>
-          Add their Tailscale IP to open the channel.
+          Add their Tailscale IP to connect.
           {ownIp && (
             <>
               {' '}
