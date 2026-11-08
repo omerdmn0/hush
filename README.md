@@ -171,9 +171,8 @@ can bring your history back.
 ### Updating
 
 **Settings → Updates → Check for updates**, then **Download** and **Restart to update**. Your
-messages, files, pairing and password stay: they live in a separate folder from the app. Every
-update is checked against the release signature before it's installed. If you're in a call or a
-file is moving, Hush asks before restarting. The `.deb` version asks for your administrator
+messages, files, pairing and password stay: they live in a separate folder from the app. If you're
+in a call or a file is moving, Hush asks before restarting. The `.deb` version asks for your administrator
 password. An AppImage in a folder you can't write to can't update itself: move it first.
 
 ---
@@ -242,15 +241,6 @@ Linux with plain PulseAudio instead of PipeWire can't use it; the screen is shar
 
 ### Publishing a release
 
-Once only, on the computer you'll release from (needs a terminal, Node.js 24+ and the `gh` CLI):
-```sh
-npm run release:keygen   # asks for a passphrase; commit the changed src/main/updateKey.ts
-```
-Back up `~/.config/hush-release/signing-key.json` and its passphrase away from GitHub. Without
-them new updates can't be signed, and everyone has to reinstall by hand once with a new key.
-
-Every release:
-
 1. Set the new version in `package.json` (e.g. `"version": "0.2.0"`), commit and push.
 2. Tag and push:
    ```sh
@@ -258,14 +248,12 @@ Every release:
    git push origin v0.2.0
    ```
 3. GitHub Actions (`.github/workflows/release.yml`) typechecks, runs the tests, builds the Windows
-   installer and the Linux AppImage + `.deb`, and creates a **draft Release**.
+   installer and the Linux AppImage + `.deb`, and publishes a **Release**.
    The tag must match the version in `package.json`.
-4. Sign and publish it:
-   ```sh
-   npm run release:publish v0.2.0
-   ```
 
-Installed copies find updates at `omerdmn0/hush` on GitHub: don't rename the repository.
+Installed copies find updates at `omerdmn0/hush` on GitHub: don't rename the repository. Releases
+aren't separately signed, so whoever controls that GitHub account controls what updates contain.
+Keep two-factor authentication on.
 
 To test a build without publishing, use **Actions → Release → Run workflow**; the files appear as
 downloadable artifacts of that run.

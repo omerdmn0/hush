@@ -1,4 +1,4 @@
-import { app, autoUpdater as nativeUpdater, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, net as electronNet, protocol, safeStorage, session, shell } from 'electron'
+import { app, autoUpdater as nativeUpdater, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session, shell } from 'electron'
 import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
@@ -39,8 +39,6 @@ import { findTailscaleIp } from './tailscale'
 import { LinuxScreenAudio, SOURCE_LABEL, type Run } from './screenAudioLinux'
 import { WindowsScreenAudio, type HelperCommand } from './screenAudioWindows'
 import { HushTray } from './tray'
-import { RELEASE_FILE } from './releaseManifest'
-import { UPDATE_PUBLIC_KEY } from './updateKey'
 import { Updater } from './updater'
 import { fieldCipher } from './vault'
 
@@ -534,13 +532,7 @@ if (!app.requestSingleInstanceLock()) {
     }))
 
     const updater = new Updater({
-      publicKey: UPDATE_PUBLIC_KEY,
       engine: async () => (await import('electron-updater')).default.autoUpdater,
-      fetchRelease: async (version) => {
-        const response = await electronNet.fetch(`https://github.com/omerdmn0/hush/releases/download/v${version}/${RELEASE_FILE}`)
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        return response.text()
-      },
       busy: () => {
         if (calls.openCalls().length > 0) return 'Restarting would end your call.'
         return chat.transfers.busy ? 'A file is still transferring. It will pick up where it stopped after the restart.' : null

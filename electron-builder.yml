@@ -30,7 +30,7 @@ nodeGypRebuild: false
 buildDependenciesFromSource: false
 
 # Where installed copies look for updates (never publishes from here: releases go through
-# release.yml and scripts/release.mjs). Changing this strands every copy already installed.
+# release.yml). Changing this strands every copy already installed.
 publish:
   provider: github
   owner: omerdmn0

@@ -1,5 +1,3 @@
-import { rmSync } from 'node:fs'
-import { releaseAllows, sha512File } from './releaseManifest'
 import type { UpdateState } from '../shared/types'
 
 /** The parts of electron-updater's `autoUpdater` Hush uses. */
@@ -15,12 +13,8 @@ export interface UpdateEngine {
 }
 
 export interface UpdaterDeps {
-  /** Empty in a build without a signing key: such a build can't update. */
-  publicKey: string
   /** Loaded on first use, so nothing update-related runs until the user asks. */
   engine: () => Promise<UpdateEngine>
-  /** The signed RELEASE_FILE of this version. */
-  fetchRelease: (version: string) => Promise<string>
   /** Why restarting now would interrupt something, if it would. */
   busy: () => string | null
   emit: (state: UpdateState) => void
@@ -42,7 +36,7 @@ export class Updater {
     this.set({ status: 'checking' })
     try {
       const engine = await this.engine()
-      if (!this.deps.publicKey || !engine.isUpdaterActive()) return this.set({ status: 'unsupported' })
+      if (!engine.isUpdaterActive()) return this.set({ status: 'unsupported' })
       const result = await engine.checkForUpdates()
       if (result?.isUpdateAvailable) this.set({ status: 'available', version: result.updateInfo.version })
       else this.set({ status: 'current' })
@@ -56,16 +50,13 @@ export class Updater {
     if (this.current.status !== 'available') return
     const { version } = this.current
     this.set({ status: 'downloading', version, percent: 0 })
-    let file: string | undefined
     try {
-      ;[file] = await (await this.engine()).downloadUpdate()
+      await (await this.engine()).downloadUpdate()
+      this.set({ status: 'ready', version })
     } catch (e) {
       console.error('Update download failed:', e)
-      return this.set({ status: 'error', message: 'The download didn’t finish. Try again.' })
+      this.set({ status: 'error', message: 'The download didn’t finish. Try again.' })
     }
-    if (file && (await this.isGenuine(file, version))) return this.set({ status: 'ready', version })
-    if (file) rmSync(file, { force: true })
-    this.set({ status: 'error', message: 'This update failed its security check, so it wasn’t installed.' })
   }
 
   /** Quits and installs. If that would interrupt something, it asks first (`anyway` confirms). */
@@ -79,19 +70,10 @@ export class Updater {
     ;(await this.engine()).quitAndInstall(true, true)
   }
 
-  private async isGenuine(file: string, version: string): Promise<boolean> {
-    try {
-      return releaseAllows(await this.deps.fetchRelease(version), this.deps.publicKey, version, await sha512File(file))
-    } catch (e) {
-      console.error('Update signature check failed:', e)
-      return false
-    }
-  }
-
   private async engine(): Promise<UpdateEngine> {
     if (this.loaded) return this.loaded
     const engine = await this.deps.engine()
-    // Nothing may download or install without a click, and never before the signature check.
+    // Nothing may download or install without a click.
     engine.autoDownload = false
     engine.autoInstallOnAppQuit = false
     engine.on('download-progress', ({ percent }) => {
