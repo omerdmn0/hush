@@ -1,7 +1,8 @@
 # Builds Hush for Windows (.exe installer) and Linux (AppImage + .deb).
 #
 # - Push a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`) → builds both and
-#   publishes a GitHub Release in this (private) repo with the three files attached.
+#   creates a DRAFT GitHub Release. `npm run release:publish v0.1.0` then signs and publishes it
+#   from the release computer, so installed copies only ever see signed releases.
 #   The tag must match "version" in package.json.
 # - "Run workflow" on the Actions tab → builds only; files appear as run artifacts (no release).
 name: Release
@@ -12,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -55,6 +56,15 @@ jobs:
             exit 1
           fi
 
+      - name: Release signing key is set
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          if ! grep -Eq "UPDATE_PUBLIC_KEY = '.+'" src/main/updateKey.ts; then
+            echo "::error::No signing key in src/main/updateKey.ts: run npm run release:keygen and commit it"
+            exit 1
+          fi
+
       - run: npm run typecheck
       - run: npm test
       - run: npx electron-vite build
@@ -74,6 +84,8 @@ jobs:
             release/*/*.exe
             release/*/*.AppImage
             release/*/*.deb
+            release/*/latest*.yml
+            release/*/*.blockmap
           if-no-files-found: error
           retention-days: 14
 
@@ -82,17 +94,20 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # the only job that can change the repo
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "Hush $GITHUB_REF_NAME" \
-            --generate-notes
+            --generate-notes \
+            --draft

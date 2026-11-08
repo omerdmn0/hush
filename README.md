@@ -79,8 +79,8 @@ Then start **Hush** from your applications menu.
 
 **Linux — `.AppImage` (any distribution)**
 ```sh
-chmod +x Hush-x.y.z-x86_64.AppImage
-./Hush-x.y.z-x86_64.AppImage
+chmod +x Hush-x86_64.AppImage
+./Hush-x86_64.AppImage
 ```
 No extra packages are needed. On Ubuntu and Debian the `.deb` is the smoother choice: it adds Hush
 to your applications menu.
@@ -168,6 +168,14 @@ can bring your history back.
   computer still has your whole conversation. *Recover* takes it back — including your own
   messages and pictures — and restarts. Only offered before you write anything on the new install.
 
+### Updating
+
+**Settings → Updates → Check for updates**, then **Download** and **Restart to update**. Your
+messages, files, pairing and password stay: they live in a separate folder from the app. Every
+update is checked against the release signature before it's installed. If you're in a call or a
+file is moving, Hush asks before restarting. The `.deb` version asks for your administrator
+password. An AppImage in a folder you can't write to can't update itself: move it first.
+
 ---
 
 ## Screen audio (work in progress)
@@ -211,8 +219,9 @@ Linux with plain PulseAudio instead of PipeWire can't use it; the screen is shar
 - **What travels:** messages, images, profile pictures and call setup go over one encrypted
   connection between your two computers inside your Tailscale network (WireGuard). Call audio goes
   directly between the computers, encrypted by WebRTC *and* Tailscale. Hush uses no servers —
-  no relay, no STUN/TURN, no analytics, no update checks. Hush only accepts connections from the
-  one IP you entered.
+  no relay, no STUN/TURN, no analytics. Hush only accepts connections from the one IP you entered.
+- **Updates:** Hush contacts GitHub only when you press *Check for updates*, so GitHub sees your
+  IP address at that moment. No chat data is involved, and nothing is checked automatically.
 - **What Tailscale sees:** Tailscale's coordination server knows your devices exist and helps
   them find each other; it cannot read your traffic.
 - **Where things are stored** (only on your computer):
@@ -222,6 +231,8 @@ Linux with plain PulseAudio instead of PipeWire can't use it; the screen is shar
 - **Encrypted on disk (AES-256-GCM):** message text, edits and reactions, every picture and
   preview, profile pictures, and Hush's identity key. *Not* encrypted: when messages were sent,
   names, settings and call history (times and durations) — the "who and when", not the "what".
+- **After an update that changes the database format,** Hush keeps `hush.db.before-upgrade` for a
+  week in case something went wrong, then deletes it. It's encrypted the same way as `hush.db`.
 - **Backups** are encrypted with their own password (scrypt + AES-256-GCM).
 - **Uninstalling** keeps that folder; delete it to remove your history.
 
@@ -231,6 +242,15 @@ Linux with plain PulseAudio instead of PipeWire can't use it; the screen is shar
 
 ### Publishing a release
 
+Once only, on the computer you'll release from (needs a terminal, Node.js 24+ and the `gh` CLI):
+```sh
+npm run release:keygen   # asks for a passphrase; commit the changed src/main/updateKey.ts
+```
+Back up `~/.config/hush-release/signing-key.json` and its passphrase away from GitHub. Without
+them new updates can't be signed, and everyone has to reinstall by hand once with a new key.
+
+Every release:
+
 1. Set the new version in `package.json` (e.g. `"version": "0.2.0"`), commit and push.
 2. Tag and push:
    ```sh
@@ -238,12 +258,17 @@ Linux with plain PulseAudio instead of PipeWire can't use it; the screen is shar
    git push origin v0.2.0
    ```
 3. GitHub Actions (`.github/workflows/release.yml`) typechecks, runs the tests, builds the Windows
-   installer and the Linux AppImage + `.deb`, and creates a **Release** with the three files.
+   installer and the Linux AppImage + `.deb`, and creates a **draft Release**.
    The tag must match the version in `package.json`.
+4. Sign and publish it:
+   ```sh
+   npm run release:publish v0.2.0
+   ```
+
+Installed copies find updates at `omerdmn0/hush` on GitHub: don't rename the repository.
 
 To test a build without publishing, use **Actions → Release → Run workflow**; the files appear as
-downloadable artifacts of that run. Builds use the free GitHub Actions minutes of the private repo
-(a full build takes roughly 15–25 minutes of quota; Windows minutes count double).
+downloadable artifacts of that run.
 
 From protocol **6** on, versions stay compatible: one of you can update first and you keep
 chatting; features the other app doesn't have yet are skipped, and Hush shows *“… has Hush x.y —
