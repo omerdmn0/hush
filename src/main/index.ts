@@ -8,7 +8,7 @@ import icon from '../../resources/icon.png?asset'
 import trayIcon from '../../resources/tray.png?asset'
 import trayUnreadIcon from '../../resources/tray-unread.png?asset'
 import badgeIcon from '../../resources/badge.png?asset'
-import { DEFAULT_PORT, isCallSignal, MAX_TEXT_LENGTH, parseFrame, sniffImage } from '../shared/protocol'
+import { DEFAULT_PORT, GENERAL_CHANNEL, isCallSignal, MAX_TEXT_LENGTH, parseFrame, sniffImage } from '../shared/protocol'
 import { isRiskyFile } from '../shared/files'
 import { isTailscaleIp } from '../shared/ip'
 import { IPC, type AutoBackup, type BackupResult, type CallRecord, type HistoryCursor, type HushEvent, type LockInfo, type NetState, type OutgoingImage, type PrivacyState, type ScreenAudioStarted, type ScreenAudioSupport, type Settings, type ShareOptions } from '../shared/types'
@@ -358,7 +358,7 @@ if (!app.requestSingleInstanceLock()) {
       tray?.update({ peerName: settings.peerIp || devPairing ? p.name : null, online: p.presence === 'online', unread, notifications: settings.notifications })
     }
     const refreshUnread = (): void => {
-      const n = db.unreadCount(selfId)
+      const n = chat.unread().total
       if (n === unread) return
       unread = n
       mainWindow?.setTitle(titleWithUnread(n) + (profile ? ` · ${profile}` : ''))
@@ -385,9 +385,17 @@ if (!app.requestSingleInstanceLock()) {
       }
       if (e.type === 'message' && e.message.from === 'peer') {
         // A message already deleted (arriving through sync) has nothing to announce.
-        if (!e.message.deleted) notifier.message({ text: e.message.text, hasImage: !!e.message.image, file: e.message.file?.name, voice: !!e.message.file?.voice })
+        if (!e.message.deleted) notifier.message({ text: e.message.text, hasImage: !!e.message.image, file: e.message.file?.name, voice: !!e.message.file?.voice, channel: e.message.channel })
         scheduleUnread()
       } else if (e.type === 'status') {
+        scheduleUnread()
+      } else if (e.type === 'channels') {
+        if (e.erased) notifier.dropChannel(e.erased)
+        // Creating a channel counts as writing something: recovery is no longer possible.
+        if (recoverable && chat.hasOwnMessages()) {
+          recoverable = false
+          void pushPrivacy()
+        }
         scheduleUnread()
       } else if (e.type === 'peer') {
         updateTray()
@@ -522,6 +530,7 @@ if (!app.requestSingleInstanceLock()) {
       settings: visible(settings),
       privacy: await privacyState(),
       peer: chat.peerState(),
+      channels: chat.listChannels(),
       net: { ...net },
       avatars: avatars.urls(),
       windowActive: userIsLooking(),
@@ -556,10 +565,17 @@ if (!app.requestSingleInstanceLock()) {
       return link.send(frame)
     })
 
-    ipcMain.handle(IPC.listMessages, (_e, before?: HistoryCursor, limit?: number) => {
+    /** Left out means General; anything else malformed must not quietly land in General. */
+    const channelArg = (v: unknown): string => {
+      if (v === undefined) return GENERAL_CHANNEL
+      if (typeof v !== 'string') throw new Error('Invalid channel')
+      return v
+    }
+
+    ipcMain.handle(IPC.listMessages, (_e, before?: HistoryCursor, limit?: number, channel?: unknown) => {
       const cursor =
         before && Number.isFinite(before.sentAt) && typeof before.id === 'string' ? { sentAt: before.sentAt, id: before.id } : undefined
-      return chat.listMessages(cursor, Number.isInteger(limit) ? (limit as number) : 100)
+      return chat.listMessages(cursor, Number.isInteger(limit) ? (limit as number) : 100, channelArg(channel))
     })
 
     const optionalId = (v: unknown): string | undefined => {
@@ -568,9 +584,14 @@ if (!app.requestSingleInstanceLock()) {
       return v
     }
 
-    ipcMain.handle(IPC.sendMessage, (_e, text: unknown, replyTo: unknown) => {
+    ipcMain.handle(IPC.sendMessage, (_e, text: unknown, replyTo: unknown, channel: unknown) => {
       if (typeof text !== 'string' || text.length > MAX_TEXT_LENGTH) throw new Error('Invalid message')
-      return chat.send(text, optionalId(replyTo))
+      return chat.send(text, optionalId(replyTo), channelArg(channel))
+    })
+
+    ipcMain.handle(IPC.createChannel, (_e, name: unknown) => {
+      if (typeof name !== 'string') throw new Error('Invalid name')
+      return chat.createChannel(name)
     })
 
     ipcMain.handle(IPC.getMessages, (_e, ids: unknown) => {
@@ -596,12 +617,12 @@ if (!app.requestSingleInstanceLock()) {
       return chat.react(id, emoji, on)
     })
 
-    ipcMain.handle(IPC.sendFilePath, (_e, path: unknown, caption: unknown, replyTo: unknown) => {
+    ipcMain.handle(IPC.sendFilePath, (_e, path: unknown, caption: unknown, replyTo: unknown, channel: unknown) => {
       if (typeof path !== 'string' || !isAbsolute(path) || typeof caption !== 'string') throw new Error('Invalid file')
-      return chat.sendFile(path, caption, optionalId(replyTo))
+      return chat.sendFile(path, caption, optionalId(replyTo), channelArg(channel))
     })
 
-    ipcMain.handle(IPC.sendFileBytes, (_e, bytes: unknown, name: unknown, caption: unknown, replyTo: unknown, voice: unknown) => {
+    ipcMain.handle(IPC.sendFileBytes, (_e, bytes: unknown, name: unknown, caption: unknown, replyTo: unknown, voice: unknown, channel: unknown) => {
       if (!(bytes instanceof Uint8Array) || typeof name !== 'string' || typeof caption !== 'string') throw new Error('Invalid file')
       let v: { durationMs: number; peaks: Uint8Array } | undefined
       if (voice !== undefined && voice !== null) {
@@ -609,7 +630,7 @@ if (!app.requestSingleInstanceLock()) {
         if (typeof o.durationMs !== 'number' || !(o.peaks instanceof Uint8Array)) throw new Error('Invalid voice note')
         v = { durationMs: Math.round(o.durationMs), peaks: o.peaks }
       }
-      return chat.sendFileBytes(bytes, name, caption, optionalId(replyTo), v)
+      return chat.sendFileBytes(bytes, name, caption, optionalId(replyTo), v, channelArg(channel))
     })
 
     ipcMain.on(IPC.downloadFile, (_e, id: unknown) => {
@@ -666,11 +687,11 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
 
-    ipcMain.handle(IPC.sendImage, (_e, img: OutgoingImage, caption: unknown, replyTo: unknown) => {
+    ipcMain.handle(IPC.sendImage, (_e, img: OutgoingImage, caption: unknown, replyTo: unknown, channel: unknown) => {
       if (!(img?.bytes instanceof Uint8Array) || !(img.thumb instanceof Uint8Array) || typeof caption !== 'string') {
         throw new Error('Invalid image')
       }
-      return chat.sendImage(img, caption, optionalId(replyTo)) // validates type, signature, size and preview
+      return chat.sendImage(img, caption, optionalId(replyTo), channelArg(channel)) // validates type, signature, size and preview
     })
 
     ipcMain.handle(IPC.setAvatar, (_e, bytes: unknown) => {
@@ -700,8 +721,8 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
 
-    ipcMain.on(IPC.setTyping, (_e, on: unknown) => {
-      if (typeof on === 'boolean') chat.setTyping(on)
+    ipcMain.on(IPC.setTyping, (_e, on: unknown, channel: unknown) => {
+      if (typeof on === 'boolean' && (channel === undefined || typeof channel === 'string')) chat.setTyping(on, channel)
     })
 
     ipcMain.handle(IPC.updateSettings, (_e, patch: Partial<Settings>) => {

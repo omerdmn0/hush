@@ -71,9 +71,15 @@ export class Transfers {
 
   /** The image was deleted: stop downloading or serving it. */
   cancel(id: string): void {
-    this.queue = this.queue.filter((x) => x !== id)
-    this.uploads.delete(id) // a running upload sees this and stops
-    if (this.current === id) {
+    this.cancelMany([id])
+  }
+
+  /** Several at once, so the next download is only started after all of them are gone. */
+  cancelMany(ids: string[]): void {
+    const gone = new Set(ids)
+    this.queue = this.queue.filter((x) => !gone.has(x))
+    for (const id of ids) this.uploads.delete(id) // a running upload sees this and stops
+    if (this.current && gone.has(this.current)) {
       clearTimeout(this.stallTimer)
       this.current = null
       this.pump()

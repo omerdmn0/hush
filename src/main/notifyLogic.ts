@@ -8,6 +8,8 @@ export interface IncomingSummary {
   /** Name of the attached file, if any. */
   file?: string
   voice?: boolean
+  /** The channel it arrived in (absent = General). */
+  channel?: string
 }
 
 /** Notify only when enabled and the user can't already see the chat. */

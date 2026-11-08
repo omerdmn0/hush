@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 import type { FileMeta, ImageMeta } from '../shared/protocol'
 import { isRiskyFile } from '../shared/files'
 import { CALL_OUTCOMES, type CallRecord, type ChatFile, type ChatImage, type ChatMessage, type HistoryCursor, type MessageStatus } from '../shared/types'
-import { isUuid } from '../shared/protocol'
+import { GENERAL_CHANNEL, isUuid } from '../shared/protocol'
 import { isSealedField, plainFields, type FieldCipher } from './vault'
 
 /**
@@ -31,6 +31,10 @@ export interface StoredMessage {
   replyTo?: string | null
   /** Present for file messages (kind 'file'); the bytes live in the attachment store. */
   file?: FileMeta | null
+  /** The channel it belongs to: an opaque id, or '' for General. */
+  channel?: string
+  /** Stored already erased (it arrived for a deleted channel). */
+  hidden?: boolean
 }
 
 type Migration = (db: Database.Database) => void
@@ -109,13 +113,34 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;`),
 
   // v7 — file attachments and voice notes (JSON description; bytes in the attachment store).
-  (db) => db.exec(`ALTER TABLE messages ADD COLUMN file TEXT;`)
+  (db) => db.exec(`ALTER TABLE messages ADD COLUMN file TEXT;`),
+
+  // v8 — text channels. Everything already stored belongs to General (''). `channel` is a random
+  // id; channel names only ever exist sealed, in the `data` of kind 'channel' rows.
+  (db) =>
+    db.exec(`
+      ALTER TABLE messages ADD COLUMN channel TEXT NOT NULL DEFAULT '';
+      CREATE INDEX messages_page ON messages (channel, sent_at, id) WHERE ref IS NULL AND hidden = 0;
+      CREATE INDEX messages_channel_ops ON messages (ref) WHERE kind IN ('channel', 'channel-del');`)
 ]
 
 // Status only ever moves forward, so replayed or out-of-order receipts are harmless.
 const RANK = `CASE status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 END`
 const RANK_OF: Record<MessageStatus, number> = { queued: 0, sent: 1, delivered: 2, read: 3 }
-const COLUMNS = 'id, author_id, seq, body, sent_at, status, image, kind, ref, data, reply_to, file'
+const COLUMNS = 'id, author_id, seq, body, sent_at, status, image, kind, ref, data, reply_to, file, channel'
+const PAGE = (older: string): string => `SELECT ${COLUMNS} FROM messages WHERE channel = ? AND ref IS NULL AND hidden = 0${older} ORDER BY sent_at DESC, id DESC LIMIT ?`
+
+/** Exported so the tests can pin the plans of the queries that actually run. */
+export const QUERIES = {
+  firstPage: PAGE(''),
+  olderPage: PAGE(' AND (sent_at < ? OR (sent_at = ? AND id < ?))'),
+  // INDEXED BY: left alone, the planner walks every row of the channel for each read receipt.
+  advanceRead: `UPDATE messages INDEXED BY messages_not_read SET status = 'read'
+    WHERE author_id = ? AND seq IS NOT NULL AND seq <= ? AND status <> 'read' AND channel = ? RETURNING id`,
+  unread: `SELECT channel, COUNT(*) AS n FROM messages INDEXED BY messages_not_read
+    WHERE author_id <> ? AND status <> 'read' AND ref IS NULL AND hidden = 0 GROUP BY channel`,
+  channelOps: `SELECT ${COLUMNS} FROM messages WHERE kind IN ('channel', 'channel-del')`
+}
 
 interface Row {
   id: string
@@ -130,6 +155,7 @@ interface Row {
   data: string | null
   reply_to: string | null
   file: string | null
+  channel: string
 }
 
 export class HushDb {
@@ -271,14 +297,15 @@ export class HushDb {
     id: string = randomUUID(),
     event: { kind: string; ref: string; data: string | null } | null = null,
     replyTo: string | null = null,
-    file: FileMeta | null = null
+    file: FileMeta | null = null,
+    channel: string = GENERAL_CHANNEL
   ): StoredMessage {
     return this.db.transaction(() => {
       const { top } = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE author_id = ? AND seq IS NOT NULL').get(authorId) as { top: number }
       // After recovering history from the peer, numbering continues after the old messages
       // even before they have all arrived.
       const next = Math.max(top, this.getSetting<number>(`seqFloor:${authorId}`) ?? 0) + 1
-      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image, replyTo, file, ...(file ? { kind: 'file' } : {}), ...(event ?? {}) }
+      const m: StoredMessage = { id, authorId, seq: next, body, sentAt, status: 'queued', image, replyTo, file, channel, ...(file ? { kind: 'file' } : {}), ...(event ?? {}) }
       this.insertMessage(m)
       return m
     })()
@@ -292,8 +319,8 @@ export class HushDb {
   insertMessage(m: StoredMessage, receivedAt: number = Date.now()): boolean {
     const r = this.db
       .prepare(
-        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image, kind, ref, data, reply_to, file)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+        `INSERT INTO messages (id, author_id, seq, body, sent_at, received_at, status, image, kind, ref, data, reply_to, file, channel, hidden)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
       )
       .run(
         m.id,
@@ -308,7 +335,9 @@ export class HushDb {
         m.ref ?? null,
         m.data == null ? null : this.cipher.seal(m.data),
         m.replyTo ?? null,
-        m.file ? this.cipher.seal(JSON.stringify(m.file)) : null
+        m.file ? this.cipher.seal(JSON.stringify(m.file)) : null,
+        m.channel ?? GENERAL_CHANNEL,
+        m.hidden ? 1 : 0
       )
     if (r.changes === 1) return true
     if (m.seq !== null) {
@@ -363,6 +392,39 @@ export class HushDb {
     })()
   }
 
+  /** Runs `fn` in one transaction: all of it happens, or none of it. */
+  atomic<T>(fn: () => T): T {
+    return this.db.transaction(fn)()
+  }
+
+  /** Create, rename and delete rows of every channel, including deleted ones. */
+  channelOps(): StoredMessage[] {
+    return (this.db.prepare(QUERIES.channelOps).all() as Row[]).map((r) => this.toStored(r))
+  }
+
+  channelDeleted(id: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM messages WHERE ref = ? AND kind = 'channel-del' LIMIT 1`).get(id)
+  }
+
+  /** Messages in this channel with something in the attachment store. */
+  channelAttachmentIds(id: string): string[] {
+    const rows = this.db.prepare(`SELECT id FROM messages WHERE channel = ? AND (image IS NOT NULL OR file IS NOT NULL)`).all(id) as { id: string }[]
+    return rows.map((r) => r.id)
+  }
+
+  /** Erases everything in a channel, its name included. The rows stay so `seq` has no gaps. Returns their ids. */
+  eraseChannel(id: string): string[] {
+    const rows = this.db
+      .prepare(`UPDATE messages SET body = '', image = NULL, file = NULL, data = NULL, reply_to = NULL, hidden = 1 WHERE channel = ? RETURNING id`)
+      .all(id) as { id: string }[]
+    return rows.map((r) => r.id)
+  }
+
+  /** Flushes the write-ahead log, so erased text doesn't linger there. */
+  checkpoint(): void {
+    this.db.pragma('wal_checkpoint(TRUNCATE)')
+  }
+
   /** "Delete for me": hidden on this computer only, and its content erased here. */
   hide(id: string): void {
     this.wipe(id)
@@ -412,6 +474,12 @@ export class HushDb {
     return rows.map((r) => r.id)
   }
 
+  /** Marks this author's messages in one channel read up to `upTo`. Returns changed ids. */
+  advanceReadUpTo(authorId: string, upTo: number, channel: string): string[] {
+    if (upTo <= 0) return []
+    return (this.db.prepare(QUERIES.advanceRead).all(authorId, upTo, channel) as { id: string }[]).map((r) => r.id)
+  }
+
   /**
    * Highest N such that messages 1…N by this author are all stored here.
    * "Contiguous" matters: a gap means something is missing and must be re-sent.
@@ -429,12 +497,20 @@ export class HushDb {
     return row.end
   }
 
-  /** Highest sequence number among this author's messages that are marked read here. */
-  readSeq(authorId: string): number {
+  /** Highest sequence number among this author's messages in a channel that are marked read here. */
+  readSeq(authorId: string, channel: string): number {
     const row = this.db
-      .prepare(`SELECT COALESCE(MAX(seq), 0) AS r FROM messages WHERE author_id = ? AND status = 'read' AND seq IS NOT NULL`)
-      .get(authorId) as { r: number }
+      .prepare(`SELECT COALESCE(MAX(seq), 0) AS r FROM messages WHERE author_id = ? AND channel = ? AND status = 'read' AND seq IS NOT NULL`)
+      .get(authorId, channel) as { r: number }
     return row.r
+  }
+
+  /** readSeq for every channel at once. */
+  readWatermarks(authorId: string): Map<string, number> {
+    const rows = this.db
+      .prepare(`SELECT channel, MAX(seq) AS r FROM messages WHERE author_id = ? AND status = 'read' AND seq IS NOT NULL GROUP BY channel`)
+      .all(authorId) as { channel: string; r: number }[]
+    return new Map(rows.map((x) => [x.channel, x.r]))
   }
 
   /** This author's messages with seq > afterSeq, oldest first. */
@@ -453,15 +529,14 @@ export class HushDb {
   /** Ids of this author's chat messages (not events) currently in one of the given statuses. */
   idsWithStatus(authorId: string, statuses: MessageStatus[]): string[] {
     const rows = this.db
-      .prepare(`SELECT id FROM messages WHERE author_id = ? AND ref IS NULL AND status IN (${statuses.map(() => '?').join(',')})`)
+      .prepare(`SELECT id FROM messages WHERE author_id = ? AND ref IS NULL AND hidden = 0 AND status IN (${statuses.map(() => '?').join(',')})`)
       .all(authorId, ...statuses) as { id: string }[]
     return rows.map((r) => r.id)
   }
 
-  /** Messages from the other person not yet seen on this computer. */
-  unreadCount(selfId: string): number {
-    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE author_id <> ? AND status <> 'read' AND ref IS NULL AND hidden = 0`).get(selfId) as { n: number }
-    return row.n
+  /** Messages from the other person not yet seen on this computer, per channel. */
+  unreadByChannel(selfId: string): { channel: string; n: number }[] {
+    return this.db.prepare(QUERIES.unread).all(selfId) as { channel: string; n: number }[]
   }
 
   // ---------- call history ----------
@@ -519,18 +594,12 @@ export class HushDb {
     return toStored(r, (v) => this.cipher.open(v))
   }
 
-  /** Newest-last page of history, older than `before` when given. */
-  listMessages(before: HistoryCursor | undefined, limit: number): { rows: StoredMessage[]; hasMore: boolean } {
+  /** Newest-last page of one channel's history, older than `before` when given. */
+  listMessages(before: HistoryCursor | undefined, limit: number, channel: string = GENERAL_CHANNEL): { rows: StoredMessage[]; hasMore: boolean } {
     const rows = (
       before
-        ? this.db
-            .prepare(
-              `SELECT ${COLUMNS} FROM messages
-               WHERE ref IS NULL AND hidden = 0 AND (sent_at < ? OR (sent_at = ? AND id < ?))
-               ORDER BY sent_at DESC, id DESC LIMIT ?`
-            )
-            .all(before.sentAt, before.sentAt, before.id, limit + 1)
-        : this.db.prepare(`SELECT ${COLUMNS} FROM messages WHERE ref IS NULL AND hidden = 0 ORDER BY sent_at DESC, id DESC LIMIT ?`).all(limit + 1)
+        ? this.db.prepare(QUERIES.olderPage).all(channel, before.sentAt, before.sentAt, before.id, limit + 1)
+        : this.db.prepare(QUERIES.firstPage).all(channel, limit + 1)
     ) as Row[]
     const hasMore = rows.length > limit
     return { rows: rows.slice(0, limit).reverse().map((r) => this.toStored(r)), hasMore }
@@ -550,7 +619,8 @@ function toStored(r: Row, open: (s: string) => string): StoredMessage {
     ref: r.ref,
     data: r.data === null ? null : open(r.data),
     replyTo: r.reply_to,
-    file: r.file ? (JSON.parse(open(r.file)) as FileMeta) : null
+    file: r.file ? (JSON.parse(open(r.file)) as FileMeta) : null,
+    channel: r.channel
   }
 }
 
@@ -562,6 +632,7 @@ export function toChatMessage(m: StoredMessage, selfId: string, imageReady: (id:
   const msg: ChatMessage = { id: m.id, from: m.authorId === selfId ? 'me' : 'peer', text: m.body, sentAt: m.sentAt, status: m.status }
   if (m.image) msg.image = chatImage(m.id, m.image, imageReady(m.id))
   if (m.file) msg.file = chatFile(m.id, m.file, imageReady(m.id))
+  if (m.channel) msg.channel = m.channel
   // A standalone message kind from a newer Hush: show a placeholder instead of breaking.
   if (m.kind && m.kind !== 'message' && m.kind !== 'file') {
     msg.text = ''

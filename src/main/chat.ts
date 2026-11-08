@@ -2,8 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { basename } from 'node:path'
 import { stat } from 'node:fs/promises'
 import {
+  cleanChannelName,
+  GENERAL_CHANNEL,
   IMAGE_MIME,
   isUuid,
+  MAX_CHANNELS,
   MAX_FILE_BYTES,
   MAX_IMAGE_BYTES,
   MAX_MEMORY_FILE_BYTES,
@@ -18,7 +21,7 @@ import {
   type ImageMime
 } from '../shared/protocol'
 import { cleanFileName, guessMime } from '../shared/files'
-import type { ChatMessage, HistoryCursor, HushEvent, OutgoingImage, PeerState, SearchResult } from '../shared/types'
+import type { ChannelInfo, ChatMessage, HistoryCursor, HushEvent, OutgoingImage, PeerState, SearchResult } from '../shared/types'
 import { fold, matchesAll, queryTerms } from '../shared/search'
 import { toChatMessage, type HushDb, type StoredMessage } from './db'
 import { applyEvents, isReactionEmoji, reactionData } from './events'
@@ -90,7 +93,8 @@ export class ChatService {
       lastSeen: this.db.getSetting<number>('peerLastSeen') ?? null,
       appVersion: this.db.getSetting<string>('peerApp') ?? null,
       catchingUp: !!this.db.getSetting<boolean>(AWAITING_SYNC),
-      canShare: this.link.peer?.features.includes('screen') ?? false
+      canShare: this.link.peer?.features.includes('screen') ?? false,
+      channelsReady: this.channelsReady()
     }
   }
 
@@ -99,8 +103,8 @@ export class ChatService {
     if (this.db.getSetting<boolean>(AWAITING_SYNC)) throw new Error('Catching up with the other computer first')
   }
 
-  listMessages(before: HistoryCursor | undefined, limit: number): { messages: ChatMessage[]; hasMore: boolean } {
-    const { rows, hasMore } = this.db.listMessages(before, Math.min(Math.max(limit, 1), 500))
+  listMessages(before: HistoryCursor | undefined, limit: number, channel: string = GENERAL_CHANNEL): { messages: ChatMessage[]; hasMore: boolean } {
+    const { rows, hasMore } = this.db.listMessages(before, Math.min(Math.max(limit, 1), 500), channel)
     return { messages: this.decorate(rows), hasMore }
   }
 
@@ -144,18 +148,20 @@ export class ChatService {
     const byRef = new Map<string, StoredMessage[]>()
     for (const e of events) byRef.set(e.ref!, [...(byRef.get(e.ref!) ?? []), e])
     const out = new Map<string, SearchEntry>()
+    const channels = this.channelMap()
     for (const m of messages) {
+      if (m.channel && !channels.has(m.channel)) continue
       const state = applyEvents(m.authorId, byRef.get(m.id) ?? [], this.selfId)
       if (state.deleted) continue
       const text = [state.text ?? m.body, m.file?.voice ? '' : (m.file?.name ?? '')].filter(Boolean).join(' · ')
-      const entry = this.searchEntry(m.id, m.authorId === this.selfId ? 'me' : 'peer', m.sentAt, text, !!m.image)
+      const entry = this.searchEntry(m.id, m.authorId === this.selfId ? 'me' : 'peer', m.sentAt, text, !!m.image, m.channel)
       if (entry) out.set(m.id, entry)
     }
     return out
   }
 
-  private searchEntry(id: string, from: 'me' | 'peer', sentAt: number, text: string, hasImage: boolean): SearchEntry | null {
-    return text ? { id, from, sentAt, text, hasImage, folded: fold(text).text } : null
+  private searchEntry(id: string, from: 'me' | 'peer', sentAt: number, text: string, hasImage: boolean, channel?: string): SearchEntry | null {
+    return text ? { id, from, sentAt, text, hasImage, ...(channel ? { channel } : {}), folded: fold(text).text } : null
   }
 
   /** A message appeared or changed: refresh its search text (only while search is in use). */
@@ -163,23 +169,35 @@ export class ChatService {
     if (!this.searchText) return
     const m = this.getMessages([id])[0]
     const text = m ? [m.text, m.file && !m.file.voice ? m.file.name : ''].filter(Boolean).join(' · ') : ''
-    const entry = m && !m.deleted && !m.unsupported ? this.searchEntry(m.id, m.from, m.sentAt, text, !!m.image) : null
+    const known = !m?.channel || this.channelMap().has(m.channel)
+    const entry = m && known && !m.deleted && !m.unsupported ? this.searchEntry(m.id, m.from, m.sentAt, text, !!m.image, m.channel) : null
     if (entry) this.searchText.set(id, entry)
     else this.searchText.delete(id)
   }
 
-  /** A reply must point at a chat message we have. */
-  private checkReply(replyTo: string | undefined): string | null {
+  /** A reply must point at a chat message we have, in the same channel. */
+  private checkReply(replyTo: string | undefined, channel: string): string | null {
     if (replyTo === undefined) return null
     const target = isUuid(replyTo) ? this.db.getMessage(replyTo) : undefined
-    if (!target || target.ref) throw new Error('That message is gone')
+    if (!target || target.ref || (target.channel ?? GENERAL_CHANNEL) !== channel) throw new Error('That message is gone')
     return target.id
   }
 
+  /** Something may only be written to General, or to a channel that exists on both sides. */
+  private checkChannel(channel: string): void {
+    if (channel !== GENERAL_CHANNEL && (!this.channelMap().has(channel) || !this.channelsReady())) throw new Error('That channel is gone')
+  }
+
+  /** A peer without channels would drop the channel id and lose the message's place for good. */
+  private channelsReady(): boolean {
+    return !!this.db.getSetting<boolean>('peerChannels')
+  }
+
   /** Validates an image prepared by the UI, stores it, and sends it like a message. */
-  async sendImage(img: OutgoingImage, caption: string, replyTo?: string): Promise<ChatMessage> {
+  async sendImage(img: OutgoingImage, caption: string, replyTo?: string, channel: string = GENERAL_CHANNEL): Promise<ChatMessage> {
     this.assertCanWrite()
-    const reply = this.checkReply(replyTo)
+    this.checkChannel(channel)
+    const reply = this.checkReply(replyTo, channel)
     const body = caption.trim()
     const mime = img.mime as ImageMime
     const valid =
@@ -197,19 +215,20 @@ export class ChatService {
     const meta: ImageMeta = { mime, width: img.width, height: img.height, size: img.bytes.length, sha256: sha256(img.bytes) }
     const id = randomUUID()
     this.store.saveOwn(id, meta, img.bytes, img.thumb)
-    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), meta, id, null, reply)
+    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), meta, id, null, reply, null, channel)
     this.emit({ type: 'message', message: this.toChat(stored) })
     const ok = await this.link.send(this.msgFrame(stored))
     if (ok) this.advanceMine([stored.id], 'sent')
     return this.toChat(this.db.getMessage(stored.id)!)
   }
 
-  async send(text: string, replyTo?: string): Promise<ChatMessage> {
+  async send(text: string, replyTo?: string, channel: string = GENERAL_CHANNEL): Promise<ChatMessage> {
     this.assertCanWrite()
+    this.checkChannel(channel)
     const body = text.trim()
     if (!body || body.length > MAX_TEXT_LENGTH) throw new Error('Message is empty or too long')
-    const reply = this.checkReply(replyTo)
-    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), null, undefined, null, reply)
+    const reply = this.checkReply(replyTo, channel)
+    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), null, undefined, null, reply, null, channel)
     this.emit({ type: 'message', message: this.toChat(stored) })
 
     // Offline: stays queued and goes out with the next sync.
@@ -222,17 +241,18 @@ export class ChatService {
    * Sends a file from disk (any type, up to 1 GB). It's copied into the encrypted store first —
    * streamed, never read whole — then sent like any message; the bytes follow in chunks.
    */
-  async sendFile(path: string, caption: string, replyTo?: string): Promise<ChatMessage> {
+  async sendFile(path: string, caption: string, replyTo?: string, channel: string = GENERAL_CHANNEL): Promise<ChatMessage> {
     this.assertCanWrite()
+    this.checkChannel(channel)
     const body = caption.trim()
     if (body.length > MAX_TEXT_LENGTH) throw new Error('Caption too long')
-    const reply = this.checkReply(replyTo)
+    const reply = this.checkReply(replyTo, channel)
     const info = await stat(path)
     if (!info.isFile() || info.size === 0 || info.size > MAX_FILE_BYTES) throw new Error('Files can be up to 1 GB')
     const id = randomUUID()
     const name = cleanFileName(basename(path))
     const { size, sha256: hash } = await this.store.importFile(id, path, MAX_FILE_BYTES)
-    return this.sendFileMessage(id, { name, size, mime: guessMime(name), sha256: hash }, body, reply)
+    return this.sendFileMessage(id, { name, size, mime: guessMime(name), sha256: hash }, body, reply, channel)
   }
 
   /** A small file from memory: pasted (≤ 25 MB) or a voice note (≤ 5 min). */
@@ -241,13 +261,15 @@ export class ChatService {
     rawName: string,
     caption: string,
     replyTo?: string,
-    voice?: { durationMs: number; peaks: Uint8Array }
+    voice?: { durationMs: number; peaks: Uint8Array },
+    channel: string = GENERAL_CHANNEL
   ): Promise<ChatMessage> {
     this.assertCanWrite()
+    this.checkChannel(channel)
     const body = caption.trim()
     if (body.length > MAX_TEXT_LENGTH) throw new Error('Caption too long')
     if (bytes.length === 0 || bytes.length > MAX_MEMORY_FILE_BYTES) throw new Error('Pasted files can be up to 25 MB')
-    const reply = this.checkReply(replyTo)
+    const reply = this.checkReply(replyTo, channel)
     const name = cleanFileName(rawName)
     const id = randomUUID()
     const meta: FileMeta = { name, size: bytes.length, mime: guessMime(name), sha256: '' }
@@ -259,11 +281,16 @@ export class ChatService {
     }
     meta.sha256 = this.store.saveOwnBytes(id, voice ? 'voice' : 'file', bytes)
     if (!parseFileMeta(meta)) throw new Error('Invalid file')
-    return this.sendFileMessage(id, meta, body, reply)
+    return this.sendFileMessage(id, meta, body, reply, channel)
   }
 
-  private async sendFileMessage(id: string, meta: FileMeta, body: string, reply: string | null): Promise<ChatMessage> {
-    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), null, id, null, reply, meta)
+  private async sendFileMessage(id: string, meta: FileMeta, body: string, reply: string | null, channel: string): Promise<ChatMessage> {
+    // Copying a big file takes a while: the channel may have been deleted meanwhile.
+    if (channel && this.db.channelDeleted(channel)) {
+      this.store.remove(id)
+      throw new Error('That channel is gone')
+    }
+    const stored = this.db.createOwnMessage(this.selfId, body, Date.now(), null, id, null, reply, meta, channel)
     this.emit({ type: 'message', message: this.toChat(stored) })
     if (await this.link.send(this.msgFrame(stored))) this.advanceMine([stored.id], 'sent')
     return this.toChat(this.db.getMessage(stored.id)!)
@@ -286,17 +313,19 @@ export class ChatService {
   markRead(ids: string[]): void {
     const changed = this.db.advanceStatusFromOthers(ids, 'read', this.selfId)
     if (changed.length === 0) return
-    // The receipt covers everything before it, including history not loaded on screen yet.
+    // The receipt covers everything before it in that channel, including history not loaded on
+    // screen yet. Other channels are untouched: reading one says nothing about the rest.
+    const channels = [...new Set(this.db.getMessages(changed, true).map((m) => m.channel ?? GENERAL_CHANNEL))]
     const peerId = this.db.getSetting<string>('peerId')
-    if (peerId) changed.push(...this.db.advanceUpTo(peerId, this.db.readSeq(peerId), 'read'))
+    if (peerId) for (const c of channels) changed.push(...this.db.advanceReadUpTo(peerId, this.db.readSeq(peerId, c), c))
     this.emit({ type: 'status', updates: changed.map((id) => ({ id, status: 'read' })) })
-    // Offline: the watermark travels in the next sync frame instead.
+    // Offline: the watermarks go out on the next connection instead.
     const online = this.link.peer?.id
-    if (online) void this.link.send({ t: 'read', author: online, upTo: this.db.readSeq(online) })
+    if (online) for (const c of channels) void this.link.send({ t: 'read', author: online, upTo: this.db.readSeq(online, c), ...channelField(c) })
   }
 
-  setTyping(on: boolean): void {
-    void this.link.send({ t: 'typing', on })
+  setTyping(on: boolean, channel: string = GENERAL_CHANNEL): void {
+    void this.link.send({ t: 'typing', on, ...channelField(channel) })
   }
 
   // ---------- link events ----------
@@ -306,11 +335,16 @@ export class ChatService {
     this.rememberPeer(peer)
     for (const id of this.db.idsWithStatus(this.selfId, ['queued'])) this.flushWatch.add(id)
     this.emit({ type: 'peer', peer: this.peerState() })
+    const read = this.db.readWatermarks(peer.id)
     void this.link.send({
       t: 'sync',
       have: { [this.selfId]: this.db.contiguousSeq(this.selfId), [peer.id]: this.db.contiguousSeq(peer.id) },
-      read: { [peer.id]: this.db.readSeq(peer.id) }
+      read: { [peer.id]: read.get(GENERAL_CHANNEL) ?? 0 }
     })
+    // Not in `sync`: its maps are capped, and one over the cap would refuse the whole frame.
+    for (const [channel, upTo] of read) {
+      if (channel !== GENERAL_CHANNEL && this.channelMap().has(channel)) void this.link.send({ t: 'read', author: peer.id, upTo, channel })
+    }
     this.transfers.onUp()
     if (this.avatars) void this.link.send({ t: 'avatar', data: this.avatars.selfBase64() })
   }
@@ -337,6 +371,26 @@ export class ChatService {
         // back our own messages after we recovered our history from it.
         const own = frame.author === this.selfId
         if (frame.author !== peer.id && !own) return
+        const channel = (frame.kind === 'channel' || frame.kind === 'channel-del' ? frame.ref : frame.channel) ?? GENERAL_CHANNEL
+        // Late for a channel that's gone (an edit made offline, say): keep the sequence number,
+        // nothing else. This comes first so even an image preview never reaches the disk.
+        if (channel && frame.kind !== 'channel-del' && this.db.channelDeleted(channel)) {
+          this.db.insertMessage({
+            id: frame.id,
+            authorId: frame.author,
+            seq: frame.seq,
+            body: '',
+            sentAt: frame.sentAt,
+            status: 'delivered',
+            image: null,
+            kind: frame.kind ?? 'message',
+            ref: frame.ref ?? null,
+            channel,
+            hidden: true
+          })
+          if (!own) this.queueAck(frame.id)
+          break
+        }
         let image: ImageMeta | null = null
         if (frame.image) {
           const { thumb, ...meta } = frame.image
@@ -360,17 +414,22 @@ export class ChatService {
           ref: frame.ref ?? null,
           data: frame.data ?? null,
           replyTo: frame.reply ?? null,
-          file: frame.file ?? null
+          file: frame.file ?? null,
+          channel
         }
-        // Events (edit/delete/react) are stored and acked like messages; the UI applies them.
-        if (this.db.insertMessage(stored)) {
-          if (stored.ref) {
+        if (frame.kind === 'channel-del' && channel) {
+          this.eraseChannel(channel, () => this.db.insertMessage(stored))
+        } else if (this.db.insertMessage(stored)) {
+          // Events (edit/delete/react) are stored and acked like messages; the UI applies them.
+          if (frame.kind === 'channel') {
+            this.channelsChanged()
+          } else if (stored.ref) {
             // Deleted for everyone by its author: erase it here too.
             const target = stored.kind === 'delete' ? this.db.getMessage(stored.ref) : undefined
             if (target && target.authorId === stored.authorId) this.erase(target.id)
             this.emit({ type: 'event', target: stored.ref })
           } else {
-            if (!own) this.emit({ type: 'typing', on: false })
+            if (!own) this.emit({ type: 'typing', on: false, ...channelField(channel) })
             this.emit({ type: 'message', message: this.toChat(stored) })
             if (image || stored.file) this.transfers.want(stored.id)
           }
@@ -398,10 +457,10 @@ export class ChatService {
         this.advanceMine(frame.ids, 'delivered')
         break
       case 'read':
-        if (frame.author === this.selfId) this.applyChanges(this.db.advanceUpTo(this.selfId, frame.upTo, 'read'), 'read')
+        if (frame.author === this.selfId) this.applyChanges(this.db.advanceReadUpTo(this.selfId, frame.upTo, frame.channel ?? GENERAL_CHANNEL), 'read')
         break
       case 'typing':
-        this.emit({ type: 'typing', on: frame.on })
+        this.emit({ type: 'typing', on: frame.on, ...channelField(frame.channel ?? GENERAL_CHANNEL) })
         break
       case 'avatar':
         if (this.avatars?.setPeer(frame.data === null ? null : Buffer.from(frame.data, 'base64'))) {
@@ -432,7 +491,7 @@ export class ChatService {
       this.emit({ type: 'peer', peer: this.peerState() })
     }
     this.applyChanges(this.db.advanceUpTo(this.selfId, theyHave, 'delivered'), 'delivered')
-    this.applyChanges(this.db.advanceUpTo(this.selfId, frame.read[this.selfId] ?? 0, 'read'), 'read')
+    this.applyChanges(this.db.advanceReadUpTo(this.selfId, frame.read[this.selfId] ?? 0, GENERAL_CHANNEL), 'read')
 
     if (!(await this.sendAfter(this.selfId, theyHave, true))) return
     const theirOwn = frame.have[peer.id] ?? 0
@@ -445,7 +504,9 @@ export class ChatService {
       const page = this.db.messagesAfter(author, after, SYNC_PAGE)
       if (page.length === 0) return true
       for (const m of page) {
-        if (!(await this.link.send(this.msgFrame(m)))) return false // next sync resumes
+        // Erased since this page was read (a delete can land mid-sync): its preview is gone.
+        const row = m.image ? (this.db.getMessage(m.id) ?? m) : m
+        if (!(await this.link.send(this.msgFrame(row)))) return false // next sync resumes
         if (mine) this.advanceMine([m.id], 'sent')
         after = m.seq!
       }
@@ -488,6 +549,7 @@ export class ChatService {
     if (m.data != null) frame.data = m.data
     if (m.replyTo) frame.reply = m.replyTo
     if (m.file) frame.file = m.file
+    if (m.channel) frame.channel = m.channel
     return frame
   }
 
@@ -497,7 +559,8 @@ export class ChatService {
    */
   async sendEvent(kind: 'edit' | 'delete' | 'react', ref: string, data: string | null): Promise<StoredMessage> {
     this.assertCanWrite()
-    const stored = this.db.createOwnMessage(this.selfId, '', Date.now(), null, undefined, { kind, ref, data })
+    // Stamped with its message's channel, so deleting the channel erases this too.
+    const stored = this.db.createOwnMessage(this.selfId, '', Date.now(), null, undefined, { kind, ref, data }, null, null, this.db.getMessage(ref)?.channel)
     this.emit({ type: 'event', target: ref })
     if (await this.link.send(this.msgFrame(stored))) this.advanceMine([stored.id], 'sent')
     return stored
@@ -555,6 +618,117 @@ export class ChatService {
     this.db.wipe(id)
     this.store.remove(id)
     this.transfers.cancel(id)
+  }
+
+  // ---------- channels ----------
+  // A channel is a label on the one message stream. Creating, renaming and deleting are ordinary
+  // rows in the per-author sequence, so the queue, sync, backup and recovery carry them as is.
+
+  /** Live channels (id → name), oldest first. Rebuilt only when one changes. */
+  private channelCache: Map<string, string> | null = null
+
+  private channelMap(): Map<string, string> {
+    if (this.channelCache) return this.channelCache
+    const ops = this.db.channelOps().sort((a, b) => a.sentAt - b.sentAt || (a.id < b.id ? -1 : 1))
+    const gone = new Set(ops.filter((o) => o.kind === 'channel-del').map((o) => o.ref!))
+    const out = new Map<string, string>()
+    // Both computers hold the same rows, so "last one wins" comes out the same on both.
+    for (const o of ops) if (o.kind === 'channel' && !gone.has(o.ref!)) out.set(o.ref!, cleanChannelName(o.data) ?? 'Unnamed')
+    this.channelCache = out
+    return out
+  }
+
+  listChannels(): ChannelInfo[] {
+    return [{ id: GENERAL_CHANNEL, name: 'General' }, ...[...this.channelMap()].map(([id, name]) => ({ id, name }))]
+  }
+
+  private channelsChanged(erased?: string): void {
+    this.channelCache = null
+    this.searchText = null // rebuilt on the next search, with the right channels
+    this.emit({ type: 'channels', channels: this.listChannels(), ...(erased ? { erased } : {}) })
+  }
+
+  private checkChannelName(name: string, except?: string): string {
+    const clean = cleanChannelName(name)
+    if (!clean) throw new Error('Channel names can be 1 to 32 characters')
+    const key = clean.toLocaleLowerCase()
+    if (this.listChannels().some((c) => c.id !== except && c.name.toLocaleLowerCase() === key)) throw new Error('There is already a channel with that name')
+    return clean
+  }
+
+  /** Whether channels can be used yet (the other Hush must support them too). */
+  private assertChannelsUsable(): void {
+    this.assertCanWrite()
+    if (!this.channelsReady()) throw new Error('Channels need both computers on the latest Hush')
+  }
+
+  async createChannel(name: string): Promise<ChannelInfo> {
+    this.assertChannelsUsable()
+    const clean = this.checkChannelName(name)
+    if (this.channelMap().size >= MAX_CHANNELS) throw new Error(`You can have up to ${MAX_CHANNELS} channels`)
+    const id = randomUUID()
+    await this.sendChannelRow(id, clean)
+    return { id, name: clean }
+  }
+
+  async renameChannel(id: string, name: string): Promise<void> {
+    this.assertChannelsUsable()
+    if (!this.channelMap().has(id)) throw new Error('That channel is gone')
+    const clean = this.checkChannelName(name, id)
+    if (clean !== this.channelMap().get(id)) await this.sendChannelRow(id, clean)
+  }
+
+  private writeChannelRow(id: string, name: string): StoredMessage {
+    return this.db.createOwnMessage(this.selfId, '', Date.now(), null, undefined, { kind: 'channel', ref: id, data: name }, null, null, id)
+  }
+
+  private async sendChannelRow(id: string, name: string): Promise<void> {
+    const stored = this.writeChannelRow(id, name)
+    this.channelsChanged()
+    if (await this.link.send(this.msgFrame(stored))) this.advanceMine([stored.id], 'sent')
+  }
+
+  /** Permanently erases a channel and everything in it, on both computers. */
+  async deleteChannel(id: string): Promise<void> {
+    this.assertChannelsUsable()
+    if (!this.channelMap().has(id)) throw new Error('That channel is gone')
+    let stored: StoredMessage
+    this.eraseChannel(id, () => {
+      stored = this.db.createOwnMessage(this.selfId, '', Date.now(), null, undefined, { kind: 'channel-del', ref: id, data: null }, null, null, id)
+      return true
+    })
+    if (await this.link.send(this.msgFrame(stored!))) this.advanceMine([stored!.id], 'sent')
+  }
+
+  /**
+   * Records a delete and erases the channel as one step. `record` returns false for a delete
+   * already applied. Crashing halfway rolls back, and the delete is simply delivered again.
+   */
+  private eraseChannel(id: string, record: () => boolean): void {
+    const erased = this.db.atomic(() => {
+      if (!record()) return null
+      const files = this.db.channelAttachmentIds(id)
+      for (const f of files) this.store.remove(f)
+      return { files, rows: this.db.eraseChannel(id) }
+    })
+    if (!erased) return
+    this.transfers.cancelMany(erased.files)
+    for (const r of erased.rows) this.flushWatch.delete(r)
+    this.db.checkpoint()
+    this.channelsChanged(id)
+  }
+
+  /** Unread messages per channel, and in total. Messages in a channel not known yet don't count. */
+  unread(): { total: number; byChannel: Record<string, number> } {
+    const known = this.channelMap()
+    const byChannel: Record<string, number> = {}
+    let total = 0
+    for (const { channel, n } of this.db.unreadByChannel(this.selfId)) {
+      if (channel !== GENERAL_CHANNEL && !known.has(channel)) continue
+      byChannel[channel] = n
+      total += n
+    }
+    return { total, byChannel }
   }
 
   private toChat(m: StoredMessage): ChatMessage {
@@ -637,12 +811,24 @@ export class ChatService {
     const before = this.db.getSetting<string>('peerId')
     if (before && before !== peer.id && this.db.maxSeq(before) > 0) this.db.setSetting('previousPeerId', before)
     if (this.db.getSetting<string>('previousPeerId') === peer.id) this.db.setSetting('previousPeerId', null)
+    // Read fresh on every connection, so a peer going back to an older Hush is noticed.
+    const channels = peer.features.includes('channels')
+    this.db.setSetting('peerChannels', channels)
+    // A reinstalled peer can't get back rows written under its old id, so the channels it created
+    // would be unknown to it. Re-announcing them under our id goes out with the coming sync.
+    if (before && before !== peer.id && channels && !this.db.getSetting<boolean>(AWAITING_SYNC)) {
+      for (const [id, name] of this.channelMap()) this.writeChannelRow(id, name)
+      this.channelCache = null
+    }
     this.db.setSetting('peerId', peer.id)
     this.db.setSetting('peerName', peer.name)
     this.db.setSetting('peerApp', peer.app)
     this.db.setSetting('peerLastSeen', Date.now())
   }
 }
+
+/** General is the absence of a channel id on the wire. */
+const channelField = (channel: string): { channel?: string } => (channel === GENERAL_CHANNEL ? {} : { channel })
 
 interface SearchEntry extends SearchResult {
   folded: string

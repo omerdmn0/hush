@@ -437,7 +437,7 @@ describe('ChatService — events', () => {
     expect(b.db.getMessage(edit.id)).toMatchObject({ kind: 'edit', ref: m.id, data: 'edited text' })
     expect(b.db.listMessages(undefined, 50).rows.map((r) => r.id)).toEqual([m.id])
     expect(b.events.filter((e) => e.type === 'event' && e.target === m.id).length).toBe(2)
-    expect(b.db.unreadCount(b.id)).toBe(1)
+    expect(b.chat.unread().total).toBe(1)
   })
 
   it('stores an unknown message kind from a newer Hush and shows a placeholder', async () => {
@@ -804,7 +804,7 @@ describe('ChatService — robustness', () => {
     b.start()
     await until(() => b.count() === 3)
     b.chat.markRead([sent[2].id]) // only the newest page of history is on screen
-    expect(b.db.unreadCount(b.id)).toBe(0)
+    expect(b.chat.unread().total).toBe(0)
     await until(() => a.db.getMessage(sent[0].id)?.status === 'read')
   })
 
@@ -940,5 +940,319 @@ describe('ChatService — robustness', () => {
       },
       () => {} // refused up front is fine; accepted and then never delivered is not
     )
+  })
+})
+
+describe('ChatService — channels', () => {
+  const rows = (s: Side, q: string, ...args: unknown[]): Record<string, unknown>[] =>
+    (s.db as unknown as { db: Database.Database }).db.prepare(q).all(...args) as Record<string, unknown>[]
+  const linked = async (): Promise<[Side, Side]> => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    return [a, b]
+  }
+  const reconnect = async (a: Side, b: Side): Promise<void> => {
+    a.start()
+    b.start()
+    await online(a, b)
+  }
+  const caughtUp = (from: Side, to: Side): Promise<void> => until(() => to.db.contiguousSeq(from.id) === from.db.maxSeq(from.id))
+  const channelCount = (s: Side, n: number): Promise<void> => until(() => s.chat.listChannels().length === n, 10_000)
+  const erasedAll = (s: Side, channel: string): void => {
+    const list = rows(s, 'SELECT body, data, image, file, reply_to, hidden FROM messages WHERE channel = ?', channel)
+    expect(list.length).toBeGreaterThan(0)
+    for (const r of list) expect(r).toEqual({ body: '', data: null, image: null, file: null, reply_to: null, hidden: 1 })
+  }
+
+  it('creates a channel on both computers and keeps its name sealed on disk', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('  Business  ')
+    expect(c.name).toBe('Business')
+    await channelCount(b, 2)
+    expect(b.chat.listChannels()).toEqual([{ id: '', name: 'General' }, c])
+    expect(rows(b, `SELECT data FROM messages WHERE kind = 'channel'`)[0].data).toMatch(/^enc1:/)
+    await expect(a.chat.createChannel('business')).rejects.toThrow('already')
+    await expect(a.chat.createChannel('general')).rejects.toThrow('already')
+    await expect(a.chat.createChannel('   ')).rejects.toThrow()
+  })
+
+  it('keeps each channel’s messages apart, and replies inside their channel', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    const inGeneral = await a.chat.send('general chat')
+    const inBiz = await a.chat.send('the invoice', undefined, c.id)
+    expect(inBiz.channel).toBe(c.id)
+    await until(() => !!b.db.getMessage(inBiz.id))
+    expect(b.chat.listMessages(undefined, 10).messages.map((m) => m.text)).toEqual(['general chat'])
+    expect(b.chat.listMessages(undefined, 10, c.id).messages.map((m) => m.text)).toEqual(['the invoice'])
+    await expect(b.chat.send('wrong place', inGeneral.id, c.id)).rejects.toThrow()
+    expect((await b.chat.send('right place', inBiz.id, c.id)).replyTo).toMatchObject({ id: inBiz.id })
+    await expect(a.chat.send('nowhere', undefined, randomUUID())).rejects.toThrow('gone')
+  })
+
+  it('reading one channel leaves the others unread, in either order', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    const generalFirst = await a.chat.send('one')
+    const bizSecond = await a.chat.send('two', undefined, c.id)
+    await until(() => !!b.db.getMessage(bizSecond.id))
+    expect(b.chat.unread()).toEqual({ total: 2, byChannel: { '': 1, [c.id]: 1 } })
+
+    b.chat.markRead([bizSecond.id])
+    await until(() => a.db.getMessage(bizSecond.id)?.status === 'read')
+    await settle(100)
+    expect(a.db.getMessage(generalFirst.id)?.status).toBe('delivered')
+    expect(b.chat.unread()).toEqual({ total: 1, byChannel: { '': 1 } })
+
+    const bizFirst = await a.chat.send('three', undefined, c.id)
+    const generalSecond = await a.chat.send('four')
+    await until(() => !!b.db.getMessage(generalSecond.id))
+    b.chat.markRead([generalSecond.id])
+    await until(() => a.db.getMessage(generalSecond.id)?.status === 'read')
+    await settle(100)
+    expect(a.db.getMessage(generalFirst.id)?.status).toBe('read') // earlier in the same channel
+    expect(a.db.getMessage(bizFirst.id)?.status).toBe('delivered')
+  })
+
+  it('erases text, attachments and the name on both computers', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Secret plans')
+    await channelCount(b, 2)
+    const text = await a.chat.send('private', undefined, c.id)
+    const img = await a.chat.sendImage(outgoing(png(32, 24)), 'photo', text.id, c.id)
+    await a.chat.edit(text.id, 'edited private')
+    await until(() => !!b.db.getMessage(img.id) && a.db.contiguousSeq(a.id) > 0)
+    const meta = a.db.getMessage(img.id)!.image!
+    await until(() => b.store.hasFull(img.id, meta))
+    const general = await a.chat.send('stays')
+
+    await b.chat.deleteChannel(c.id)
+    await channelCount(a, 1)
+    for (const s of [a, b]) {
+      erasedAll(s, c.id)
+      expect(existsSync(s.store.thumbPath(img.id))).toBe(false)
+      expect(existsSync(s.store.fullPath(img.id, meta))).toBe(false)
+      expect(s.chat.listMessages(undefined, 10, c.id).messages).toEqual([])
+    }
+    await until(() => !!b.db.getMessage(general.id))
+    expect(b.db.getMessage(general.id)?.body).toBe('stays')
+    await expect(a.chat.send('after', undefined, c.id)).rejects.toThrow('gone')
+    await expect(a.chat.renameChannel(c.id, 'Back')).rejects.toThrow('gone')
+  })
+
+  it('stores anything late for a deleted channel empty, with no gap in the sequence', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    const m = await a.chat.send('original', undefined, c.id)
+    await until(() => !!b.db.getMessage(m.id))
+    await a.stop()
+    await b.stop()
+
+    await a.chat.edit(m.id, 'edited offline')
+    await a.chat.react(m.id, '🔥', true)
+    await a.chat.renameChannel(c.id, 'Renamed offline')
+    const late = await a.chat.send('sent offline', undefined, c.id)
+    const img = await a.chat.sendImage(outgoing(png(16, 12)), 'late photo', undefined, c.id)
+    await b.chat.deleteChannel(c.id)
+
+    await reconnect(a, b)
+    await caughtUp(a, b)
+    await caughtUp(b, a)
+    await channelCount(a, 1)
+    for (const s of [a, b]) erasedAll(s, c.id)
+    expect(existsSync(b.store.thumbPath(img.id))).toBe(false)
+    expect(existsSync(a.store.thumbPath(img.id))).toBe(false)
+    expect(b.events.some((e) => e.type === 'message' && e.message.id === late.id)).toBe(false)
+    expect(b.chat.unread().total).toBe(0)
+  })
+
+  it('finishes a sync when a delete erases a picture halfway through it', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    await a.stop()
+    await b.stop()
+    const first = await a.chat.send('first', undefined, c.id)
+    const img = await a.chat.sendImage(outgoing(png(16, 12)), '', undefined, c.id)
+    a.start()
+    const send = a.link.send.bind(a.link)
+    a.link.send = (f: Frame) => {
+      if (f.t === 'msg' && f.id === first.id) {
+        a.db.eraseChannel(c.id)
+        a.store.remove(img.id)
+      }
+      return send(f)
+    }
+    b.start()
+    await online(a, b)
+    await caughtUp(a, b)
+    expect(b.db.getMessage(img.id)?.image).toBeNull()
+  })
+
+  it('applies a delete once, even when it is delivered again', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    await a.chat.deleteChannel(c.id)
+    await channelCount(b, 1)
+    const row = rows(a, `SELECT id, seq, sent_at FROM messages WHERE kind = 'channel-del'`)[0]
+    await a.link.send({ t: 'msg', id: row.id as string, author: a.id, seq: row.seq as number, body: '', sentAt: row.sent_at as number, kind: 'channel-del', ref: c.id, channel: c.id })
+    await settle()
+    expect(b.events.filter((e) => e.type === 'channels' && e.erased === c.id)).toHaveLength(1)
+  })
+
+  it('rolls the whole delete back if erasing fails, and applies it on redelivery', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    const img = await a.chat.sendImage(outgoing(png(16, 12)), 'photo', undefined, c.id)
+    await until(() => !!b.db.getMessage(img.id))
+
+    const remove = b.store.remove.bind(b.store)
+    b.store.remove = () => {
+      throw new Error('disk trouble')
+    }
+    await a.chat.deleteChannel(c.id)
+    await settle()
+    expect(rows(b, `SELECT 1 FROM messages WHERE kind = 'channel-del'`)).toHaveLength(0)
+    expect(b.db.getMessage(img.id)?.body).toBe('photo')
+
+    b.store.remove = remove
+    await a.stop()
+    await b.stop()
+    await reconnect(a, b)
+    await channelCount(b, 1)
+    erasedAll(b, c.id)
+  })
+
+  it('converges with 32 channels made on each side offline, and catches up reads in all of them', async () => {
+    const [a, b] = await linked()
+    await a.stop()
+    await b.stop()
+    const made: string[] = []
+    for (let i = 0; i < 32; i++) {
+      made.push((await a.chat.createChannel(`a${i}`)).id)
+      await b.chat.createChannel(`b${i}`)
+    }
+    await expect(a.chat.createChannel('one too many')).rejects.toThrow('up to')
+
+    await reconnect(a, b)
+    await channelCount(a, 65)
+    await channelCount(b, 65)
+    expect(a.chat.listChannels()).toEqual(b.chat.listChannels())
+
+    const sent = await Promise.all(made.slice(0, 20).map((c) => a.chat.send('hi', undefined, c)))
+    await until(() => sent.every((m) => !!b.db.getMessage(m.id)))
+    await a.stop()
+    await b.stop()
+    b.chat.markRead(sent.map((m) => m.id))
+    await reconnect(a, b)
+    await until(() => sent.every((m) => a.db.getMessage(m.id)?.status === 'read'), 10_000)
+  }, 30_000)
+
+  it('shows a fallback for a name it can’t use, rather than refusing the row', async () => {
+    const [a, b] = await linked()
+    const id = randomUUID()
+    await a.link.send({ t: 'msg', id: randomUUID(), author: a.id, seq: 1, body: '', sentAt: Date.now(), kind: 'channel', ref: id, data: 'x'.repeat(100), channel: id })
+    await channelCount(b, 2)
+    expect(b.chat.listChannels()[1]).toEqual({ id, name: 'Unnamed' })
+    expect(b.db.contiguousSeq(a.id)).toBe(1)
+  })
+
+  it('leaves erased messages out of the "delivered" notice', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    await a.stop()
+    await b.stop()
+    await a.chat.send('queued in the channel', undefined, c.id)
+    await a.chat.send('queued in general')
+    await a.chat.deleteChannel(c.id)
+    await reconnect(a, b)
+    await until(() => a.events.some((e) => e.type === 'flushed'))
+    expect(a.events.filter((e) => e.type === 'flushed').map((e) => (e as { count: number }).count)).toEqual([1])
+  })
+
+  it('finds nothing from a channel once it is deleted, even with search already loaded', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    await a.chat.send('needle', undefined, c.id)
+    expect(a.chat.search('needle').results).toHaveLength(1)
+    await a.chat.deleteChannel(c.id)
+    expect(a.chat.search('needle').results).toHaveLength(0)
+  })
+
+  it('cancels every download of a deleted channel without starting one of them', async () => {
+    const [a] = await sides()
+    a.start()
+    const t = a.chat.transfers as unknown as { queue: string[]; current: string | null; request: (id: string) => void; cancelMany: (ids: string[]) => void }
+    let asked = 0
+    t.request = () => asked++
+    t.queue = ['x', 'y', 'keep']
+    t.current = 'z'
+    t.cancelMany(['x', 'y', 'z'])
+    expect(t.queue).toEqual(['keep'])
+    expect(t.current).toBeNull()
+    expect(asked).toBe(0) // no peer connected, and nothing erased was requested
+  })
+
+  it('gives a reinstalled peer the channels it created under its old id', async () => {
+    const [pa, pb] = [await freePort(), await freePort()]
+    const [a, b] = pairUp(new Side('Alice', randomUUID(), pa, pb), new Side('Bob', randomUUID(), pb, pa))
+    await reconnect(a, b)
+    const c = await b.chat.createChannel('Made by Bob')
+    await channelCount(a, 2)
+    await a.chat.send('still here', undefined, c.id)
+    await b.stop()
+
+    const fresh = new Side('Bob', randomUUID(), pb, pa)
+    pairUp(a, fresh)
+    fresh.start()
+    await until(() => fresh.link.peer !== null && a.link.peer !== null)
+    await channelCount(fresh, 2)
+    expect(fresh.chat.listChannels()[1]).toEqual(c)
+    await until(() => fresh.chat.listMessages(undefined, 10, c.id).messages.length === 1)
+  })
+
+  it('counts as writing, and waits for the peer after a restore', async () => {
+    const [a, b] = await linked()
+    expect(a.chat.hasOwnMessages()).toBe(false)
+    const c = await a.chat.createChannel('Business')
+    expect(a.chat.hasOwnMessages()).toBe(true)
+    await channelCount(b, 2)
+    b.db.setSetting(AWAITING_SYNC, true)
+    await expect(b.chat.createChannel('New')).rejects.toThrow('Catching up')
+    await expect(b.chat.renameChannel(c.id, 'New')).rejects.toThrow('Catching up')
+    await expect(b.chat.deleteChannel(c.id)).rejects.toThrow('Catching up')
+  })
+
+  it('stays out of channels with a peer that has no support for them, and sends it nothing new', async () => {
+    const [a, b] = await linked()
+    const c = await a.chat.createChannel('Business')
+    await channelCount(b, 2)
+    const incoming = await b.chat.send('hello')
+    await until(() => !!a.db.getMessage(incoming.id))
+
+    a.db.setSetting('peerChannels', false)
+    await expect(a.chat.createChannel('Another')).rejects.toThrow('both computers')
+    await expect(a.chat.send('hi', undefined, c.id)).rejects.toThrow('gone')
+
+    const sent: Frame[] = []
+    const send = a.link.send.bind(a.link)
+    a.link.send = (f: Frame) => {
+      sent.push(f)
+      return send(f)
+    }
+    await a.chat.send('plain')
+    a.chat.setTyping(true)
+    a.chat.markRead([incoming.id])
+    expect(sent.map((f) => f.t)).toEqual(['msg', 'typing', 'read'])
+    for (const f of sent) expect(f).not.toHaveProperty('channel')
   })
 })

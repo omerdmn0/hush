@@ -34,7 +34,7 @@ export const PROTOCOL_VERSION = 6
 /** Oldest protocol this app still talks to. */
 export const MIN_PROTOCOL = 6
 /** Features this app supports (announced in hello). */
-export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover', 'replies', 'files', 'screen'] as const
+export const FEATURES = ['images', 'calls', 'avatars', 'events', 'recover', 'replies', 'files', 'screen', 'channels'] as const
 /** Message kinds that act on another message (they carry `ref`). */
 export const EVENT_KINDS = ['edit', 'delete', 'react'] as const
 /** Event payload: an edit carries a whole message's text. */
@@ -47,6 +47,11 @@ export const MAX_FRAME_BYTES = 256 * 1024
 /** Longest message body accepted, in UTF-16 code units. */
 export const MAX_TEXT_LENGTH = 8000
 const MAX_NAME_LENGTH = 40
+/** The built-in channel. On the wire and in the database it's the absence of a channel id. */
+export const GENERAL_CHANNEL = ''
+/** Limits for creating channels here. Never applied to received frames: see cleanChannelName. */
+export const MAX_CHANNELS = 32
+export const MAX_CHANNEL_NAME = 32
 const MAX_IDS_PER_FRAME = 500
 const MAX_SYNC_AUTHORS = 16
 
@@ -127,6 +132,8 @@ export type Frame =
       data?: string
       /** The message this one answers. */
       reply?: string
+      /** The channel it belongs to; absent means General. */
+      channel?: string
     }
   /** "Send me the full image of message `id`, starting at byte `offset`." */
   | { t: 'blob-req'; id: string; offset: number }
@@ -147,9 +154,9 @@ export type Frame =
   | { t: 'sync'; have: Record<string, number>; read: Record<string, number> }
   /** "These messages are stored on my side" → sender marks them delivered. */
   | { t: 'ack'; ids: string[] }
-  /** "I have read `author`'s messages up to seq `upTo`" → sender marks them read. */
-  | { t: 'read'; author: string; upTo: number }
-  | { t: 'typing'; on: boolean }
+  /** "I have read `author`'s messages up to seq `upTo`" in one channel (absent = General). */
+  | { t: 'read'; author: string; upTo: number; channel?: string }
+  | { t: 'typing'; on: boolean; channel?: string }
   /** A fresh install asks for its previous device id, to take over its old history. */
   | { t: 'recover-req' }
   /** The answer: the id we knew before (null if none) and its highest sequence number. */
@@ -158,6 +165,16 @@ export type Frame =
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID.test(v)
+
+/**
+ * A channel name fit to show, or null if nothing usable is left. Received names go through this
+ * when displayed, not when parsed: a refused frame would leave a permanent gap in the sequence.
+ */
+export function cleanChannelName(v: unknown): string | null {
+  if (typeof v !== 'string') return null
+  const name = v.normalize('NFC').replace(/\s+/g, ' ').replace(/[\p{Cc}\u202A-\u202E\u2066-\u2069]/gu, '').trim()
+  return name && name.length <= MAX_CHANNEL_NAME ? name : null
+}
 
 const isName = (v: unknown): v is string => typeof v === 'string' && v.length <= MAX_NAME_LENGTH
 const isIdList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= MAX_IDS_PER_FRAME && v.every(isUuid)
@@ -245,11 +262,13 @@ function lowercaseIds(f: Frame): Frame {
     case 'hello':
       return { ...f, id: lc(f.id) }
     case 'msg':
-      return { ...f, id: lc(f.id), author: lc(f.author), ...(f.ref ? { ref: lc(f.ref) } : {}), ...(f.reply ? { reply: lc(f.reply) } : {}) }
+      return { ...f, id: lc(f.id), author: lc(f.author), ...(f.ref ? { ref: lc(f.ref) } : {}), ...(f.reply ? { reply: lc(f.reply) } : {}), ...(f.channel ? { channel: lc(f.channel) } : {}) }
     case 'ack':
       return { ...f, ids: f.ids.map(lc) }
     case 'read':
-      return { ...f, author: lc(f.author) }
+      return { ...f, author: lc(f.author), ...(f.channel ? { channel: lc(f.channel) } : {}) }
+    case 'typing':
+      return f.channel ? { ...f, channel: lc(f.channel) } : f
     case 'sync':
       return {
         ...f,
@@ -324,6 +343,7 @@ function parseRaw(raw: string): Frame | null {
       if (typeof kind !== 'string' || !/^[a-z][a-z0-9-]{0,23}$/.test(kind)) return null
       if (f.ref !== undefined && !isUuid(f.ref)) return null
       if (f.data !== undefined && (typeof f.data !== 'string' || f.data.length > MAX_EVENT_DATA)) return null
+      if (f.channel !== undefined && !isUuid(f.channel)) return null
       // Events act on another message; a chat message needs text or an image. Unknown kinds
       // from a newer Hush are accepted as long as they're well-formed (forward compatibility).
       if ((EVENT_KINDS as readonly string[]).includes(kind) && f.ref === undefined) return null
@@ -348,6 +368,7 @@ function parseRaw(raw: string): Frame | null {
       if (f.data !== undefined) msg.data = f.data as string
       if (f.reply !== undefined) msg.reply = f.reply as string
       if (file) msg.file = file
+      if (f.channel !== undefined) msg.channel = f.channel as string
       return msg
     }
     case 'blob-req':
@@ -386,9 +407,11 @@ function parseRaw(raw: string): Frame | null {
     case 'ack':
       return isIdList(f.ids) ? { t: 'ack', ids: f.ids } : null
     case 'read':
-      return isUuid(f.author) && isSeq(f.upTo, 0) ? { t: 'read', author: f.author, upTo: f.upTo } : null
+      if (f.channel !== undefined && !isUuid(f.channel)) return null
+      return isUuid(f.author) && isSeq(f.upTo, 0) ? { t: 'read', author: f.author, upTo: f.upTo, ...(f.channel ? { channel: f.channel as string } : {}) } : null
     case 'typing':
-      return typeof f.on === 'boolean' ? { t: 'typing', on: f.on } : null
+      if (f.channel !== undefined && !isUuid(f.channel)) return null
+      return typeof f.on === 'boolean' ? { t: 'typing', on: f.on, ...(f.channel ? { channel: f.channel as string } : {}) } : null
     case 'call-share':
       return isUuid(f.id) && typeof f.on === 'boolean' && typeof f.audio === 'boolean' ? { t: 'call-share', id: f.id, on: f.on, audio: f.audio } : null
     case 'recover-req':

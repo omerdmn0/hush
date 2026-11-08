@@ -5,9 +5,10 @@ import { IPC, type HushApi, type HushEvent } from '../shared/types'
 const api: HushApi = {
   platform: process.platform,
   getSnapshot: () => ipcRenderer.invoke(IPC.snapshot),
-  listMessages: (before, limit) => ipcRenderer.invoke(IPC.listMessages, before, limit),
-  sendMessage: (text, replyTo) => ipcRenderer.invoke(IPC.sendMessage, text, replyTo),
-  sendImage: (image, caption, replyTo) => ipcRenderer.invoke(IPC.sendImage, image, caption, replyTo),
+  listMessages: (before, limit, channel) => ipcRenderer.invoke(IPC.listMessages, before, limit, channel),
+  sendMessage: (text, replyTo, channel) => ipcRenderer.invoke(IPC.sendMessage, text, replyTo, channel),
+  createChannel: (name) => ipcRenderer.invoke(IPC.createChannel, name),
+  sendImage: (image, caption, replyTo, channel) => ipcRenderer.invoke(IPC.sendImage, image, caption, replyTo, channel),
   getMessages: (ids) => ipcRenderer.invoke(IPC.getMessages, ids),
   editMessage: (id, text) => ipcRenderer.invoke(IPC.editMessage, id, text),
   deleteMessage: (id, mode) => ipcRenderer.invoke(IPC.deleteMessage, id, mode),
@@ -25,14 +26,14 @@ const api: HushApi = {
   },
   // The page never handles file paths: only a File the user picked or dropped can be sent, and
   // its path is looked up here. Pasted data has no path and is sent from memory instead.
-  sendFile: async (file, caption, replyTo) => {
+  sendFile: async (file, caption, replyTo, channel) => {
     const path = webUtils.getPathForFile(file)
-    if (path) return ipcRenderer.invoke(IPC.sendFilePath, path, caption, replyTo)
+    if (path) return ipcRenderer.invoke(IPC.sendFilePath, path, caption, replyTo, channel)
     if (file.size > MAX_MEMORY_FILE_BYTES) throw new Error('Pasted files can be up to 25 MB')
-    return ipcRenderer.invoke(IPC.sendFileBytes, new Uint8Array(await file.arrayBuffer()), file.name || 'pasted file', caption, replyTo)
+    return ipcRenderer.invoke(IPC.sendFileBytes, new Uint8Array(await file.arrayBuffer()), file.name || 'pasted file', caption, replyTo, undefined, channel)
   },
-  sendVoice: (bytes, durationMs, peaks, replyTo) =>
-    ipcRenderer.invoke(IPC.sendFileBytes, bytes, 'Voice note.webm', '', replyTo, { durationMs, peaks }),
+  sendVoice: (bytes, durationMs, peaks, replyTo, channel) =>
+    ipcRenderer.invoke(IPC.sendFileBytes, bytes, 'Voice note.webm', '', replyTo, { durationMs, peaks }, channel),
   downloadFile: (id) => ipcRenderer.send(IPC.downloadFile, id),
   saveAttachment: (id) => ipcRenderer.invoke(IPC.saveAttachment, id),
   showInFolder: (path) => ipcRenderer.send(IPC.showInFolder, path),
@@ -45,7 +46,7 @@ const api: HushApi = {
   submitPairingCode: (code) => ipcRenderer.invoke(IPC.pairSubmit, code),
   forgetPairing: () => ipcRenderer.send(IPC.pairForget),
   markRead: (ids) => ipcRenderer.send(IPC.markRead, ids),
-  setTyping: (on) => ipcRenderer.send(IPC.setTyping, on),
+  setTyping: (on, channel) => ipcRenderer.send(IPC.setTyping, on, channel),
   updateSettings: (patch) => ipcRenderer.invoke(IPC.updateSettings, patch),
   reconnect: () => ipcRenderer.send(IPC.reconnect),
   lockInfo: () => ipcRenderer.invoke(IPC.lockInfo),

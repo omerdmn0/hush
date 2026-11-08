@@ -19,6 +19,16 @@ describe('Notifier', () => {
     expect(peerName).not.toHaveBeenCalled()
   })
 
+  it('forgets waiting messages from a channel that was just erased', () => {
+    vi.useFakeTimers()
+    const peerName = vi.fn(() => 'Mira')
+    const n = new Notifier({ enabled: () => true, preview: () => true, focused: () => false, peerName, icon: '', onClick: () => {} })
+    n.message({ text: 'secret', hasImage: false, channel: 'c1' })
+    n.dropChannel('c1')
+    vi.advanceTimersByTime(5000)
+    expect(peerName).not.toHaveBeenCalled()
+  })
+
   it('still sends a waiting burst while Hush runs', () => {
     vi.useFakeTimers()
     const peerName = vi.fn(() => 'Mira')

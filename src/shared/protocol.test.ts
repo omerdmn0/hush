@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHUNK_BYTES, chunkIds, decodeChunk, encodeChunk, MAX_TEXT_LENGTH, parseFileMeta, parseFrame, sniffImage } from './protocol'
+import { CHUNK_BYTES, chunkIds, cleanChannelName, decodeChunk, encodeChunk, MAX_TEXT_LENGTH, parseFileMeta, parseFrame, sniffImage } from './protocol'
 
 const A = '2f1c3a52-9d1e-4c4b-8a1f-0b6c2d3e4f50'
 const B = '8a7b6c5d-4e3f-4a1b-9c2d-1e0f2a3b4c5d'
@@ -166,5 +166,35 @@ describe('limits that have to agree', () => {
     expect(parseFrame(frame(8.64e15))).not.toBeNull()
     expect(parseFrame(frame(8.64e15 + 1))).toBeNull()
     expect(parseFrame(frame(Number.MAX_SAFE_INTEGER))).toBeNull()
+  })
+})
+
+describe('channels on the wire', () => {
+  const upper = A.toUpperCase()
+
+  it('lowercases the channel id on every frame that carries one', () => {
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: 'hi', sentAt: 1, channel: upper }))).toMatchObject({ channel: A })
+    expect(parseFrame(j({ t: 'read', author: B, upTo: 1, channel: upper }))).toEqual({ t: 'read', author: B, upTo: 1, channel: A })
+    expect(parseFrame(j({ t: 'typing', on: true, channel: upper }))).toEqual({ t: 'typing', on: true, channel: A })
+  })
+
+  it('refuses a channel that is not an id', () => {
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: 'hi', sentAt: 1, channel: 'business' }))).toBeNull()
+    expect(parseFrame(j({ t: 'read', author: B, upTo: 1, channel: 1 }))).toBeNull()
+    expect(parseFrame(j({ t: 'typing', on: true, channel: '' }))).toBeNull()
+  })
+
+  it('accepts erased rows, or a sequence gap would stall sync for good', () => {
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1, kind: 'file', channel: A }))).not.toBeNull()
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1, kind: 'channel', ref: B, channel: B }))).not.toBeNull()
+    expect(parseFrame(j({ t: 'msg', id: A, author: B, seq: 1, body: '', sentAt: 1, kind: 'channel', ref: B, data: 'x'.repeat(5000) }))).not.toBeNull()
+  })
+
+  it('cleans names for display', () => {
+    expect(cleanChannelName('  Büsiness\n plans ')).toBe('Büsiness plans')
+    expect(cleanChannelName('a\u202Eb')).toBe('ab') // no right-to-left spoofing
+    expect(cleanChannelName('   ')).toBeNull()
+    expect(cleanChannelName('x'.repeat(33))).toBeNull()
+    expect(cleanChannelName(7)).toBeNull()
   })
 })

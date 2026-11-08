@@ -78,6 +78,14 @@ export interface ChatMessage {
   reactions?: Reaction[]
   /** The message this one answers. */
   replyTo?: ReplyPreview
+  /** The channel it belongs to; absent means General. */
+  channel?: string
+}
+
+/** A text channel between the two of you. General has the id ''. */
+export interface ChannelInfo {
+  id: string
+  name: string
 }
 
 export interface ChatFile {
@@ -100,6 +108,8 @@ export interface SearchResult {
   sentAt: number
   text: string
   hasImage: boolean
+  /** The channel it's in; absent means General. */
+  channel?: string
 }
 
 /** One emoji under a message: who of the two of you added it. */
@@ -171,6 +181,8 @@ export interface PeerState {
   catchingUp: boolean
   /** Their Hush can receive a shared screen (false while offline or on an older version). */
   canShare: boolean
+  /** Their Hush supports channels, as last seen (kept while offline). */
+  channelsReady: boolean
 }
 
 /** A screen or window that can be shared. */
@@ -271,6 +283,8 @@ export interface Snapshot {
   /** Installed build (start-at-login only works there). */
   packaged: boolean
   peer: PeerState
+  /** General first, then the rest, oldest first. */
+  channels: ChannelInfo[]
   net: NetState
   /**
    * Dev pairing mode (two copies over loopback): calls may use any network interface instead of
@@ -296,10 +310,12 @@ export type HushEvent =
   | { type: 'message'; message: ChatMessage }
   | { type: 'status'; updates: { id: string; status: MessageStatus }[] }
   | { type: 'peer'; peer: PeerState }
-  | { type: 'typing'; on: boolean }
+  | { type: 'typing'; on: boolean; channel?: string }
   | { type: 'net'; net: NetState }
   | { type: 'settings'; settings: Settings }
   | { type: 'transfer'; transfer: ImageTransfer }
+  /** The channel list changed; `erased` is a channel just deleted for good. */
+  | { type: 'channels'; channels: ChannelInfo[]; erased?: string }
   /** An edit/delete/reaction for message `target` arrived or was made (UI re-reads it). */
   | { type: 'event'; target: string }
   | { type: 'avatars'; avatars: AvatarUrls }
@@ -322,10 +338,11 @@ export interface HushApi {
   platform: string
   getSnapshot(): Promise<Snapshot>
   /** Newest-last page of history; pass the oldest loaded message to page backwards. */
-  listMessages(before?: HistoryCursor, limit?: number): Promise<{ messages: ChatMessage[]; hasMore: boolean }>
+  listMessages(before?: HistoryCursor, limit?: number, channel?: string): Promise<{ messages: ChatMessage[]; hasMore: boolean }>
   /** `replyTo`: the message this one answers. */
-  sendMessage(text: string, replyTo?: string): Promise<ChatMessage>
-  sendImage(image: OutgoingImage, caption: string, replyTo?: string): Promise<ChatMessage>
+  sendMessage(text: string, replyTo?: string, channel?: string): Promise<ChatMessage>
+  createChannel(name: string): Promise<ChannelInfo>
+  sendImage(image: OutgoingImage, caption: string, replyTo?: string, channel?: string): Promise<ChatMessage>
   /** Current state of these messages (after an edit, deletion or reaction); missing = gone. */
   getMessages(ids: string[]): Promise<ChatMessage[]>
   editMessage(id: string, text: string): Promise<void>
@@ -338,9 +355,9 @@ export interface HushApi {
    * Sends a file the user picked, dropped or pasted. Files on disk can be up to 1 GB (Hush reads
    * them itself); pasted ones up to 25 MB.
    */
-  sendFile(file: File, caption: string, replyTo?: string): Promise<ChatMessage>
+  sendFile(file: File, caption: string, replyTo?: string, channel?: string): Promise<ChatMessage>
   /** A recorded voice note (WebM/Opus, ≤ 5 min) with its waveform (≤ 48 bars, 0–255). */
-  sendVoice(bytes: Uint8Array, durationMs: number, peaks: Uint8Array, replyTo?: string): Promise<ChatMessage>
+  sendVoice(bytes: Uint8Array, durationMs: number, peaks: Uint8Array, replyTo?: string, channel?: string): Promise<ChatMessage>
   /** Starts downloading a big file (or retries a failed one). */
   downloadFile(id: string): void
   /** Asks where to save an image or file and writes a copy there (programs get a warning first). */
@@ -374,7 +391,7 @@ export interface HushApi {
   /** Forget the pairing (also "pair again" after an identity change). */
   forgetPairing(): void
   markRead(ids: string[]): void
-  setTyping(on: boolean): void
+  setTyping(on: boolean, channel?: string): void
   updateSettings(patch: Partial<Settings>): Promise<Settings>
   /** Re-detect Tailscale and retry the connection immediately. */
   reconnect(): void
@@ -411,6 +428,7 @@ export const IPC = {
   snapshot: 'hush:snapshot',
   listMessages: 'hush:list-messages',
   sendMessage: 'hush:send-message',
+  createChannel: 'hush:create-channel',
   getMessages: 'hush:get-messages',
   editMessage: 'hush:edit-message',
   deleteMessage: 'hush:delete-message',

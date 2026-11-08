@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { HushDb, toChatMessage, type StoredMessage } from './db'
+import { HushDb, QUERIES, toChatMessage, type StoredMessage } from './db'
 import { fieldCipher, newDataKey } from './vault'
 
 const ME = randomUUID()
@@ -96,7 +96,7 @@ describe('HushDb', () => {
     expect(db.advanceUpTo(ME, 0, 'read')).toEqual([])
 
     for (const s of [1, 2, 3]) db.insertMessage(make(PEER, s, 10 + s, s < 3 ? 'read' : 'delivered'))
-    expect(db.readSeq(PEER)).toBe(2)
+    expect(db.readSeq(PEER, '')).toBe(2)
     expect(db.messagesAfter(ME, 1, 10).map((m) => m.seq)).toEqual([2, 3])
     expect(db.idsWithStatus(ME, ['queued'])).toEqual([own[2].id])
   })
@@ -141,11 +141,13 @@ describe('migration from stage b (v1)', () => {
     raw.close()
 
     const migrated = new HushDb(file)
-    expect(migrated.version).toBe(7)
+    expect(migrated.version).toBe(8)
     expect(migrated.getMessage(ids.mineEarly)?.seq).toBe(1)
     expect(migrated.getMessage(ids.mineLate)?.seq).toBe(2)
     expect(migrated.getMessage(ids.theirs)?.seq).toBeNull()
     expect(migrated.contiguousSeq(PEER)).toBe(0) // so the peer re-sends and fills it in
+    expect(migrated.getMessage(ids.mineEarly)?.channel).toBe('') // all old history is in General
+    expect(migrated.listMessages(undefined, 10).rows).toHaveLength(3) // and upgrading adds no rows
     expect(migrated.createOwnMessage(ME, 'next', 400).seq).toBe(3)
     migrated.close()
   })
@@ -164,11 +166,22 @@ describe('query plans', () => {
   })
 
   it('counts unread messages without scanning the history', () => {
-    expect(planFor(`SELECT COUNT(*) FROM messages WHERE author_id <> ? AND status <> 'read' AND ref IS NULL AND hidden = 0`, ME)).toContain('messages_not_read')
+    expect(planFor(QUERIES.unread, ME)).toContain('messages_not_read')
   })
 
   it('applies read receipts without scanning the history', () => {
-    expect(planFor(`UPDATE messages SET status = 'read' WHERE author_id = ? AND seq IS NOT NULL AND seq <= ? AND status <> 'read'`, ME, 5)).toContain('messages_not_read')
+    expect(planFor(QUERIES.advanceRead, ME, 5, '')).toContain('messages_not_read')
+  })
+
+  it('pages through a channel in index order, with no sorting step', () => {
+    for (const plan of [planFor(QUERIES.firstPage, '', 100), planFor(QUERIES.olderPage, '', 5, 5, 'x', 100)]) {
+      expect(plan).toContain('messages_page')
+      expect(plan).not.toContain('TEMP B-TREE')
+    }
+  })
+
+  it('finds channel rows without scanning the history', () => {
+    expect(planFor(QUERIES.channelOps)).toContain('messages_channel_ops')
   })
 
   it('only changes messages that can still advance', () => {
@@ -316,7 +329,7 @@ describe('migration from stage g (v4: calls, no events yet)', () => {
     raw.close()
 
     const db = new HushDb(file)
-    expect(db.version).toBe(7)
+    expect(db.version).toBe(8)
     expect(db.listCalls().map((c) => c.id)).toEqual([callId])
     expect(db.getMessage(msgId)?.body).toBe('from stage g')
     expect(db.createOwnMessage(ME, '', 300, null, undefined, { kind: 'edit', ref: msgId, data: 'edited' }).seq).toBe(2)

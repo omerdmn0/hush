@@ -46,6 +46,11 @@ export class Notifier {
     }, BURST_MS)
   }
 
+  /** A channel was erased: nothing waiting to be shown may mention it any more. */
+  dropChannel(id: string): void {
+    this.burst = this.burst.filter((m) => m.channel !== id)
+  }
+
   incomingCall(): void {
     if (shouldNotify(this.o.enabled(), this.o.focused())) this.show('Incoming call', `${this.o.peerName()} is calling`, 'critical')
   }
