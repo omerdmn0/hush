@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import type { NetState, PairingState, PrivacyState, Settings } from '../../../../shared/types'
 import { PrivacySettings } from './PrivacySettings'
+import { UpdateSettings } from './UpdateSettings'
 import { Avatar, AvatarContext, StatusTag } from '@/components/common'
 import { getMic } from '@/lib/call'
 import { ImageError, imageErrorText, makeAvatar } from '@/lib/images'
@@ -23,7 +24,8 @@ const SECTIONS = [
   { id: 'audio', title: 'Audio' },
   { id: 'notifications', title: 'Notifications' },
   { id: 'startup', title: 'Startup' },
-  { id: 'privacy', title: 'Privacy & data' }
+  { id: 'privacy', title: 'Privacy & data' },
+  { id: 'updates', title: 'Updates' }
 ] as const
 export type SectionId = (typeof SECTIONS)[number]['id']
 
@@ -40,6 +42,7 @@ export function SettingsScreen({
   pairing,
   privacy,
   packaged,
+  appVersion,
   onChange,
   onReconnect,
   onClose,
@@ -51,6 +54,7 @@ export function SettingsScreen({
   pairing: PairingState
   privacy: PrivacyState
   packaged: boolean
+  appVersion: string
   onChange: (patch: Partial<Settings>) => Promise<void>
   onReconnect: () => void
   onClose: () => void
@@ -188,6 +192,10 @@ export function SettingsScreen({
               peerName={peer?.name ?? 'the other person'}
               canAskPeer={pairing.status === 'paired' && peer?.presence === 'online'}
             />
+          </Module>
+
+          <Module index={7} id="updates" title="Updates">
+            <UpdateSettings appVersion={appVersion} packaged={packaged} />
           </Module>
         </div>
       </div>

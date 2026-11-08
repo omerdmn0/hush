@@ -57,6 +57,11 @@ export class Transfers {
     this.pump()
   }
 
+  /** True while a file is moving in either direction. */
+  get busy(): boolean {
+    return this.current !== null || this.finishing.size > 0 || this.uploads.size > 0
+  }
+
   /** Hush is closing: no more timers. */
   dispose(): void {
     this.disposed = true

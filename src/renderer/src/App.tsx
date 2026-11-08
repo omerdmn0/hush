@@ -248,6 +248,7 @@ export default function App(): ReactNode {
           pairing={snapshot.pairing}
           privacy={snapshot.privacy}
           packaged={snapshot.packaged}
+          appVersion={snapshot.appVersion}
           onChange={hush.updateSettings}
           onReconnect={() => window.hush.reconnect()}
           onClose={closeSettings}

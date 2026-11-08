@@ -56,6 +56,10 @@ const api: HushApi = {
   setAutoBackup: (patch) => ipcRenderer.invoke(IPC.setAutoBackup, patch),
   chooseBackupFolder: () => ipcRenderer.invoke(IPC.chooseBackupFolder),
   recoverHistory: () => ipcRenderer.invoke(IPC.recoverHistory),
+  updateState: () => ipcRenderer.invoke(IPC.updateState),
+  checkForUpdate: () => ipcRenderer.invoke(IPC.updateCheck),
+  downloadUpdate: () => ipcRenderer.invoke(IPC.updateDownload),
+  installUpdate: (anyway) => ipcRenderer.invoke(IPC.updateInstall, anyway),
   onEvent: (listener) => {
     const handler = (_e: IpcRendererEvent, event: HushEvent): void => listener(event)
     ipcRenderer.on(IPC.event, handler)

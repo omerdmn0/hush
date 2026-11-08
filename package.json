@@ -14,7 +14,9 @@
     "test": "vitest run",
     "pair": "npm run build && node scripts/pair.mjs",
     "dist:linux": "npm run build && electron-builder --linux --publish never",
-    "dist:win": "npm run build && electron-builder --win --publish never"
+    "dist:win": "npm run build && electron-builder --win --publish never",
+    "release:keygen": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/release.mjs keygen",
+    "release:publish": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/release.mjs publish"
   },
   "devDependencies": {
     "@emoji-mart/data": "^1.2.1",
@@ -48,6 +50,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
+    "electron-updater": "6.8.11",
     "ws": "^8.22.1"
   },
   "allowScripts": {

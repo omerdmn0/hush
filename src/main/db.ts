@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync, rmSync, statSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import type { FileMeta, ImageMeta } from '../shared/protocol'
 import { isRiskyFile } from '../shared/files'
@@ -33,6 +34,8 @@ export interface StoredMessage {
 }
 
 type Migration = (db: Database.Database) => void
+
+const UPGRADE_COPY_MS = 7 * 24 * 60 * 60 * 1000
 
 const MIGRATIONS: Migration[] = [
   // v1 — stage b
@@ -132,7 +135,7 @@ export class HushDb {
 
   /** `cipher` encrypts message text and event data at rest (plain only in tests). */
   constructor(
-    file: string,
+    private readonly file: string,
     private readonly cipher: FieldCipher = plainFields
   ) {
     this.db = new Database(file)
@@ -160,7 +163,21 @@ export class HushDb {
   }
 
   private migrate(): void {
-    for (let v = this.version; v < MIGRATIONS.length; v++) {
+    const from = this.version
+    if (from > MIGRATIONS.length) {
+      this.db.close()
+      throw new Error('This history was saved by a newer version of Hush. Install the latest version to open it.')
+    }
+    // Kept for a few days in case an upgrade goes wrong. Not forever: it still holds whatever
+    // has been deleted since.
+    const copy = `${this.file}.before-upgrade`
+    if (from > 0 && from < MIGRATIONS.length) {
+      rmSync(copy, { force: true })
+      this.db.prepare('VACUUM INTO ?').run(copy)
+    } else if (existsSync(copy) && Date.now() - statSync(copy).mtimeMs > UPGRADE_COPY_MS) {
+      rmSync(copy, { force: true })
+    }
+    for (let v = from; v < MIGRATIONS.length; v++) {
       this.db.transaction(() => {
         MIGRATIONS[v](this.db)
         this.db.pragma(`user_version = ${v + 1}`)

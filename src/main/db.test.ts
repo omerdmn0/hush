@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -148,6 +148,62 @@ describe('migration from stage b (v1)', () => {
     expect(migrated.contiguousSeq(PEER)).toBe(0) // so the peer re-sends and fills it in
     expect(migrated.createOwnMessage(ME, 'next', 400).seq).toBe(3)
     migrated.close()
+  })
+})
+
+describe('upgrade safety', () => {
+  function oldDatabase(file: string): void {
+    const raw = new Database(file)
+    raw.exec(`
+      CREATE TABLE messages (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, body TEXT NOT NULL,
+        sent_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued','sent','delivered','read')));
+      CREATE INDEX messages_by_time ON messages (sent_at, id);
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      PRAGMA user_version = 1;`)
+    raw.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)').run(randomUUID(), ME, 'kept', 100, 100, 'read')
+    raw.close()
+  }
+
+  it('copies the database before changing its format', () => {
+    const file = join(dir, 'old.db')
+    oldDatabase(file)
+    new HushDb(file).close()
+    const copy = new Database(`${file}.before-upgrade`, { readonly: true })
+    expect(copy.pragma('user_version', { simple: true })).toBe(1)
+    expect(copy.prepare('SELECT body FROM messages').pluck().all()).toEqual(['kept'])
+    copy.close()
+  })
+
+  it('makes no copy for a new or current database', () => {
+    expect(existsSync(join(dir, 'hush.db.before-upgrade'))).toBe(false)
+    db.close()
+    db = new HushDb(join(dir, 'hush.db'))
+    expect(existsSync(join(dir, 'hush.db.before-upgrade'))).toBe(false)
+  })
+
+  it('removes the copy after a week, not before', () => {
+    const file = join(dir, 'old.db')
+    const copy = `${file}.before-upgrade`
+    oldDatabase(file)
+    new HushDb(file).close()
+    new HushDb(file).close()
+    expect(existsSync(copy)).toBe(true)
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000)
+    utimesSync(copy, old, old)
+    new HushDb(file).close()
+    expect(existsSync(copy)).toBe(false)
+  })
+
+  it('refuses a database from a newer Hush and leaves it alone', () => {
+    const file = join(dir, 'future.db')
+    const raw = new Database(file)
+    raw.exec('CREATE TABLE future (x); PRAGMA user_version = 999;')
+    raw.close()
+    expect(() => new HushDb(file)).toThrow(/newer version/)
+    const after = new Database(file, { readonly: true })
+    expect(after.pragma('user_version', { simple: true })).toBe(999)
+    after.close()
   })
 })
 

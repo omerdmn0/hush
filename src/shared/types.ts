@@ -279,6 +279,19 @@ export interface Snapshot {
   devPairing: boolean
 }
 
+export type UpdateState =
+  | { status: 'idle' }
+  /** A build or install type that can't replace itself. */
+  | { status: 'unsupported' }
+  | { status: 'checking' }
+  | { status: 'current' }
+  | { status: 'available'; version: string }
+  | { status: 'downloading'; version: string; percent: number }
+  /** `blocked` says what restarting now would interrupt, until the user confirms. */
+  | { status: 'ready'; version: string; blocked?: string }
+  | { status: 'installing'; version: string }
+  | { status: 'error'; message: string }
+
 export type HushEvent =
   | { type: 'message'; message: ChatMessage }
   | { type: 'status'; updates: { id: string; status: MessageStatus }[] }
@@ -300,6 +313,7 @@ export type HushEvent =
   /** Messages that were queued while offline have now been delivered. */
   | { type: 'flushed'; count: number; at: number }
   | { type: 'privacy'; privacy: PrivacyState }
+  | { type: 'update'; update: UpdateState }
 
 /** API the preload script exposes to the renderer as `window.hush`. */
 export interface HushApi {
@@ -383,6 +397,12 @@ export interface HushApi {
   chooseBackupFolder(): Promise<PrivacyState>
   /** Takes back this person's history from the other computer after a reinstall (Hush restarts). */
   recoverHistory(): Promise<string | null>
+  updateState(): Promise<UpdateState>
+  checkForUpdate(): Promise<void>
+  /** Downloads the update found by the last check. */
+  downloadUpdate(): Promise<void>
+  /** Restarts into the downloaded update. `anyway` confirms interrupting a call or transfer. */
+  installUpdate(anyway: boolean): Promise<void>
 }
 
 export const IPC = {
@@ -426,5 +446,9 @@ export const IPC = {
   restoreBackup: 'hush:restore-backup',
   setAutoBackup: 'hush:set-auto-backup',
   chooseBackupFolder: 'hush:choose-backup-folder',
-  recoverHistory: 'hush:recover-history'
+  recoverHistory: 'hush:recover-history',
+  updateState: 'hush:update-state',
+  updateCheck: 'hush:update-check',
+  updateDownload: 'hush:update-download',
+  updateInstall: 'hush:update-install'
 } as const
