@@ -5,11 +5,23 @@ import { cn } from '@/lib/utils'
 
 export function Logo({ className }: { className?: string }): ReactNode {
   return (
-    <svg viewBox="0 0 64 64" aria-hidden="true" className={className}>
-      <path fill="#0D0B14" d="M0 0H50L64 14V64H14L0 50Z" />
-      <path fill="#00E5FF" d="M9 14H43L51 22V38L45 44H25L15 53V44H9Z" />
-      <path fill="#FF2E88" d="M12 14H46L54 22V38L48 44H28L18 53V44H12Z" />
-      <path fill="#0D0B14" d="M35 21.7a9.5 9.5 0 1 0 4.3 15.9 8 8 0 0 1-4.3-15.9z" />
+    <svg viewBox="0 0 512 512" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id="logo-corona" x1="0" y1="1" x2="1" y2="0">
+          <stop offset="0" stopColor="#FF2E88" />
+          <stop offset=".5" stopColor="#9B3DFF" />
+          <stop offset="1" stopColor="#00E5FF" />
+        </linearGradient>
+      </defs>
+      <path fill="#0D0B14" d="M0 0H400L512 112V512H112L0 400Z" />
+      <path
+        fill="#08070D"
+        stroke="url(#logo-corona)"
+        strokeWidth="42"
+        d="M190.2 374.8L72 464L126.1 315.0A150 150 0 1 1 190.2 374.8Z"
+      />
+      <path fill="url(#logo-corona)" d="M82.0 239.2A174 174 0 1 1 256.8 414.0A134 134 0 1 0 82.0 239.2Z" />
+      <path fill="#FFFFFF" d="M364 14L388 108L482 132L388 156L364 250L340 156L246 132L340 108Z" />
     </svg>
   )
 }

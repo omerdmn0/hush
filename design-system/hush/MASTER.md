@@ -21,8 +21,8 @@ Icons: **lucide-react** (project requirement).
 - **Name:** Hush
 - **Concept:** "a private channel in a neon city" — two people on a quiet encrypted link.
   Magenta = you, cyan = them / the system, green = live link, amber = queued.
-- **App icon:** angular magenta speech bubble with a crescent moon cut out and a cyan
-  "chromatic offset" ghost behind it, on a chamfered near-black tile. `design-system/hush/icon.svg`.
+- **App icon:** "Eclipse": a dark speech bubble whose corona runs magenta to violet to cyan, with
+  a white star flare at the upper right, on a chamfered near-black tile. `design-system/hush/icon.svg`.
 - **Voice:** terse, technical labels in UI chrome (`// LINK`, `QUEUED`, `NODE 100.x.x.x`);
   plain sentences for anything that explains or warns. Never jargon in error messages.
 - Not to resemble: Discord (blurple, flat rows), or any specific game's UI (e.g. yellow-dominant schemes).
