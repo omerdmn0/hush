@@ -5,7 +5,7 @@
 const RISKY = new Set([
   // Windows
   'exe', 'msi', 'msix', 'msp', 'bat', 'cmd', 'com', 'scr', 'pif', 'cpl', 'ps1', 'psm1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'wsh', 'hta',
-  'lnk', 'reg', 'dll', 'jar', 'appx', 'appxbundle', 'application', 'gadget', 'inf', 'scf', 'url',
+  'lnk', 'reg', 'dll', 'jar', 'appx', 'appxbundle', 'application', 'gadget', 'inf', 'scf', 'url', 'msc', 'chm', 'vb', 'ws', 'wsc', 'jnlp', 'xll',
   // Linux / cross-platform
   'sh', 'bash', 'zsh', 'run', 'bin', 'appimage', 'desktop', 'deb', 'rpm', 'py', 'pl', 'rb', 'elf', 'out', 'command', 'app', 'pkg', 'dmg'
 ])

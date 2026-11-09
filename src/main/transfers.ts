@@ -178,7 +178,7 @@ export class Transfers {
     clearTimeout(this.stallTimer)
     this.current = null
     this.finishing.add(id)
-    void this.store.finalize(id, meta).then((ok) => {
+    void this.store.finalize(id, meta).catch(() => false).then((ok) => {
       if (this.disposed) return // the database is closed by now; the next start picks this up
       this.finishing.delete(id)
       const m = this.db.getMessage(id)

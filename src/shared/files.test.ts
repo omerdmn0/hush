@@ -8,6 +8,10 @@ describe('file names', () => {
     for (const name of ['notes.txt', 'exe', 'archive.tar.gz']) expect(isRiskyFile(name)).toBe(false)
   })
 
+  it('warns about less common Windows program types too', () => {
+    for (const ext of ['msc', 'chm', 'vb', 'ws', 'wsc', 'jnlp', 'xll']) expect(isRiskyFile(`file.${ext}`), ext).toBe(true)
+  })
+
   it('always produces a name the other app accepts', () => {
     const awkward = ['a'.repeat(300), `${'a'.repeat(300)}.pdf`, `a.${'b'.repeat(300)}`, `${'a '.repeat(150)}.pdf`, `${'a'.repeat(250)}     z.pdf`, ' . ', '\u0001']
     for (const raw of awkward) expect(isFileName(cleanFileName(raw)), raw.slice(0, 20)).toBe(true)

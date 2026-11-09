@@ -25,4 +25,20 @@ describe('Transfers', () => {
     expect(emit).toHaveBeenCalledWith({ type: 'transfer', transfer: expect.objectContaining({ id: 'a', state: 'failed' }) })
     transfers.dispose()
   })
+
+  it('reports a download as failed when the finished file can’t be put in place', async () => {
+    const link = Object.assign(new EventEmitter(), { peer: {}, send: vi.fn(async () => true), sendBinary: vi.fn(async () => true) })
+    const image = { size: 10, sha256: 'x', mime: 'image/png', width: 1, height: 1 }
+    const db = { getMessage: () => ({ image }) } as unknown as HushDb
+    const discardPart = vi.fn()
+    const store = { hasFull: () => false, partSize: () => 10, finalize: vi.fn(async () => Promise.reject(new Error('locked'))), discardPart } as unknown as ImageStore
+    const emit = vi.fn()
+    const transfers = new Transfers(db, store, link as unknown as PeerLink, emit)
+
+    transfers.want('a')
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledWith({ type: 'transfer', transfer: expect.objectContaining({ id: 'a', state: 'failed' }) }))
+    expect(discardPart).toHaveBeenCalledWith('a')
+    expect(transfers.busy).toBe(false)
+    transfers.dispose()
+  })
 })

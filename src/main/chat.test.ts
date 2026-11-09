@@ -152,6 +152,28 @@ describe('ChatService — live chat', () => {
     await until(() => a.events.some((e) => e.type === 'typing'))
     expect(a.db.getMessage(forged)).toBeUndefined()
   })
+
+  it('refuses messages and events that claim to be written by this computer', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    const m = await a.chat.send('my words')
+    await until(() => b.db.getMessage(m.id) !== undefined)
+
+    const [text, edit, del] = [randomUUID(), randomUUID(), randomUUID()]
+    const asAlice = { t: 'msg', author: a.id, sentAt: Date.now() } as const
+    await b.link.send({ ...asAlice, id: text, seq: 2, body: 'words put in my mouth' })
+    await b.link.send({ ...asAlice, id: edit, seq: 3, body: '', kind: 'edit', ref: m.id, data: 'rewritten' })
+    await b.link.send({ ...asAlice, id: del, seq: 4, body: '', kind: 'delete', ref: m.id })
+    await b.link.send({ t: 'typing', on: true })
+    await until(() => a.events.some((e) => e.type === 'typing'))
+
+    for (const id of [text, edit, del]) expect(a.db.getMessage(id)).toBeUndefined()
+    expect(a.chat.getMessages([m.id])[0]).toMatchObject({ text: 'my words' })
+    expect(a.chat.getMessages([m.id])[0].deleted).toBeUndefined()
+    expect(a.db.getMessage((await a.chat.send('next')).id)?.seq).toBe(2)
+  })
 })
 
 describe('ChatService — offline queue and sync', () => {
@@ -338,6 +360,18 @@ describe('ChatService — images', () => {
     await until(() => transfer(b, m.id, 'done'), 10_000)
     expect(b.db.getMessage(m.id)?.body).toBe('')
     await until(() => a.db.getMessage(m.id)?.status === 'delivered')
+  })
+
+  it('keeps delivering past an image whose preview was lost, and the full image still arrives', async () => {
+    const [a, b] = await sides()
+    a.start()
+    const img = await a.chat.sendImage(outgoing(png(64, 48)), 'picture')
+    const after = await a.chat.send('sent after the picture')
+    rmSync(a.store.thumbPath(img.id))
+    b.start()
+    await until(() => b.db.getMessage(after.id) !== undefined)
+    await until(() => transfer(b, img.id, 'done') && existsSync(fullFile(b, img.id)), 10_000)
+    expect(b.db.getMessage(img.id)?.body).toBe('picture')
   })
 
   it('resumes an interrupted download from where it stopped', async () => {

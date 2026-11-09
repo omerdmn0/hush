@@ -1,4 +1,4 @@
-import { app, autoUpdater as nativeUpdater, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session, shell } from 'electron'
+import { app, autoUpdater as nativeUpdater, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerMonitor, protocol, safeStorage, session, shell } from 'electron'
 import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
@@ -491,6 +491,8 @@ if (!app.requestSingleInstanceLock()) {
       send({ type: 'net', net: { ...net } })
     }
     const ipPoll = setInterval(refreshOwnIp, 10_000)
+    // A connection from before the computer slept is usually dead, without anything saying so yet.
+    powerMonitor.on('resume', () => link.reset())
 
     const applySettings = (next: Settings): Settings => {
       settings = next
@@ -540,6 +542,19 @@ if (!app.requestSingleInstanceLock()) {
       mainWindow.webContents.setWebRTCIPHandlingPolicy('default')
       mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
       mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+      // Hush lives in the tray, so a crashed page would otherwise go unnoticed and miss calls.
+      mainWindow.webContents.on('render-process-gone', (_e, details) => {
+        if (quitting || details.reason === 'clean-exit') return
+        // The call lived in that page, and so did anything it was sharing.
+        for (const id of calls.openCalls()) {
+          const end = { t: 'call-end', id, reason: 'failed' } as const
+          calls.fromUs(end)
+          void link.send(end)
+        }
+        windowsAudio?.stop()
+        void linuxAudio?.stop()
+        setTimeout(() => mainWindow?.webContents.reload(), 1000) // not at once, in case it keeps crashing
+      })
 
       loadRenderer(mainWindow)
       mainWindow.on('closed', () => (mainWindow = null))

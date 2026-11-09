@@ -59,6 +59,8 @@ export class ImageStore {
     private readonly key: Buffer
   ) {
     mkdirSync(dir, { recursive: true })
+    // Hush is the only user of this folder and hasn't started anything yet: these are from a crash.
+    for (const name of readdirSync(dir)) if (name.endsWith('.tmp')) rmSync(join(dir, name), { force: true })
   }
 
   private base(id: string): string {
@@ -177,8 +179,9 @@ export class ImageStore {
     let head: Buffer | null = null
     let total = 0
     let ok = false
+    let w: EncryptedFileWriter | undefined
     try {
-      const w = new EncryptedFileWriter(this.key, tmp)
+      w = new EncryptedFileWriter(this.key, tmp)
       let sinceYield = 0
       for (const piece of recordsFromFile(this.key, part)) {
         if (!head) head = piece.subarray(0, 16)
@@ -193,11 +196,12 @@ export class ImageStore {
       }
       w.close()
       ok = total === meta.size && hash.digest('hex') === meta.sha256 && head !== null && (!!meta.file || sniffImage(head) === meta.mime)
+      if (ok) renameSync(tmp, this.fullPath(id, meta))
     } catch {
       ok = false
+      w?.close() // Windows can't remove a file that's still open
     }
-    if (ok) renameSync(tmp, this.fullPath(id, meta))
-    else rmSync(tmp, { force: true })
+    if (!ok) rmSync(tmp, { force: true })
     rmSync(part, { force: true })
     this.partSizes.delete(id)
     return ok

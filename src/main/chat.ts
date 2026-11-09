@@ -39,6 +39,8 @@ const FLUSH_QUIET_MS = 600
 /** Inline previews larger than this are refused (as base64 they must pass MAX_THUMB_BASE64). */
 const MAX_THUMB_BYTES = 150_000
 const PREVIEW_TYPES = new Set<string>(['image/webp', 'image/jpeg', 'image/png'])
+/** A transparent 1×1 PNG, sent when an image's real preview can't be read. */
+const BLANK_PREVIEW = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
 
 /** Setting: a backup was restored and the peer hasn't synced with us since. */
 export const AWAITING_SYNC = 'awaitingSync'
@@ -373,6 +375,9 @@ export class ChatService {
         // back our own messages after we recovered our history from it.
         const own = frame.author === this.selfId
         if (frame.author !== peer.id && !own) return
+        // Coming back can only fill in what we already numbered: anything newer is someone
+        // else writing in our name.
+        if (own && frame.seq > this.highestOwnSeq()) return
         const channel = (frame.kind === 'channel' || frame.kind === 'channel-del' ? frame.ref : frame.channel) ?? GENERAL_CHANNEL
         // Late for a channel that's gone (an edit made offline, say): keep the sequence number,
         // nothing else. This comes first so even an image preview never reaches the disk.
@@ -486,8 +491,7 @@ export class ChatService {
     const theyHave = frame.have[this.selfId] ?? 0
     // They hold more of our messages than we do (we restored an older backup): number new ones
     // after theirs — the missing ones come back below, through their own sync.
-    const floorKey = `seqFloor:${this.selfId}`
-    if (theyHave > Math.max(this.db.maxSeq(this.selfId), this.db.getSetting<number>(floorKey) ?? 0)) this.db.setSetting(floorKey, theyHave)
+    if (theyHave > this.highestOwnSeq()) this.db.setSetting(`seqFloor:${this.selfId}`, theyHave)
     if (this.db.getSetting<boolean>(AWAITING_SYNC)) {
       this.db.setSetting(AWAITING_SYNC, null)
       this.emit({ type: 'peer', peer: this.peerState() })
@@ -513,6 +517,11 @@ export class ChatService {
         after = m.seq!
       }
     }
+  }
+
+  /** The last number this install has written, or knows it wrote before losing its history. */
+  private highestOwnSeq(): number {
+    return Math.max(this.db.maxSeq(this.selfId), this.db.getSetting<number>(`seqFloor:${this.selfId}`) ?? 0)
   }
 
   private recoverWaiter: ((f: Extract<Frame, { t: 'recover' }>) => void) | null = null
@@ -543,9 +552,18 @@ export class ChatService {
 
   // ---------- helpers ----------
 
+  /** A preview lost to disk damage must not stop everything after it from being delivered. */
+  private previewBase64(id: string): string {
+    try {
+      return this.store.readThumbBase64(id)
+    } catch {
+      return BLANK_PREVIEW
+    }
+  }
+
   private msgFrame(m: StoredMessage): Frame {
     const frame: Extract<Frame, { t: 'msg' }> = { t: 'msg', id: m.id, author: m.authorId, seq: m.seq!, body: m.body, sentAt: m.sentAt }
-    if (m.image) frame.image = { ...m.image, thumb: this.store.readThumbBase64(m.id) }
+    if (m.image) frame.image = { ...m.image, thumb: this.previewBase64(m.id) }
     if (m.kind && m.kind !== 'message') frame.kind = m.kind
     if (m.ref) frame.ref = m.ref
     if (m.data != null) frame.data = m.data
