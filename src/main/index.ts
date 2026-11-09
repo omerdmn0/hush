@@ -1,4 +1,4 @@
-import { app, autoUpdater as nativeUpdater, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerMonitor, protocol, safeStorage, session, shell } from 'electron'
+import { app, autoUpdater as nativeUpdater, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerMonitor, protocol, safeStorage, screen, session, shell } from 'electron'
 import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
@@ -42,6 +42,7 @@ import { WindowsScreenAudio, type HelperCommand } from './screenAudioWindows'
 import { HushTray } from './tray'
 import { Updater } from './updater'
 import { fieldCipher } from './vault'
+import { MIN_HEIGHT, MIN_WIDTH, restorePlace, type WindowPlace } from './windowPlace'
 
 // ---------------------------------------------------------------------------
 // Development-only overrides (ignored in packaged builds). They let two copies run
@@ -332,9 +333,25 @@ if (!app.requestSingleInstanceLock()) {
 
     // ---------- window helpers ----------
 
+    /** Waits for the first show: maximizing would also bring up a window started in the tray. */
+    let maximizeOnShow = false
+    const applyMaximize = (): void => {
+      if (maximizeOnShow) mainWindow?.maximize()
+      maximizeOnShow = false
+    }
+    let placeTimer: ReturnType<typeof setTimeout> | undefined
+    const savePlace = (): void => {
+      clearTimeout(placeTimer)
+      const w = mainWindow
+      // Full screen is a shared screen being watched; minimized says nothing about where it goes.
+      if (!w || w.isDestroyed() || w.isFullScreen() || w.isMinimized()) return
+      db.setSetting('windowPlace', { ...w.getNormalBounds(), maximized: w.isMaximized() } satisfies WindowPlace)
+    }
+
     const showWindow = (): void => {
       if (!mainWindow) return createWindow()
       if (mainWindow.isMinimized()) mainWindow.restore()
+      applyMaximize()
       mainWindow.show()
       mainWindow.focus()
     }
@@ -505,11 +522,14 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     function createWindow(): void {
+      const place = restorePlace(db.getSetting('windowPlace'), screen.getAllDisplays().map((d) => d.workArea))
+      maximizeOnShow = place?.maximized ?? false
       mainWindow = new BrowserWindow({
         width: 1200,
         height: 780,
-        minWidth: 880,
-        minHeight: 560,
+        ...place?.bounds,
+        minWidth: MIN_WIDTH,
+        minHeight: MIN_HEIGHT,
         show: false,
         title: titleWithUnread(unread) + (profile ? ` · ${profile}` : ''),
         backgroundColor: '#0D0B14',
@@ -519,7 +539,17 @@ if (!app.requestSingleInstanceLock()) {
       })
 
       // Started at login with --hidden: stay in the tray until opened.
-      mainWindow.once('ready-to-show', () => !startHidden && mainWindow?.show())
+      mainWindow.once('ready-to-show', () => {
+        if (startHidden) return
+        applyMaximize()
+        mainWindow?.show()
+      })
+      for (const ev of ['resize', 'move', 'maximize', 'unmaximize'] as const) {
+        mainWindow.on(ev as 'resize', () => {
+          clearTimeout(placeTimer)
+          placeTimer = setTimeout(savePlace, 500)
+        })
+      }
       // The window title shows the unread count; don't let the page's <title> replace it.
       mainWindow.on('page-title-updated', (e) => e.preventDefault())
       mainWindow.on('focus', () => mainWindow?.flashFrame(false))
@@ -1086,6 +1116,7 @@ if (!app.requestSingleInstanceLock()) {
         // recount used to fire after closing and crash with "database connection is not open"),
         // and stop listening to the window.
         closing = true
+        savePlace()
         clearTimeout(unreadTimer)
         void link.stop() // already stopped, unless shutdown ran out of time: nothing may arrive now
         notifier.dispose()
