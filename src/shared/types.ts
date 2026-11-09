@@ -15,6 +15,8 @@ export interface ChatImage {
   fullUrl: string
   /** True when the full file is stored on this computer. */
   ready: boolean
+  /** The user cancelled this transfer; nothing moves until they ask for it again. */
+  stopped?: boolean
 }
 
 /** Progress of an image moving between the two computers. */
@@ -22,7 +24,7 @@ export interface ImageTransfer {
   id: string
   /** 'down' = we are receiving it, 'up' = the other side is pulling it from us. */
   direction: 'down' | 'up'
-  state: 'active' | 'done' | 'failed'
+  state: 'active' | 'done' | 'failed' | 'cancelled'
   /** 0…1 */
   progress: number
 }
@@ -100,6 +102,8 @@ export interface ChatFile {
   risky: boolean
   /** Big files from the other person download only when asked. */
   autoDownload: boolean
+  /** The user cancelled this transfer; nothing moves until they ask for it again. */
+  stopped?: boolean
   voice?: { durationMs: number; peaks: number[]; url: string }
 }
 
@@ -374,6 +378,7 @@ export interface HushApi {
   sendVoice(bytes: Uint8Array, durationMs: number, peaks: Uint8Array, replyTo?: string, channel?: string): Promise<ChatMessage>
   /** Starts downloading a big file (or retries a failed one). */
   downloadFile(id: string): void
+  cancelTransfer(id: string): void
   /** Asks where to save an image or file and writes a copy there (programs get a warning first). */
   saveAttachment(id: string): Promise<{ saved: string } | { cancelled: true } | { error: string }>
   /** Shows a file Hush just saved in the file manager. */
@@ -460,6 +465,7 @@ export const IPC = {
   sendFilePath: 'hush:send-file-path',
   sendFileBytes: 'hush:send-file-bytes',
   downloadFile: 'hush:download-file',
+  cancelTransfer: 'hush:cancel-transfer',
   saveAttachment: 'hush:save-attachment',
   showInFolder: 'hush:show-in-folder',
   sendImage: 'hush:send-image',

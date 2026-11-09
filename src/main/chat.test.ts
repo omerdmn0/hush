@@ -399,6 +399,65 @@ describe('ChatService — images', () => {
     expect(Buffer.compare(readEncryptedFile(b.key, fullFile(b, m.id)), Buffer.from(bytes))).toBe(0)
   })
 
+  it('cancels a download: the part is dropped, it stays cancelled after a restart, and Download starts it again', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    let cancelled = false
+    b.link.on('binary', (data) => {
+      const chunk = decodeChunk(data)
+      if (!cancelled && chunk && b.store.partSize(chunk.id) > 40_000) {
+        cancelled = true
+        b.chat.cancelTransfer(chunk.id)
+      }
+    })
+    const bytes = png(400, 300, true)
+    const m = await a.chat.sendImage(outgoing(bytes), '')
+    await until(() => transfer(b, m.id, 'cancelled'), 10_000)
+    await until(() => !a.chat.transfers.busy) // the sender stopped streaming too
+    await settle()
+    expect(b.store.partSize(m.id)).toBe(0)
+    expect(existsSync(fullFile(b, m.id))).toBe(false)
+    expect(b.chat.getMessages([m.id])[0].image?.stopped).toBe(true)
+
+    await b.stop()
+    b.start()
+    await online(a, b)
+    await settle()
+    expect(existsSync(fullFile(b, m.id))).toBe(false)
+
+    b.chat.download(m.id)
+    await until(() => existsSync(fullFile(b, m.id)), 15_000)
+    expect(Buffer.compare(readEncryptedFile(b.key, fullFile(b, m.id)), Buffer.from(bytes))).toBe(0)
+    expect(b.chat.getMessages([m.id])[0].image?.stopped).toBeUndefined()
+  })
+
+  it('cancels a send: the other side is told, and it can be resumed', async () => {
+    const [a, b] = await sides()
+    a.start()
+    b.start()
+    await online(a, b)
+    // From inside the sender: on loopback all of it can be sent before the first chunk is stored.
+    const sendBinary = a.link.sendBinary.bind(a.link)
+    let chunks = 0
+    a.link.sendBinary = (data) => {
+      if (++chunks === 40) a.chat.cancelTransfer(decodeChunk(data)!.id)
+      return sendBinary(data)
+    }
+    const m = await a.chat.sendImage(outgoing(png(400, 300, true)), '')
+    await until(() => transfer(a, m.id, 'cancelled'), 10_000)
+    await until(() => transfer(b, m.id, 'failed'), 10_000)
+    expect(a.chat.transfers.busy).toBe(false)
+    expect(a.chat.getMessages([m.id])[0].image?.stopped).toBe(true)
+    expect(existsSync(fullFile(b, m.id))).toBe(false)
+
+    a.chat.download(m.id) // Resume on the sender's side
+    expect(a.chat.getMessages([m.id])[0].image?.stopped).toBeUndefined()
+    b.chat.download(m.id)
+    await until(() => existsSync(fullFile(b, m.id)), 15_000)
+  })
+
   it('rejects a corrupted transfer after a few attempts and reports it as failed', async () => {
     const [a, b] = await sides()
     a.start()

@@ -1,5 +1,5 @@
 import { memo, useRef, useState, type ReactNode } from 'react'
-import { Ban, Check, CheckCheck, CircleAlert, Clock, Download, FileText, Image as ImageIcon, LoaderCircle, Mic, Pause, Play, ShieldAlert } from 'lucide-react'
+import { Ban, Check, CheckCheck, CircleAlert, Clock, Download, FileText, Image as ImageIcon, LoaderCircle, Mic, Pause, Play, ShieldAlert, X } from 'lucide-react'
 import { formatBytes } from '../../../../shared/files'
 import { formatClock } from '@/lib/voice'
 import type { ChatMessage, ImageTransfer, MessageStatus } from '../../../../shared/types'
@@ -17,6 +17,8 @@ export interface ImageActions {
   onRetry: (id: string) => void
   /** Start downloading a big file. */
   onDownload: (id: string) => void
+  /** Stop a download or a send (Download or Resume starts it again). */
+  onCancel: (id: string) => void
   /** Save a copy of an image or file (asks where). */
   onSave: (m: ChatMessage) => void
 }
@@ -149,8 +151,9 @@ function Bubble({
 
   if (m.image) {
     const size = thumbSize(m.image.width, m.image.height)
-    const failed = !mine && !m.image.ready && t?.state === 'failed'
-    const receiving = !mine && !m.image.ready && !failed
+    const stopped = !!m.image.stopped
+    const failed = !mine && !m.image.ready && !stopped && t?.state === 'failed'
+    const receiving = !mine && !m.image.ready && !failed && !stopped
     const sending = mine && t?.direction === 'up' && t.state === 'active'
     const pct = Math.round((t?.progress ?? 0) * 100)
     return (
@@ -173,6 +176,17 @@ function Bubble({
               <span className="h-1 w-32 overflow-hidden bg-white/20" aria-hidden="true">
                 <span className="block h-full bg-cyan shadow-[0_0_8px_var(--cyan)]" style={{ width: `${pct}%` }} />
               </span>
+              <Button variant="secondary" size="sm" className="pointer-events-auto" onClick={() => images.onCancel(m.id)}>
+                Cancel
+              </Button>
+            </div>
+          )}
+          {stopped && !mine && !m.image.ready && (
+            <div className="data absolute inset-0 grid content-center justify-items-center gap-2 bg-[rgba(4,3,10,.7)] text-text">
+              <span>DOWNLOAD CANCELLED</span>
+              <Button variant="secondary" size="sm" onClick={() => images.onDownload(m.id)}>
+                Download
+              </Button>
             </div>
           )}
           {failed && (
@@ -185,8 +199,19 @@ function Bubble({
             </div>
           )}
           {sending && (
-            <span className="data pointer-events-none absolute top-1.5 right-1.5 bg-[rgba(4,3,10,.75)] px-1.5 py-0.5 text-text">
+            <span className="data absolute top-1.5 right-1.5 flex items-center gap-1.5 bg-[rgba(4,3,10,.75)] px-1.5 py-0.5 text-text">
               SENDING {pct}%
+              <button type="button" aria-label="Cancel sending" onClick={() => images.onCancel(m.id)}>
+                <X aria-hidden="true" className="size-3.5" />
+              </button>
+            </span>
+          )}
+          {stopped && mine && (
+            <span className="data absolute top-1.5 right-1.5 flex items-center gap-2 bg-[rgba(4,3,10,.75)] px-1.5 py-1 text-text">
+              SENDING CANCELLED
+              <Button variant="secondary" size="sm" onClick={() => images.onDownload(m.id)}>
+                Resume
+              </Button>
             </span>
           )}
         </div>
@@ -318,8 +343,9 @@ function FileBubble({
 }): ReactNode {
   const f = m.file!
   const pct = Math.round((t?.progress ?? 0) * 100)
-  const failed = !mine && !f.ready && t?.state === 'failed'
-  const receiving = !mine && !f.ready && !failed && (f.autoDownload || t?.state === 'active')
+  const stopped = !!f.stopped
+  const failed = !mine && !f.ready && !stopped && t?.state === 'failed'
+  const receiving = !mine && !f.ready && !failed && !stopped && (f.autoDownload || t?.state === 'active')
   const waiting = !mine && !f.ready && !failed && !receiving
   const sending = mine && t?.direction === 'up' && t.state === 'active'
   return (
@@ -336,8 +362,19 @@ function FileBubble({
             {receiving && ` · receiving ${pct}%`}
             {sending && ` · sending ${pct}%`}
             {failed && ' · couldn’t download'}
+            {stopped && (mine ? ' · sending cancelled' : ' · download cancelled')}
           </div>
         </div>
+        {sending && (
+          <Button variant="icon" size="icon" className="size-8" aria-label={`Cancel sending ${f.name}`} onClick={() => images.onCancel(m.id)}>
+            <X className="size-4" />
+          </Button>
+        )}
+        {stopped && mine && (
+          <Button variant="secondary" size="sm" aria-label={`Resume sending ${f.name}`} onClick={() => images.onDownload(m.id)}>
+            Resume
+          </Button>
+        )}
         {f.ready ? (
           <Button variant="secondary" size="sm" aria-label={`Save ${f.name}`} onClick={() => images.onSave(m)}>
             <Download />
@@ -353,7 +390,12 @@ function FileBubble({
             Download
           </Button>
         ) : receiving ? (
-          <LoaderCircle role="img" aria-label="Receiving" className="size-5 animate-spin text-text-muted" />
+          <>
+            <LoaderCircle role="img" aria-label="Receiving" className="size-5 animate-spin text-text-muted" />
+            <Button variant="icon" size="icon" className="size-8" aria-label={`Cancel download of ${f.name}`} onClick={() => images.onCancel(m.id)}>
+              <X className="size-4" />
+            </Button>
+          </>
         ) : null}
       </div>
       {(receiving || sending) && (

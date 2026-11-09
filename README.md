@@ -144,7 +144,8 @@ can bring your history back.
 - **Pictures and files:** drag them onto the chat, paste them (Ctrl+V), or use the 📎 button.
   Pictures (PNG, JPEG, GIF, WebP up to 25 MB) show a preview — click to see full size, **Save
   image** to keep a copy. Any other file can be up to **1 GB** (pasted ones up to 25 MB).
-  Files up to 100 MB arrive by themselves; bigger ones show **Download**. Hush never opens a file:
+  Files up to 100 MB arrive by themselves; bigger ones show **Download**. A transfer in progress
+  can be cancelled from its message; **Download** or **Resume** starts it again. Hush never opens a file:
   use **Save**, then *Show in folder*. Programs (.exe, .sh, .AppImage…) are marked, and saving one
   asks first — only run what you expected.
 - **Voice notes:** with the message box empty, press the 🎙 button, talk (up to 5 minutes), then

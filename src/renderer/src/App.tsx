@@ -96,7 +96,7 @@ export default function App(): ReactNode {
   const shownCalls = useMemo(() => visibleCalls(hush.calls, oldestLoaded, hush.hasMore), [hush.calls, oldestLoaded, hush.hasMore])
   const { retryImage } = hush
   const imageActions: ImageActions = useMemo(
-    () => ({ onOpen: openViewer, onRetry: retryImage, onDownload: retryImage, onSave: saveAttachment }),
+    () => ({ onOpen: openViewer, onRetry: retryImage, onDownload: retryImage, onCancel: (id: string) => window.hush.cancelTransfer(id), onSave: saveAttachment }),
     [openViewer, retryImage, saveAttachment]
   )
 

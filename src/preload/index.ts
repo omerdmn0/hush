@@ -38,6 +38,7 @@ const api: HushApi = {
   sendVoice: (bytes, durationMs, peaks, replyTo, channel) =>
     ipcRenderer.invoke(IPC.sendFileBytes, bytes, 'Voice note.webm', '', replyTo, { durationMs, peaks }, channel),
   downloadFile: (id) => ipcRenderer.send(IPC.downloadFile, id),
+  cancelTransfer: (id) => ipcRenderer.send(IPC.cancelTransfer, id),
   saveAttachment: (id) => ipcRenderer.invoke(IPC.saveAttachment, id),
   showInFolder: (path) => ipcRenderer.send(IPC.showInFolder, path),
   retryImage: (id) => ipcRenderer.send(IPC.retryImage, id),

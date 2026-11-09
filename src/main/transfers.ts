@@ -10,6 +10,8 @@ const STALL_MS = 15_000
 const MAX_ATTEMPTS = 3
 /** Progress events at most this often per transfer. */
 const PROGRESS_EVERY_MS = 150
+/** Setting: attachments whose transfer the user cancelled. */
+const STOPPED = 'stoppedTransfers'
 
 /**
  * Moves attachments (full-size images, files, voice notes) between the two computers.
@@ -26,10 +28,14 @@ export class Transfers {
   private lastProgress = new Map<string, number>()
   /** Upload generation per image: a newer request for the same image cancels the older stream. */
   private uploads = new Map<string, number>()
+  /** Never reused, so a stream that was cancelled can't pass for a newer one. */
+  private uploadGen = 0
   /** Downloads being checked and moved into place (async for big files). */
   private finishing = new Set<string>()
   /** Big files the user asked for (others download by themselves). */
   private requested = new Set<string>()
+  /** Cancelled by the user: nothing moves until they ask for it again, even after a restart. */
+  private stopped: Set<string>
   private disposed = false
 
   constructor(
@@ -39,6 +45,7 @@ export class Transfers {
     private readonly emit: (e: HushEvent) => void,
     private readonly chunkBytes: number = CHUNK_BYTES
   ) {
+    this.stopped = new Set(db.getSetting<string[]>(STOPPED) ?? [])
     link.on('binary', (data) => this.onChunk(data))
   }
 
@@ -51,7 +58,7 @@ export class Transfers {
   want(id: string): void {
     const m = this.db.getMessage(id)
     const blob = m ? blobOf(m) : null
-    if (!m || !blob || this.store.hasFull(id, blob) || !this.automatic(m)) return
+    if (!m || !blob || this.stopped.has(id) || this.store.hasFull(id, blob) || !this.automatic(m)) return
     if (this.current === id || this.queue.includes(id) || this.finishing.has(id)) return
     this.queue.push(id)
     this.pump()
@@ -79,6 +86,7 @@ export class Transfers {
     const gone = new Set(ids)
     this.queue = this.queue.filter((x) => !gone.has(x))
     for (const id of ids) this.uploads.delete(id) // a running upload sees this and stops
+    if (ids.filter((id) => this.stopped.delete(id)).length > 0) this.db.setSetting(STOPPED, [...this.stopped])
     if (this.current && gone.has(this.current)) {
       clearTimeout(this.stallTimer)
       this.current = null
@@ -91,8 +99,47 @@ export class Transfers {
     return !m.file || !!m.file.voice || m.file.size <= AUTO_DOWNLOAD_BYTES || this.requested.has(m.id) || this.store.partSize(m.id) > 0
   }
 
-  /** User pressed Retry on a failed download, or Download on a big file. */
+  isStopped(id: string): boolean {
+    return this.stopped.has(id)
+  }
+
+  private markStopped(id: string, on: boolean): void {
+    if (this.stopped.has(id) === on) return
+    if (on) this.stopped.add(id)
+    else this.stopped.delete(id)
+    this.db.setSetting(STOPPED, [...this.stopped])
+    this.emit({ type: 'event', target: id }) // the UI reads the message again
+  }
+
+  /** User pressed Cancel on something moving in either direction. */
+  stop(id: string): void {
+    const m = this.db.getMessage(id)
+    const blob = m ? blobOf(m) : null
+    if (!blob || this.finishing.has(id)) return // already being checked: it's all here
+    if (this.uploads.delete(id)) {
+      this.markStopped(id, true)
+      this.progress(id, 'up', 'cancelled', 0, true)
+      void this.link.send({ t: 'blob-err', id })
+      return
+    }
+    if (this.store.hasFull(id, blob)) return
+    this.markStopped(id, true)
+    this.queue = this.queue.filter((x) => x !== id)
+    this.attempts.delete(id)
+    if (this.current === id) {
+      clearTimeout(this.stallTimer)
+      this.current = null
+      // A request for what comes after the last byte ends the stream, and every Hush understands it.
+      void this.link.send({ t: 'blob-req', id, offset: blob.size })
+    }
+    this.store.discardPart(id)
+    this.progress(id, 'down', 'cancelled', 0, true)
+    this.pump()
+  }
+
+  /** User pressed Retry on a failed download, Download on a big or cancelled file, or Resume on a send. */
   retry(id: string): void {
+    this.markStopped(id, false)
     this.attempts.delete(id)
     this.requested.add(id)
     this.want(id)
@@ -233,16 +280,18 @@ export class Transfers {
     const m = this.db.getMessage(id)
     const meta = m ? blobOf(m) : null
     // Any attachment we hold in full: ours, or theirs when they recover their history from us.
-    if (!meta || !this.store.hasFull(id, meta) || offset > meta.size) {
+    if (!meta || this.stopped.has(id) || !this.store.hasFull(id, meta) || offset > meta.size) {
       await this.link.send({ t: 'blob-err', id })
       return
     }
-    const gen = (this.uploads.get(id) ?? 0) + 1
+    const gen = ++this.uploadGen
     this.uploads.set(id, gen)
+    if (offset === meta.size) this.progress(id, 'up', 'done', 1, true) // they called off the download
     for (let at = offset; at < meta.size; at += this.chunkBytes) {
       if (this.uploads.get(id) !== gen) return // superseded by a newer request
       const data = this.store.readChunk(id, meta, at, this.chunkBytes)
       if (!(await this.link.sendBinary(encodeChunk(id, at, data)))) return // offline; they will resume
+      if (this.uploads.get(id) !== gen) return // cancelled while that chunk went out
       const done = at + data.length
       this.progress(id, 'up', done >= meta.size ? 'done' : 'active', done / meta.size, done >= meta.size)
     }

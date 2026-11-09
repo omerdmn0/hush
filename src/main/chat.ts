@@ -305,6 +305,11 @@ export class ChatService {
     this.transfers.retry(id)
   }
 
+  /** Stops a download or a send until the user asks for it again. */
+  cancelTransfer(id: string): void {
+    this.transfers.stop(id)
+  }
+
   /** Writes a decrypted copy of an image or file to `dest` (chosen by the user). */
   async exportAttachment(id: string, dest: string): Promise<void> {
     const m = isUuid(id) ? this.db.getMessage(id) : undefined
@@ -792,6 +797,10 @@ export class ChatService {
     }
     const view = (m: StoredMessage): ChatMessage => {
       const msg = toChatMessage(m, this.selfId, (id) => this.store.hasFull(id, blobOf(m)))
+      if (this.transfers.isStopped(m.id)) {
+        if (msg.image) msg.image.stopped = true
+        if (msg.file) msg.file.stopped = true
+      }
       if (msg.unsupported) return msg
       const state = applyEvents(m.authorId, events.get(m.id) ?? [], this.selfId)
       if (state.deleted || msg.deleted) {

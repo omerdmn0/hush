@@ -720,6 +720,10 @@ if (!app.requestSingleInstanceLock()) {
       if (typeof id === 'string') chat.download(id)
     })
 
+    ipcMain.on(IPC.cancelTransfer, (_e, id: unknown) => {
+      if (typeof id === 'string') chat.cancelTransfer(id)
+    })
+
     // Saving is the only way an attachment leaves Hush — it's never opened automatically.
     const savedPaths = new Set<string>()
     ipcMain.handle(IPC.saveAttachment, async (_e, id: unknown) => {
