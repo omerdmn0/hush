@@ -113,8 +113,9 @@ export function Composer({
     // Runs only when the mode itself changes (not on every render of the same mode).
   }, [modeKey])
 
+  // Whatever was being written before the edit comes back.
   const cancelMode = (): void => {
-    if (editing) setText('')
+    if (editing) setText(drafts.get(channel) ?? '')
     onCancelMode()
   }
 
@@ -216,8 +217,7 @@ export function Composer({
       setSending(true)
       try {
         await onEdit(editing.id, value)
-        setText('')
-        onCancelMode()
+        cancelMode()
       } catch {
         setError("The edit couldn't be saved.")
       } finally {

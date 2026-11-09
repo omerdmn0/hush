@@ -121,6 +121,7 @@ export default function App(): ReactNode {
   })
   const [shareOpen, setShareOpen] = useState(false)
   const [shareNotice, setShareNotice] = useState<string | null>(null)
+  const [screenVolume, setScreenVolume] = useState(1)
   const startShare = (choice: ShareChoice): void => {
     setShareOpen(false)
     setShareNotice(null)
@@ -277,24 +278,59 @@ export default function App(): ReactNode {
 
   const paired = !!peer && snapshot.pairing.status === 'paired'
   const channelName = snapshot.channels.find((c) => c.id === channel)?.name
+  // A call goes on while Settings is open, so its controls and shared screen stay on show there.
+  const callPanel = peer && (
+    <>
+      <CallBar
+        view={callView}
+        peerName={peer.name}
+        mics={mics}
+        micId={snapshot.settings.micId}
+        onMicChange={(micId) => {
+          void hush.updateSettings({ micId })
+          void call.switchMic(micId)
+        }}
+        onToggleMute={() => call.toggleMute()}
+        onHangUp={() => call.hangUp()}
+        onShare={() => setShareOpen(true)}
+        onStopShare={() => (setShareNotice(null), void call.stopShare())}
+        shareNotice={shareNotice}
+      />
+      {callView.peerSharing && call.remoteScreen && (
+        <ScreenView
+          stream={call.remoteScreen}
+          peerName={peer.name}
+          audio={callView.peerSharing.audio}
+          speakerId={snapshot.settings.speakerId}
+          volume={screenVolume}
+          onVolumeChange={setScreenVolume}
+        />
+      )}
+    </>
+  )
 
   return (
     <AvatarContext.Provider value={snapshot.avatars}>
     <div className="scanlines flex h-full">
       {screen === 'settings' ? (
-        <SettingsScreen
-          settings={snapshot.settings}
-          net={snapshot.net}
-          peer={peer}
-          pairing={snapshot.pairing}
-          privacy={snapshot.privacy}
-          packaged={snapshot.packaged}
-          appVersion={snapshot.appVersion}
-          onChange={hush.updateSettings}
-          onReconnect={() => window.hush.reconnect()}
-          onClose={closeSettings}
-          initialSection={settingsSection}
-        />
+        <div className="flex min-w-0 flex-1 flex-col">
+          {callPanel}
+          <div className="flex min-h-0 flex-1">
+            <SettingsScreen
+              settings={snapshot.settings}
+              net={snapshot.net}
+              peer={peer}
+              pairing={snapshot.pairing}
+              privacy={snapshot.privacy}
+              packaged={snapshot.packaged}
+              appVersion={snapshot.appVersion}
+              onChange={hush.updateSettings}
+              onReconnect={() => window.hush.reconnect()}
+              onClose={closeSettings}
+              initialSection={settingsSection}
+            />
+          </div>
+        </div>
       ) : (
         <>
           <Sidebar
@@ -347,26 +383,7 @@ export default function App(): ReactNode {
               searchButtonRef={searchButton}
             />
             {searchOpen && canSearch && peer && <SearchPanel peerName={peer.name} channels={snapshot.channels} onPick={pickResult} onClose={closeSearch} />}
-            {peer && (
-              <CallBar
-                view={callView}
-                peerName={peer.name}
-                mics={mics}
-                micId={snapshot.settings.micId}
-                onMicChange={(micId) => {
-                  void hush.updateSettings({ micId })
-                  void call.switchMic(micId)
-                }}
-                onToggleMute={() => call.toggleMute()}
-                onHangUp={() => call.hangUp()}
-                onShare={() => setShareOpen(true)}
-                onStopShare={() => (setShareNotice(null), void call.stopShare())}
-                shareNotice={shareNotice}
-              />
-            )}
-            {peer && callView.peerSharing && call.remoteScreen && (
-              <ScreenView stream={call.remoteScreen} peerName={peer.name} audio={callView.peerSharing.audio} speakerId={snapshot.settings.speakerId} />
-            )}
+            {callPanel}
             {!peer ? (
               <FirstRun ownIp={snapshot.net.ownIp} onOpenSettings={openConnection} />
             ) : snapshot.pairing.status !== 'paired' ? (

@@ -200,6 +200,7 @@ export function DeleteDialog({ message, peerName, onClose }: { message: ChatMess
             {forEveryone
               ? `“For everyone” erases it on both computers — ${peerName} sees “Message deleted”. ${message.status === 'queued' ? `It goes out the next time ${peerName} is online.` : ''}`
               : `This removes it from your computer only. ${peerName} still has it.`}
+            {forEveryone && forMe && (message.image || message.file) && ` “For me” removes your copy of the attachment, so if ${peerName} hasn’t downloaded it yet, they won’t be able to.`}
           </DialogDescription>
           {error && (
             <p role="alert" className="m-0 text-xs text-danger-text">

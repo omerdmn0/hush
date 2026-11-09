@@ -33,6 +33,7 @@ import { Keyring, type OsProtector } from './keyring'
 import { PairingService } from './pairing'
 import { blobOf, ImageStore } from './images'
 import { PeerLink } from './link'
+import { parseRange } from './range'
 import { Notifier } from './notifier'
 import { titleWithUnread } from './notifyLogic'
 import { findTailscaleIp } from './tailscale'
@@ -114,7 +115,7 @@ const osProtector: OsProtector = {
 if (process.platform === 'win32') app.setAppUserModelId('app.hush.chat')
 
 // hush-img://<message-id>/thumb|full and hush-img://avatar/self|peer serve stored images to the UI.
-protocol.registerSchemesAsPrivileged([{ scheme: 'hush-img', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
+protocol.registerSchemesAsPrivileged([{ scheme: 'hush-img', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
 
 // One Hush per data folder — a second copy would fight over the port and database.
 // Launching Hush again while it runs in the tray brings its window back instead.
@@ -1039,7 +1040,19 @@ if (!app.requestSingleInstanceLock()) {
       const bytes = host === 'avatar' ? avatars.readForDisplay(kind) : images.readForDisplay(host, kind, meta)
       if (!bytes) return new Response('Not found', { status: 404 })
       const type = kind === 'thumb' ? 'image/webp' : (meta?.mime ?? sniffImage(bytes) ?? 'application/octet-stream')
-      return new Response(new Uint8Array(bytes), { headers: { 'content-type': type } })
+      if (kind !== 'voice') return new Response(new Uint8Array(bytes), { headers: { 'content-type': type } })
+      // Audio can only jump around in a file served in parts.
+      const range = parseRange(req.headers.get('range'), bytes.length)
+      const part = range ? bytes.subarray(range.start, range.end + 1) : bytes
+      return new Response(new Uint8Array(part), {
+        status: range ? 206 : 200,
+        headers: {
+          'content-type': type,
+          'content-length': String(part.length),
+          'accept-ranges': 'bytes',
+          ...(range ? { 'content-range': `bytes ${range.start}-${range.end}/${bytes.length}` } : {})
+        }
+      })
     })
 
     tray = new HushTray(
